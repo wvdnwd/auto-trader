@@ -1,0 +1,41 @@
+---
+title: Trader Dashboard
+description: 'Live dashboard for the autonomous futures trading engine — account health, open positions, scanner ranking and risk controls.'
+labels: ['app', 'react', 'trading', 'dashboard']
+---
+
+The dashboard is the control surface for the autonomous trading engine. It polls
+the trading service every few seconds and shows what the engine is doing and why.
+
+## What it shows
+
+- **Account health** — equity, free balance, open P&L, win rate, profit factor and
+  current drawdown against its limit.
+- **Open positions** — direction, leverage, collateral and live P&L, with a
+  stop/entry/target bar showing where price sits inside the trade, plus the
+  reasons the engine took it.
+- **Scanner ranking** — every market the engine scored this cycle, with its
+  direction, regime and conviction against the entry threshold.
+- **Engine log** — a running record of every open, close and risk event.
+- **Risk controls** — the guardrails that govern sizing and leverage, editable at
+  runtime.
+
+## Controls
+
+Start and pause the loop, force an immediate scan, close any position at market,
+or reset the paper account back to its starting balance.
+
+## Running it
+
+The dashboard needs the trading service. Run both together through the platform:
+
+```bash
+bit run trader-platform
+```
+
+In development the API is proxied through the frontend origin, so no CORS setup is
+needed. In production the app calls the gateway directly through `BACKEND_URL`,
+which the platform injects.
+
+> Paper trading against live market data. No real orders are placed, and nothing
+> here is financial advice.

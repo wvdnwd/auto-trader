@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Secrets & Credentials (NEVER commit keys or API secrets!)
+.env
+*.env
+.mexc-credentials.json
+*.pem
+*.key
+
+# Bit cache & logs
+.bit/
+*.log
+logs/
+data/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,127 @@
+---
+title: Trading Service
+labels: ['trading', 'futures', 'engine', 'risk', 'express']
+description: 'Autonomous crypto futures trading engine — scans markets, picks direction, sizes positions and manages risk.'
+---
+
+The trading service is a self-contained autonomous trading engine. Every cycle it
+scans live perpetual futures markets, scores each one, opens the positions that
+clear its conviction threshold, and manages the exits of everything already open.
+
+Execution is **paper trading against live market prices** — no venue credentials,
+no real orders. The execution boundary is isolated, so replacing it with a broker
+adapter for a venue you are permitted to trade on is a contained change.
+
+## How a trade is decided
+
+The engine makes every decision on its own, in this order:
+
+1. **Which market** — the most liquid USDT perpetuals, ranked by how much they are
+   actually moving. Non-crypto contracts are excluded.
+2. **Which direction** — a blend of a trend model (EMA spread, MACD, momentum) and
+   a mean-reversion model (RSI, channel position), weighted by the detected market
+   regime. ADX scales the resulting conviction rather than voting on direction, and
+   funding rate adds a crowding bias.
+3. **Whether to trade at all** — see the entry checks below. This is what stops the
+   engine taking a position just because something moved.
+4. **How big** — the stop defines the risk, never the leverage. A risk budget is
+   derived from equity and conviction, then divided by the stop distance.
+5. **How much leverage** — the highest level that is still safe, capped so the stop
+   loss always triggers before the liquidation price, and capped again in volatile
+   markets.
+
+## Entry checks
+
+A good score is not enough. Each setup is put through named conditions, and the
+result is attached to the signal so the dashboard can show exactly why a trade was
+taken or skipped.
+
+| Check | What it asks | Effect |
+| --- | --- | --- |
+| Higher timeframe | Does the 1h trend oppose this trade? | **Veto** |
+| No exhausted move | Has price covered more than 2.5 ATR in 3 bars? | **Veto** |
+| Consistent direction | Is the regression slope going the same way? | Lowers conviction |
+| Volume confirmation | Did the last closed candle trade near its average? | Lowers conviction |
+| Room to structure | Is the nearest opposing level at least 1.2R away? | Lowers conviction |
+| Tradeable regime | Is the market something other than chop? | Lowers conviction |
+
+A setup the higher timeframe actively confirms gets a conviction bonus and keeps a
+runner in its profit ladder.
+
+## Exits
+
+Exits are staged rather than all-or-nothing. Each position carries a ladder of
+profit targets, and the engine closes a tranche at each one:
+
+- **Trending, confirmed by the 1h** — 35% at 1.2R, 35% at 2.5R, 30% at 4R.
+- **Trending, unconfirmed** — 40% at 1.2R, 60% at 2.2R.
+- **Range** — 60% at 1R, 40% at 1.8R, because price is expected to turn at the edge.
+
+The first fill moves the stop to entry, so a winner can no longer become a loser.
+Beyond the ladder, a position exits on its stop, on a trailing stop that arms at
++1R, when the scanner flips to the opposite side with conviction, on maximum age,
+or on the liquidation guard.
+
+Stops are anchored on market structure where possible: when a confirmed swing sits
+a sensible distance away, the stop goes behind that level instead of on a pure
+volatility band — price then has to break something real to take the trade out.
+
+## Risk guardrails
+
+Every entry passes portfolio gates before it is allowed: a maximum number of
+concurrent positions, a cap on total margin deployed, a maximum drawdown, and a
+daily loss limit. Exits are handled by a stop loss, a conviction-scaled target, a
+trailing stop that arms at +1R, a maximum position age, and a liquidation guard.
+A position can never lose more than the collateral behind it.
+
+## Usage
+
+```ts
+import { TradingService } from '@minecraft7900/auto-trader.trading-service';
+
+const service = TradingService.from();
+await service.init();
+
+const snapshot = await service.snapshot();
+console.log(snapshot.account.equity, snapshot.open.length);
+```
+
+Adjust the risk profile at runtime:
+
+```ts
+service.updateRisk({ baseRiskPct: 0.005, maxLeverage: 10, maxOpenPositions: 3 });
+```
+
+Score a single market directly, without the engine:
+
+```ts
+import { buildSignal, planTrade, DEFAULT_RISK } from '@minecraft7900/auto-trader.trading-service';
+
+const signal = buildSignal(ticker, candles);
+const plan = signal ? planTrade(signal, account, DEFAULT_RISK) : null;
+// plan.leverage, plan.margin, plan.stopLoss, plan.takeProfit
+```
+
+## HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/snapshot` | Account, positions, signals, events and stats in one payload |
+| `POST` | `/engine/start` · `/engine/stop` | Control the autonomous loop |
+| `POST` | `/engine/cycle` | Run a single cycle immediately |
+| `POST` | `/risk` | Update risk settings |
+| `POST` | `/positions/:id/close` | Force-close a position at market |
+| `POST` | `/simulate` | Move one market to a price and run exit management — for verifying take-profit and stop behaviour |
+| `POST` | `/reset` | Reset the paper account and wipe history |
+
+## Configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `MONGO_URL` | Injected automatically; falls back to in-memory state when absent |
+| `PAPER_START_BALANCE` | Starting paper balance, defaults to `10000` |
+| `FUTURES_API_BASE` | Market data endpoint, for pointing at another venue |
+| `AUTOSTART` | Set to `false` to boot without starting the loop |
+
+> This is not financial advice. Past behaviour of a strategy says nothing about
+> its future results.

@@ -1,0 +1,41 @@
+---
+title: SignalChart
+description: Candlestick chart of a scanned market with the swing, golden zone and a plain-language explanation of what the engine is waiting for.
+labels: ['trading', 'chart', 'signal']
+---
+
+`SignalChart` draws the exact candles the strategy scores a market on, with the
+same levels the scanner list summarises as text overlaid on top: the recent
+swing high/low, the Fibonacci golden zone (0.382–0.618 retracement), and the
+current price. Below the chart it lists every entry condition the market has
+not cleared yet, in plain language — this is what a "Grafiek" button on a
+signal row opens.
+
+### Ready to enter
+
+Every check has cleared — the panel reports the trade can fire on the next
+scan instead of listing blockers.
+
+```jsx live
+<ReadyToEnter />
+```
+
+### Waiting for higher-timeframe confirmation
+
+The most common wait state: the higher timeframe is not opposed to the trade,
+but it has not confirmed it either (e.g. CHOP instead of a trend). The panel
+spells out exactly which regime it needs to see before the mandatory alignment
+gate opens.
+
+```jsx live
+<WaitingForConfirmation />
+```
+
+### Not enough history
+
+When there are too few candles to compute a signal, the chart shows a plain
+empty state instead of guessing.
+
+```jsx live
+<InsufficientHistory />
+```

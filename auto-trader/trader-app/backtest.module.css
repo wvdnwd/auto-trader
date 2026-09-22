@@ -1,0 +1,525 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.intro h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  letter-spacing: -0.02em;
+}
+
+.intro p {
+  margin: 0.3rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  max-width: 62ch;
+  line-height: 1.5;
+}
+
+/* ---------- form ---------- */
+.form {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.fieldRow {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+  align-items: end;
+}
+
+@media (min-width: 768px) {
+  .fieldRow {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.fieldLabel {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.fieldLabel em {
+  font-style: normal;
+  color: var(--accent);
+  margin-left: 0.35rem;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chip {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.38rem 0.7rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 32px;
+  transition: all 0.15s ease;
+}
+
+.chip:hover:not(:disabled) {
+  border-color: #2b3a5c;
+  color: var(--text);
+}
+
+.chipOn {
+  background: rgba(91, 140, 255, 0.16);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.select,
+.input {
+  appearance: none;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 0.6rem 0.7rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  min-height: 44px;
+  width: 100%;
+  /* Without this the number input adds its spinner width on top of 100%, so it
+     sits taller and wider than the selects beside it. */
+  box-sizing: border-box;
+}
+
+.select:focus,
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.runBtn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: rgba(91, 140, 255, 0.16);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.7rem 1.1rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 44px;
+  align-self: flex-start;
+}
+
+.runBtn:hover:not(:disabled) {
+  background: rgba(91, 140, 255, 0.26);
+}
+
+.runBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- progress ---------- */
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.progressBar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.progressBar span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  transition: width 0.4s ease;
+}
+
+.progressText {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.error {
+  background: rgba(255, 84, 112, 0.1);
+  border: 1px solid rgba(255, 84, 112, 0.35);
+  color: var(--red);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+  font-size: 0.82rem;
+}
+
+.empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+  padding: 1.5rem;
+  text-align: center;
+  background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ---------- summary ---------- */
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.verdict {
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.verdict strong {
+  font-size: 0.9rem;
+  line-height: 1.45;
+  font-weight: 600;
+}
+
+.verdict span {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.good {
+  border-color: rgba(34, 211, 138, 0.4);
+  background: rgba(34, 211, 138, 0.08);
+}
+
+.bad {
+  border-color: rgba(255, 84, 112, 0.4);
+  background: rgba(255, 84, 112, 0.07);
+}
+
+.neutral {
+  border-color: rgba(255, 176, 46, 0.35);
+  background: rgba(255, 176, 46, 0.07);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.7rem;
+}
+
+@media (min-width: 768px) {
+  .metrics {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (min-width: 1100px) {
+  .metrics {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+.metric {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.8rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.metricLabel {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.metricValue {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.metricSub {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.up { color: var(--green); }
+.down { color: var(--red); }
+.dim { color: var(--muted); }
+
+/* ---------- chart ---------- */
+.chartBox {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem;
+}
+
+.chartHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.chartHead b {
+  color: var(--text);
+}
+
+.chart {
+  width: 100%;
+  height: 200px;
+  display: block;
+}
+
+@media (min-width: 768px) {
+  .chart {
+    height: 260px;
+  }
+}
+
+.gridLine {
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.breakEven {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  opacity: 0.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.axisLabel {
+  fill: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- exits ---------- */
+.exits h3,
+.tradesBox h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+  letter-spacing: -0.01em;
+}
+
+.exitGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem;
+}
+
+.exitCell {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.7rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.exitName {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.exitCount {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.exitCell span:last-child {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* ---------- monthly consistency ---------- */
+.monthsNote {
+  margin: -0.2rem 0 0.8rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.monthBars {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(58px, 1fr);
+  gap: 0.4rem;
+  overflow-x: auto;
+  padding-bottom: 0.3rem;
+}
+
+.monthBar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.monthBar > span:nth-child(2) {
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.monthTrack {
+  width: 100%;
+  height: 76px;
+  display: flex;
+  align-items: flex-end;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.monthTrack span {
+  display: block;
+  width: 100%;
+}
+
+.monthUp {
+  background: linear-gradient(180deg, rgba(34, 211, 138, 0.85), rgba(34, 211, 138, 0.35));
+}
+
+.monthDown {
+  background: linear-gradient(180deg, rgba(255, 84, 112, 0.85), rgba(255, 84, 112, 0.35));
+}
+
+.monthName {
+  font-size: 0.66rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ---------- optimizer ---------- */
+.paramGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.6rem;
+}
+
+.applyRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.warnText {
+  font-size: 0.78rem;
+  color: var(--amber);
+}
+
+/* ---------- trade table ---------- */
+.tradeScroll {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: auto;
+  max-height: 420px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  min-width: 560px;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 700;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover {
+  background: var(--panel-2);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.long {
+  color: var(--green);
+  font-weight: 700;
+  font-size: 0.7rem;
+}
+
+.short {
+  color: var(--red);
+  font-weight: 700;
+  font-size: 0.7rem;
+}

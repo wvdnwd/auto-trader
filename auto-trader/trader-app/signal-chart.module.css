@@ -1,0 +1,428 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.empty {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.gridLine {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.axisLabel {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
+.goldenZone {
+  fill: var(--amber);
+  opacity: 0.12;
+}
+
+.swingLine {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  opacity: 0.7;
+}
+
+.priceLine {
+  stroke: var(--text);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  opacity: 0.6;
+}
+
+.fibRetracement {
+  stroke: var(--amber);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.55;
+}
+
+.fibExtension {
+  stroke: var(--green);
+  stroke-width: 1;
+  stroke-dasharray: 1 3;
+  opacity: 0.5;
+}
+
+.fibLabel {
+  fill: var(--muted);
+  font-size: 9px;
+}
+
+.wick {
+  stroke-width: 1;
+}
+
+.body {
+  stroke-width: 0;
+}
+
+.up .wick,
+.up .body {
+  stroke: var(--green);
+  fill: var(--green);
+}
+
+.down .wick,
+.down .body {
+  stroke: var(--red);
+  fill: var(--red);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.swatchGolden {
+  background: var(--amber);
+  opacity: 0.5;
+}
+
+.swatchSwing {
+  background: var(--accent);
+}
+
+.swatchPrice {
+  background: var(--text);
+}
+
+.swatchFibR {
+  background: var(--amber);
+  opacity: 0.6;
+}
+
+.swatchFibE {
+  background: var(--green);
+  opacity: 0.5;
+}
+
+.waiting {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+}
+
+.waiting h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+.waiting ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.waiting li {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.ready {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--green);
+}
+
+.tpLine {
+  stroke: #22c55e;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
+.tpLineHit {
+  stroke: #10b981;
+  stroke-width: 1.5;
+  opacity: 0.4;
+}
+
+.slLine {
+  stroke: #ef4444;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
+.tpLabel {
+  fill: #4ade80;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.slLabel {
+  fill: #f87171;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.trajectoryGlow {
+  fill: none;
+  stroke-width: 6;
+  opacity: 0.25;
+}
+
+.trajectoryPath {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-dasharray: 5 3;
+  animation: dash 20s linear infinite;
+}
+
+.trajectoryPathLong {
+  stroke: #22c55e;
+}
+
+.trajectoryPathShort {
+  stroke: #ef4444;
+}
+
+.trajectoryGlowLong {
+  stroke: #22c55e;
+}
+
+.trajectoryGlowShort {
+  stroke: #ef4444;
+}
+
+.trajectoryDot {
+  stroke-width: 1.5;
+  stroke: #ffffff;
+}
+
+.trajectoryDotLong {
+  fill: #22c55e;
+}
+
+.trajectoryDotShort {
+  fill: #ef4444;
+}
+
+.swatchTp {
+  background: #22c55e;
+}
+
+.swatchSl {
+  background: #ef4444;
+}
+
+.swatchTrajectory {
+  background: linear-gradient(90deg, #22c55e, #38bdf8);
+}
+
+.projectionCard {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.8rem;
+  font-size: 0.82rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.projectionCardShort {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.projectionTitle {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.projectionTargets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+}
+
+.projectionBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.fibCard {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.8rem;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--text);
+}
+
+.fibTitle {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #fbbf24;
+}
+
+.fibDetails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.fibBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: -1000;
+  }
+}
+
+@media (max-width: 640px) {
+  .legend {
+    gap: 0.6rem;
+  }
+}
+
+/* ---------- Layer Filter Toolbar ---------- */
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+  margin-bottom: 0.2rem;
+}
+
+.filterTitle {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-weight: 600;
+  margin-right: 0.2rem;
+}
+
+.filterBtn {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 500;
+  border-radius: 6px;
+  padding: 0.22rem 0.55rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  transition: all 0.15s ease;
+}
+
+.filterBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.filterBtnActive {
+  background: rgba(91, 140, 255, 0.16);
+  border-color: var(--accent);
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+/* ---------- Pill Badges in SVG ---------- */
+.tpBadgeBg {
+  fill: #0c2317;
+  stroke: #22c55e;
+  stroke-width: 1;
+}
+
+.tpBadgeBgHit {
+  fill: #061a10;
+  stroke: #10b981;
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.slBadgeBg {
+  fill: #290c0c;
+  stroke: #ef4444;
+  stroke-width: 1;
+}
+
+.tpBadgeText {
+  fill: #4ade80;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.slBadgeText {
+  fill: #f87171;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.trajectoryLabelBg {
+  fill: #080c16;
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-width: 0.8;
+}
+
+.trajectoryLabelText {
+  font-size: 9px;
+  font-weight: 700;
+}
+
