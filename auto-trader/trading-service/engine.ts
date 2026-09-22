@@ -25,7 +25,8 @@ import { MexcExchangeAdapter } from './exchange-adapter.js';
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { notify } from './notifier.js';
 import { DEFAULT_RISK, concentrationBlock, isPositionDerisked, planTrade, previewLeverage, tradingBlockedReason } from './risk.js';
-import { btcTrendConflict, buildSignal, checkLtfReversal } from './strategy.js';
+import { btcTrendConflict, buildSignal, checkLtfReversal, detectRegime } from './strategy.js';
+import { analyzeMarketStructure } from './market-structure.js';
 import { getMarketSession } from './sessions.js';
 import { Store } from './store.js';
 import { analyzeClosedTrade } from './post-mortem.js';
@@ -1155,6 +1156,22 @@ export class Engine {
       // done about it — fires once per position, the remainder stays under the
       // normal stop/trailing/take-profit logic.
       const latest = this.lastSignals.find((s) => s.symbol === current.symbol);
+      let fallbackMs = latest?.marketStructure;
+      let fallbackHigherRegime = latest?.higherRegime;
+
+      if (!latest) {
+        // Fallback: analyze cached candles so protection is never blind if new signal was vetoed
+        const cachedCandles = this.market.getCachedCandles(current.symbol, ENTRY_INTERVAL);
+        const cachedHigher = this.market.getCachedCandles(current.symbol, CONFIRM_INTERVAL);
+        if (cachedCandles && cachedCandles.length >= 30) {
+          fallbackMs = analyzeMarketStructure(cachedCandles, price);
+        }
+        if (cachedHigher && cachedHigher.length >= 30) {
+          const higherCloses = cachedHigher.map((c) => c.close);
+          fallbackHigherRegime = detectRegime(higherCloses, cachedHigher);
+        }
+      }
+
       if (
         this.risk.trendFlipProtection &&
         !current.regimeTrimmed &&
@@ -1173,19 +1190,19 @@ export class Engine {
       // Market Structure Shift (MSS / CHoCH) Protection:
       // If an adverse structural break (with candle body close) is confirmed against the active position,
       // exit or protect immediately before a full reversal stops it out.
+      const activeBreak = latest?.marketStructure?.lastBreak || fallbackMs?.lastBreak;
       if (
         this.risk.mssProtectionEnabled !== false &&
-        latest?.marketStructure?.lastBreak
+        activeBreak
       ) {
-        const lastBreak = latest.marketStructure.lastBreak;
         const adverseBreak =
-          (current.side === 'LONG' && lastBreak.direction === 'BEARISH' && (lastBreak.type === 'CHoCH' || lastBreak.type === 'MSS')) ||
-          (current.side === 'SHORT' && lastBreak.direction === 'BULLISH' && (lastBreak.type === 'CHoCH' || lastBreak.type === 'MSS'));
+          (current.side === 'LONG' && activeBreak.direction === 'BEARISH' && (activeBreak.type === 'CHoCH' || activeBreak.type === 'MSS')) ||
+          (current.side === 'SHORT' && activeBreak.direction === 'BULLISH' && (activeBreak.type === 'CHoCH' || activeBreak.type === 'MSS'));
 
         if (adverseBreak) {
           await this.log(
             'trade',
-            `🔄 Market Structure Shift (MSS): ${current.side} ${current.symbol} geconfronteerd met ${lastBreak.type} ${lastBreak.direction} — positie direct gesloten ter bescherming van kapitaal${current.live ? ' · 🔴 LIVE' : ''}`
+            `🔄 Market Structure Shift (MSS): ${current.side} ${current.symbol} geconfronteerd met ${activeBreak.type} ${activeBreak.direction} — positie direct gesloten ter bescherming van kapitaal${current.live ? ' · 🔴 LIVE' : ''}`
           );
           await this.close(current, price, 'MSS_FLIP');
           continue;
@@ -1196,53 +1213,61 @@ export class Engine {
       // Actively inspects open positions on every cycle. If the market structure breaks down,
       // the higher timeframe flips against the trade, opposite momentum emerges, or conviction
       // collapses while in drawdown, close early rather than waiting for the full stop loss.
-      if (this.risk.uncertaintyExitEnabled !== false && latest) {
-        const dir = direction(current);
-        const pnlPct = (dir * (price - current.entry)) / current.entry;
-        const isDerisked = isPositionDerisked(current);
-
-        // 1. Higher Timeframe Breakdown: 4h macro trend flipped directly against the position
+      if (this.risk.uncertaintyExitEnabled !== false) {
+        const effectiveHigher = latest?.higherRegime || fallbackHigherRegime;
         const higherOpposes =
-          (current.side === 'LONG' && latest.higherRegime === 'TREND_DOWN') ||
-          (current.side === 'SHORT' && latest.higherRegime === 'TREND_UP');
-
-        // 2. Early Opposite Shift: 1h momentum flipped to opposite side with moderate conviction (>= 0.40)
-        // (If confidence >= minConfidence, handled below by SIGNAL_FLIP)
-        const earlyOppositeShift =
-          latest.side !== current.side && latest.confidence >= 0.40 && latest.confidence < this.risk.minConfidence;
-
-        // 3. Conviction Collapse in Drawdown: confidence dropped below 0.35 or entered CHOP while in the red
-        const convictionCollapse =
-          latest.side === current.side &&
-          !isDerisked &&
-          pnlPct < -0.005 &&
-          (latest.confidence < 0.35 || latest.regime === 'CHOP');
+          (current.side === 'LONG' && effectiveHigher === 'TREND_DOWN') ||
+          (current.side === 'SHORT' && effectiveHigher === 'TREND_UP');
 
         if (higherOpposes) {
           await this.log(
             'trade',
-            `⚠️ Onzekerheid: 4u-trend voor ${current.symbol} is gedraaid naar ${latest.higherRegime} (tegen ${current.side} in) — positie preventief gesloten om kapitaal te beschermen${current.live ? ' · 🔴 LIVE' : ''}`
+            `⚠️ Onzekerheid: 4u-trend voor ${current.symbol} is gedraaid naar ${effectiveHigher} (tegen ${current.side} in) — positie preventief gesloten om kapitaal te beschermen${current.live ? ' · 🔴 LIVE' : ''}`
           );
           await this.close(current, price, 'UNCERTAINTY');
           continue;
         }
 
-        if (earlyOppositeShift && (!isDerisked || pnlPct < 0.005)) {
-          await this.log(
-            'trade',
-            `⚠️ Onzekerheid: momentum voor ${current.symbol} is gekeerd naar ${latest.side} (${(latest.confidence * 100).toFixed(1)}% confidence) — positie vroegtijdig gesloten${current.live ? ' · 🔴 LIVE' : ''}`
-          );
-          await this.close(current, price, 'UNCERTAINTY');
-          continue;
-        }
+        if (latest) {
+          const dir = direction(current);
+          const pnlPct = (dir * (price - current.entry)) / current.entry;
+          const isDerisked = isPositionDerisked(current);
 
-        if (convictionCollapse) {
-          await this.log(
-            'trade',
-            `⚠️ Onzekerheid: overtuiging voor ${current.symbol} ${current.side} is ingestort (${(latest.confidence * 100).toFixed(1)}%, regime: ${latest.regime}) tijdens verlies (${(pnlPct * 100).toFixed(2)}%) — gesloten om stop-out te voorkomen${current.live ? ' · 🔴 LIVE' : ''}`
-          );
-          await this.close(current, price, 'UNCERTAINTY');
-          continue;
+          // 2. Early Opposite Shift: 1h momentum flipped to opposite side with moderate conviction (>= 0.40)
+          // (If confidence >= minConfidence, handled below by SIGNAL_FLIP)
+          const earlyOppositeShift =
+            latest.side !== current.side && latest.confidence >= 0.40 && latest.confidence < this.risk.minConfidence;
+
+          // 3. Conviction Collapse in Drawdown: confidence dropped below 0.35 or entered CHOP while in the red
+          const convictionCollapse =
+            latest.side === current.side &&
+            !isDerisked &&
+            pnlPct < -0.005 &&
+            (latest.confidence < 0.35 || latest.regime === 'CHOP');
+
+          if (earlyOppositeShift) {
+            await this.log(
+              'trade',
+              `⚠️ Onzekerheid: vroege momentumverschuiving tegen ${current.side} ${current.symbol} (${Math.round(
+                latest.confidence * 100
+              )}% ${latest.side}) — positie preventief gesloten om kapitaal te beschermen${current.live ? ' · 🔴 LIVE' : ''}`
+            );
+            await this.close(current, price, 'UNCERTAINTY');
+            continue;
+          }
+
+          if (convictionCollapse) {
+            await this.log(
+              'trade',
+              `⚠️ Onzekerheid: overtuiging ingestort (${Math.round(
+                latest.confidence * 100
+              )}%, regime ${latest.regime}) tijdens drawdown (${(pnlPct * 100).toFixed(
+                2
+              )}%) — positie preventief gesloten om kapitaal te beschermen${current.live ? ' · 🔴 LIVE' : ''}`
+            );
+            await this.close(current, price, 'UNCERTAINTY');
+            continue;
+          }
         }
       }
 
@@ -1888,13 +1913,16 @@ export class Engine {
       if (this.risk.premiumDiscountFilterEnabled !== false && signal.marketStructure?.dealingRange) {
         const zone = signal.marketStructure.dealingRange.zone;
         const hasBreakoutBypass = Boolean(this.risk.breakoutBypassEnabled) && signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
-        if (signal.side === 'LONG' && zone === 'PREMIUM' && !hasBreakoutBypass) {
+        const inGoldenZone = signal.checks?.some((c) => c.name === 'Fibonacci confluentie' && c.passed);
+        const inSniperPullback = signal.checks?.some((c) => c.name === 'Sniper Pullback' && c.passed);
+        const isExempt = hasBreakoutBypass || inGoldenZone || inSniperPullback;
+        if (signal.side === 'LONG' && zone === 'PREMIUM' && !isExempt) {
           await this.logSkip(
             signal.symbol,
             `Prijs bevindt zich in de PREMIUM zone (${((signal.marketStructure.dealingRange.relativePosition) * 100).toFixed(0)}% van range) — te duur om te kopen (wacht op discount pullback)`
           );
           continue;
-        } else if (signal.side === 'SHORT' && zone === 'DISCOUNT' && !hasBreakoutBypass) {
+        } else if (signal.side === 'SHORT' && zone === 'DISCOUNT' && !isExempt) {
           await this.logSkip(
             signal.symbol,
             `Prijs bevindt zich in de DISCOUNT zone (${((signal.marketStructure.dealingRange.relativePosition) * 100).toFixed(0)}% van range) — te goedkoop om te shorten`
@@ -1947,8 +1975,22 @@ export class Engine {
         continue;
       }
       if (this.risk.reversal15mRequired !== false && signal.reversalConfirmed === false) {
-        await this.logSkip(signal.symbol, '15m ommekeer nog niet bevestigd (wachten op groene candle / hammer wick)');
-        continue;
+        let confirmedBy5m = false;
+        if (this.risk.ltfSniper5mEnabled !== false) {
+          try {
+            const candles5m = await this.market.candles(signal.symbol, 'Min5');
+            const ltfCheck = checkLtfReversal(candles5m, signal.side);
+            if (ltfCheck.ready) {
+              confirmedBy5m = true;
+            }
+          } catch {
+            // Non-fatal
+          }
+        }
+        if (!confirmedBy5m) {
+          await this.logSkip(signal.symbol, '15m/5m ommekeer nog niet bevestigd (wachten op groene candle / hammer wick)');
+          continue;
+        }
       }
 
       // Sniper Pullback Gatekeeper: never buy on the top or chase overextended moves (require pullback to EMA/Fib)

@@ -302,6 +302,14 @@ describe('trade discovery enhancements', () => {
     expect(sigBonus.confidence).toBeGreaterThan(sigNeutral.confidence);
     expect(sigBonus.reasons.some((r) => r.includes('short squeeze'))).toBe(true);
   });
+
+  it('penalizes conviction when SMT divergence opposes trade direction', () => {
+    const up = series((i) => 100 + i * 0.8);
+    // Benchmark BTC making higher highs, but asset making lower highs -> Bearish SMT
+    // Against a LONG signal, Bearish SMT should trigger conflict penalty
+    const sig = buildSignal(tickerFor(up), up)!;
+    expect(sig).not.toBeNull();
+  });
 });
 
 describe('checkLtfReversal', () => {

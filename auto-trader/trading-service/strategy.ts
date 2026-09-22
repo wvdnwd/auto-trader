@@ -518,7 +518,42 @@ export function buildSignal(
   });
 
   // Hard vetoes: these kill the setup regardless of how good the score looks.
-  if (higherOpposes || chasing) return null;
+  // 1. Higher timeframe opposes
+  // 2. Chasing an exhausted spike
+  // 3. Structural Conflict: an adverse Market Structure Shift (MSS/CHoCH) with displacement
+  //    directly opposes the setup. Never fight fresh institutional displacement breaks!
+  const structuralConflict =
+    Boolean(marketStructure.lastBreak?.displacement) &&
+    marketStructure.lastBreak?.direction !== (side === 'LONG' ? 'BULLISH' : 'BEARISH') &&
+    (marketStructure.lastBreak?.type === 'MSS' || marketStructure.lastBreak?.type === 'CHoCH');
+
+  if (higherOpposes || chasing || structuralConflict) return null;
+
+  // Check for active conflicting readings across independent methods:
+  const opposingSmt = Boolean(
+    marketStructure.smtDivergence &&
+      marketStructure.smtDivergence.type !== (side === 'LONG' ? 'BULLISH' : 'BEARISH')
+  );
+  const opposingRsi = Boolean(
+    rsiDiv && rsiDiv !== (side === 'LONG' ? 'BULLISH' : 'BEARISH')
+  );
+  const opposingStructure = Boolean(
+    (side === 'LONG' && marketStructure.trend === 'BEARISH') ||
+      (side === 'SHORT' && marketStructure.trend === 'BULLISH')
+  );
+
+  // Count how many independent reading methods actively contradict the proposed signal
+  let contradictionCount = 0;
+  if (opposingSmt) contradictionCount++;
+  if (opposingRsi) contradictionCount++;
+  if (opposingStructure) contradictionCount++;
+
+  // If 2 or more major methods actively contradict the proposed signal, suppress it (contradictory readings)
+  if (contradictionCount >= 2) return null;
+
+  // Single method conflict penalty: scale conviction down if SMT opposes
+  const smtPenalty = opposingSmt ? 0.85 : 1;
+  const contradictionPenalty = 1;
 
   // Soft failures scale the conviction down instead of blocking. Fibonacci
   // confluence, liquidity sweep, volume spurt, session info, and SMC structure checks
@@ -567,11 +602,19 @@ export function buildSignal(
       smcBonus *
       structureBonus *
       smtBonus *
-      pocBonus
+      pocBonus *
+      smtPenalty *
+      contradictionPenalty
   );
   if (!Number.isFinite(confidence)) return null;
 
   const priorityReasons: string[] = [`Regime ${regime} (1u: ${higherRegime})`];
+  if (opposingSmt && marketStructure.smtDivergence) {
+    priorityReasons.push(`⚠️ Tegenstrijdige SMT (${marketStructure.smtDivergence.reason})`);
+  }
+  if (contradictionCount >= 2) {
+    priorityReasons.push('⚠️ Tegenstrijdige indicatoren verminderen convictie');
+  }
   if (marketStructure.imbalanceScalp?.eligible && marketStructure.imbalanceScalp.side === side) {
     priorityReasons.push(
       `Imbalance Scalp: ${marketStructure.imbalanceScalp.targetReason} (R:R ${marketStructure.imbalanceScalp.rrEstimate})`
