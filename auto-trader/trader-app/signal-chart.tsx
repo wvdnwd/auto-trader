@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import styles from './signal-chart.module.css';
 import { fetchChart } from './api.js';
 import { pct, price as fmtPrice, shortDate } from './format.js';
-import type { Candle, ChartData, Position, Signal, TradePlan } from './types.js';
+import type { Candle, ChartData, LiveExchangePosition, Position, Signal, TradePlan } from './types.js';
 
 export type TimeframeKey = 'Min5' | 'Min15' | 'Min60' | 'Hour4';
 
@@ -22,7 +22,7 @@ export type SignalChartProps = {
   /** Contract symbol, e.g. `BTC_USDT`, used only for the aria-label. */
   symbol: string;
   /** Active open position for this symbol, if any. */
-  position?: Position | null;
+  position?: Position | LiveExchangePosition | null;
   /** Planned trade with TP ladder and SL, if computable. */
   plannedTrade?: TradePlan | null;
   /** Initial timeframe key (defaults to 'Min60'). */
@@ -124,13 +124,18 @@ export function SignalChart({
 
     // Determine entry reference price
     const lastClose = recent[recent.length - 1]?.close;
-    const rawEntry = effectivePosition?.entry ?? effectivePlannedTrade?.entry ?? effectiveSignal?.price ?? lastClose;
+    const posEntry = effectivePosition
+      ? ('entryPrice' in effectivePosition ? effectivePosition.entryPrice : effectivePosition.entry)
+      : undefined;
+    const rawEntry = posEntry ?? effectivePlannedTrade?.entry ?? effectiveSignal?.price ?? lastClose;
     const entryPrice = Number.isFinite(rawEntry) && rawEntry > 0 ? rawEntry : lastClose;
     const side = effectivePosition?.side ?? effectivePlannedTrade?.side ?? effectiveSignal?.side ?? 'LONG';
     const dir = side === 'LONG' ? 1 : -1;
 
     // Determine Stop Loss
-    let slPrice: number | undefined = effectivePosition?.stopLoss ?? effectivePlannedTrade?.stopLoss;
+    let slPrice: number | undefined =
+      (effectivePosition && 'stopLoss' in effectivePosition ? effectivePosition.stopLoss : undefined) ??
+      effectivePlannedTrade?.stopLoss;
     if (slPrice === undefined && effectiveSignal && Number.isFinite(effectiveSignal.price) && effectiveSignal.price > 0) {
       const stopDist = Math.max(0.015, (effectiveSignal.atrPct || 0.02) * 1.5);
       slPrice = effectiveSignal.price * (1 - dir * stopDist);
@@ -271,9 +276,10 @@ export function SignalChart({
     const isPriceInZone =
       goldenLow !== undefined && goldenHigh !== undefined && lastClose >= goldenLow && lastClose <= goldenHigh;
     const isWaitingPullback =
-      side === 'LONG'
+      !effectivePosition &&
+      (side === 'LONG'
         ? goldenHigh !== undefined && lastClose > goldenHigh
-        : goldenLow !== undefined && lastClose < goldenLow;
+        : goldenLow !== undefined && lastClose < goldenLow);
 
     const waitTopY = goldenHigh !== undefined && inRange(y(goldenHigh)) ? y(goldenHigh) : undefined;
     const waitBottomY = goldenLow !== undefined && inRange(y(goldenLow)) ? y(goldenLow) : undefined;
@@ -548,6 +554,9 @@ export function SignalChart({
             <span>
               <b>Fibonacci Analyse ({chart.fibDirection === 'UP' ? 'Opwaartse impuls' : 'Neerwaartse impuls'}):</b>{' '}
               {(() => {
+                if (effectivePosition) {
+                  return `🎯 Positie is ACTIEF (Entry: ${fmtPrice(chart.entryPrice)}) — pullback naar waarde is voltooid, trade koerst richting winstdoelen.`;
+                }
                 const p = chart.lastClose || effectiveSignal?.price || 0;
                 if (chart.isPriceInZone) {
                   return '🎯 Koers bevindt zich nu in de Golden Zone (0.382–0.618) — sterke reactiezone!';
@@ -958,20 +967,24 @@ export function SignalChart({
           </span>
           <span
             className={`${styles.howAndWhatStatusBadge} ${
-              notes.length === 0
+              effectivePosition
                 ? styles.statusReady
-                : chart.isWaitingPullback
-                  ? styles.statusWaiting
-                  : styles.statusWaiting
+                : notes.length === 0
+                  ? styles.statusReady
+                  : chart.isWaitingPullback
+                    ? styles.statusWaiting
+                    : styles.statusWaiting
             }`}
           >
-            {notes.length === 0
-              ? '🎯 Gereed voor instap'
-              : chart.isWaitingPullback
-                ? '⏳ Wacht op pullback'
-                : chart.isPriceInZone
-                  ? '⏱️ Wacht op trigger in zone'
-                  : '⏳ Wacht op voorwaarden'}
+            {effectivePosition
+              ? '🚀 Positie Actief'
+              : notes.length === 0
+                ? '🎯 Gereed voor instap'
+                : chart.isWaitingPullback
+                  ? '⏳ Wacht op pullback'
+                  : chart.isPriceInZone
+                    ? '⏱️ Wacht op trigger in zone'
+                    : '⏳ Wacht op voorwaarden'}
           </span>
         </div>
 
@@ -979,7 +992,20 @@ export function SignalChart({
           {(() => {
             const sideName = isLong ? 'LONG (Koop)' : 'SHORT (Verkoop)';
             const conf = effectiveSignal ? pct(effectiveSignal.confidence, 0) : '—';
-            const lev = effectiveSignal?.plannedLeverage ? `${effectiveSignal.plannedLeverage}x` : '5x';
+            const lev = effectivePosition
+              ? `${effectivePosition.leverage}x`
+              : effectiveSignal?.plannedLeverage
+                ? `${effectiveSignal.plannedLeverage}x`
+                : '5x';
+
+            if (effectivePosition) {
+              const pnlVal = effectivePosition.unrealisedPnl;
+              const pnlStr =
+                pnlVal !== undefined
+                  ? ` (Ongerealiseerde winst/verlies: ${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)})`
+                  : '';
+              return `De ${sideName} positie op ${symbol.replace('_', '/')} is actief geopend op ${fmtPrice(chart.entryPrice)} met ${lev} hefboom${pnlStr}. De instap-pullback naar steun/waarde is reeds succesvol voltooid. De trade koerst nu richting TP1 (${chart.tpLines[0] ? fmtPrice(chart.tpLines[0].price) : '—'}) en TP2 (${chart.tpLines[1] ? fmtPrice(chart.tpLines[1].price) : '—'}) met stop-loss beveiliging op ${chart.slLine ? fmtPrice(chart.slLine.price) : '—'}.`;
+            }
             if (notes.length === 0) {
               return `De bot ziet een sterke ${sideName} kans met ${conf} overtuiging (${lev} hefboom). Alle marktstructuur- en momentumvoorwaarden zijn vervuld. Zodra de scanner de volgende cyclus draait, kan de order direct geactiveerd worden.`;
             }
@@ -999,15 +1025,17 @@ export function SignalChart({
               📍 <b>1. Wachtzone & Prijsactie</b>
             </span>
             <p className={styles.howAndWhatItemDesc}>
-              {chart.goldenLow !== undefined && chart.goldenHigh !== undefined
-                ? `Golden Zone: ${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)} (0.382–0.618 Fib). ${
-                    chart.isPriceInZone
-                      ? 'Koers is momenteel in de zone.'
-                      : chart.isWaitingPullback
-                        ? `Wacht op ${isLong ? 'daling' : 'stijging'} van ${Math.abs(((chart.lastClose - (isLong ? chart.goldenHigh : chart.goldenLow)) / chart.lastClose) * 100).toFixed(1)}% naar de zone.`
-                        : 'Buiten de zone.'
-                  }`
-                : `Huidige prijs is ${fmtPrice(chart.lastClose)}. Wacht op swingstructuur.`}
+              {effectivePosition
+                ? `Positie is reeds geopend op ${fmtPrice(chart.entryPrice)}. De instap-dip/pullback is voltooid en de trade is nu actief in beheer.`
+                : chart.goldenLow !== undefined && chart.goldenHigh !== undefined
+                  ? `Golden Zone: ${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)} (0.382–0.618 Fib). ${
+                      chart.isPriceInZone
+                        ? 'Koers is momenteel in de zone.'
+                        : chart.isWaitingPullback
+                          ? `Wacht op ${isLong ? 'daling' : 'stijging'} van ${Math.abs(((chart.lastClose - (isLong ? chart.goldenHigh : chart.goldenLow)) / chart.lastClose) * 100).toFixed(1)}% naar de zone.`
+                          : 'Buiten de zone.'
+                    }`
+                  : `Huidige prijs is ${fmtPrice(chart.lastClose)}. Wacht op swingstructuur.`}
             </p>
           </div>
 

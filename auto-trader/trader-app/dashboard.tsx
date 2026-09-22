@@ -1045,7 +1045,11 @@ export function Dashboard() {
                   candles={chart.candles}
                   signal={chart.signal}
                   symbol={chart.symbol}
-                  position={chart.position || snap?.open?.find((p) => p.symbol === chart.symbol)}
+                  position={
+                    chart.position ||
+                    snap?.open?.find((p) => p.symbol === chart.symbol) ||
+                    snap?.exchangeAccount?.open?.find((p) => p.symbol === chart.symbol)
+                  }
                   plannedTrade={chart.plannedTrade}
                 />
               </ChartErrorBoundary>
