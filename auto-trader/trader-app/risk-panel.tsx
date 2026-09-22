@@ -150,36 +150,95 @@ const HELP_TEXTS: Record<string, HelpInfo> = {
     desc: 'Voorkomt het vangen van een vallend mes. De bot wacht bij een pullback tot de 15m candle groen sluit of een duidelijke kopers-wick (hammer) toont.',
     example: 'Als de koers op de 15m grafiek hard omlaag dendert, wacht de bot tot kopers de dip opkopen voordat de trade opent.',
   },
+  pullbackFilter: {
+    title: 'Sniper Pullback Filter',
+    desc: 'Wacht op dip naar de EMA21 of Fibonacci Golden Zone (0.618 - 0.65) voordat er wordt ingestapt.',
+    example: 'Voorkomt kopen na een grote groene candle op de top van een beweging.',
+  },
+  breakoutBypass: {
+    title: 'Breakout Momentum Bypass',
+    desc: 'Staat directe instap toe bij een explosieve volume-uitbraak (≥ 1.8x volume) zonder op een pullback te wachten.',
+    example: 'Handig bij nieuws of sterke pumps waar de koers in één rechte lijn doorstoot.',
+  },
+  dynamicRunners: {
+    title: 'Dynamische Runners (5.0R)',
+    desc: 'Verhoogt het uiteindelijke winstdoel van de runner-portie naar 5.0R bij sterke altcoin-trends.',
+    example: 'Zodra TP1 is gehaald en stop op break-even staat, laat de bot de rest van de trade veel langer lopen voor maximale winst.',
+  },
+  btcChopFilter: {
+    title: 'Bitcoin Chop Filter',
+    desc: 'Pauzeert nieuwe altcoin posities wanneer Bitcoin zich in een zijwaartse consolidatie (CHOP) bevindt.',
+    example: 'Voorkomt dat altcoins worden meegetrokken in valse uitbraken zolang BTC richtingloos is.',
+  },
+  pauseNewEntries: {
+    title: 'Standby Modus',
+    desc: 'Pauzeert het openen van nieuwe posities onmiddellijk, terwijl alle lopende posities actief beheerd blijven.',
+    example: 'Gebruik dit tijdens grote macro-economische events (zoals CPI of rentebesluiten) of wanneer je de bot tijdelijk wilt laten uitfaseren.',
+  },
+  mssProtection: {
+    title: 'Marktstructuur-bescherming (MSS / CHoCH)',
+    desc: 'Sluit trades direct bij een officiële trendbreuk (Market Structure Shift / Change of Character).',
+    example: 'Als een Long positie openstaat en een 15m candle sluit ónder de meest recente swing low, sluit de bot direct om winst vast te houden of verlies te beperken.',
+  },
+  premiumDiscountFilter: {
+    title: 'Premium vs. Discount Filter',
+    desc: 'Zorgt ervoor dat Longs alleen worden geopend in de Discount zone (<50% van de swing range) en Shorts in Premium (>50%).',
+    example: 'Koopt goedkoop in de onderste helft en verkoopt duur in de bovenste helft.',
+  },
+  imbalanceScalp: {
+    title: 'Imbalance / Golden Zone Scalps',
+    desc: 'Detecteert liquiditeits-sweeps en opent trades gericht op het vullen van Fair Value Gaps (FVG).',
+    example: 'Snelle intraday setups met een strakke stop-loss onder de sweep wick.',
+  },
+  ltfSniper5m: {
+    title: '5-Minuten Sniper Trigger',
+    desc: 'Controleert op de 5-minuten grafiek of de dip daadwerkelijk afremt met een groene candle of hammer.',
+    example: 'Verfijnt de instap tot op de minuut zodat je niet instapt terwijl de koers nog hard omlaag glijdt.',
+  },
+  smtFilter: {
+    title: 'SMT Divergentie Filter',
+    desc: 'Vergelijkt swing highs/lows tussen de altcoin en BTC om Smart Money accumulatie of distributie te spotten.',
+    example: 'Als BTC een lower low maakt maar de altcoin een higher low, toont de altcoin verborgen koperskracht (bullish SMT).',
+  },
+  volumeProfile: {
+    title: 'Volume Profile & POC',
+    desc: 'Berekent het Point of Control (prijsniveau met het meeste handelsvolume) en Value Area.',
+    example: 'Gebruikt de POC als magneet voor take-profit en sterke steun/weerstand voor stop-loss.',
+  },
 };
 
-const SLIDERS: SliderDef[] = [
-  { key: 'maxOpenPositions', labelKey: 'riskMaxPositions', min: 1, max: 20, step: 1 },
-  { key: 'maxSameSidePositions', labelKey: 'riskMaxSameSidePositions', min: 1, max: 20, step: 1 },
-  { key: 'entryCooldownMinutes', labelKey: 'riskEntryCooldown', min: 0, max: 60, step: 1 },
-  { key: 'targetStakePct', labelKey: 'riskTargetStake', min: 2, max: 100, step: 1, percent: true },
-  { key: 'trendFlipTrimPortion', labelKey: 'riskTrendFlipPortion', min: 10, max: 90, step: 5, percent: true },
-];
+const SLIDER_DEFS: Record<string, SliderDef> = {
+  maxOpenPositions: { key: 'maxOpenPositions', labelKey: 'riskMaxPositions', min: 1, max: 20, step: 1 },
+  maxSameSidePositions: { key: 'maxSameSidePositions', labelKey: 'riskMaxSameSidePositions', min: 1, max: 20, step: 1 },
+  entryCooldownMinutes: { key: 'entryCooldownMinutes', labelKey: 'riskEntryCooldown', min: 0, max: 60, step: 1 },
+  targetStakePct: { key: 'targetStakePct', labelKey: 'riskTargetStake', min: 2, max: 100, step: 1, percent: true },
+  trendFlipTrimPortion: { key: 'trendFlipTrimPortion', labelKey: 'riskTrendFlipPortion', min: 10, max: 90, step: 5, percent: true },
+};
 
-const FIELDS: FieldDef[] = [
-  { key: 'baseRiskPct', labelKey: 'riskBaseRisk', step: 0.1, percent: true },
-  { key: 'maxRiskPct', labelKey: 'riskMaxRisk', step: 0.1, percent: true },
-  { key: 'minStakePct', labelKey: 'riskMinStake', step: 1, percent: true },
-  { key: 'minTradeMarginUsdt', labelKey: 'riskMinTradeMargin', step: 5 },
-  { key: 'minConfidence', labelKey: 'riskMinConviction', step: 1, percent: true },
-  { key: 'highConvictionConfidence', labelKey: 'riskHighConviction', step: 1, percent: true },
-  { key: 'maxLeverage', labelKey: 'riskMaxLeverage', step: 1 },
-  { key: 'maxOverflowPositions', labelKey: 'riskOverflowPositions', step: 1 },
-  { key: 'maxTotalMarginPct', labelKey: 'riskMaxMargin', step: 5, percent: true },
-  { key: 'maxDrawdownPct', labelKey: 'riskStopDrawdown', step: 1, percent: true },
-  { key: 'dailyLossLimitPct', labelKey: 'riskDailyLossLimit', step: 1, percent: true },
-  { key: 'trailArmR', labelKey: 'riskTrailArm', step: 0.1 },
-  { key: 'trailGiveback', labelKey: 'riskTrailGiveback', step: 5, percent: true },
-  { key: 'chopPauseStreak', labelKey: 'riskChopPause', step: 1 },
-  { key: 'maxFundingRateLong', labelKey: 'riskFundingFilter', step: 0.01, percent: true },
-];
+const FIELD_DEFS: Record<string, FieldDef> = {
+  baseRiskPct: { key: 'baseRiskPct', labelKey: 'riskBaseRisk', step: 0.1, percent: true },
+  maxRiskPct: { key: 'maxRiskPct', labelKey: 'riskMaxRisk', step: 0.1, percent: true },
+  minStakePct: { key: 'minStakePct', labelKey: 'riskMinStake', step: 1, percent: true },
+  minTradeMarginUsdt: { key: 'minTradeMarginUsdt', labelKey: 'riskMinTradeMargin', step: 5 },
+  minConfidence: { key: 'minConfidence', labelKey: 'riskMinConviction', step: 1, percent: true },
+  highConvictionConfidence: { key: 'highConvictionConfidence', labelKey: 'riskHighConviction', step: 1, percent: true },
+  maxLeverage: { key: 'maxLeverage', labelKey: 'riskMaxLeverage', step: 1 },
+  maxOverflowPositions: { key: 'maxOverflowPositions', labelKey: 'riskOverflowPositions', step: 1 },
+  maxTotalMarginPct: { key: 'maxTotalMarginPct', labelKey: 'riskMaxMargin', step: 5, percent: true },
+  maxDrawdownPct: { key: 'maxDrawdownPct', labelKey: 'riskStopDrawdown', step: 1, percent: true },
+  dailyLossLimitPct: { key: 'dailyLossLimitPct', labelKey: 'riskDailyLossLimit', step: 1, percent: true },
+  trailArmR: { key: 'trailArmR', labelKey: 'riskTrailArm', step: 0.1 },
+  trailGiveback: { key: 'trailGiveback', labelKey: 'riskTrailGiveback', step: 5, percent: true },
+  chopPauseStreak: { key: 'chopPauseStreak', labelKey: 'riskChopPause', step: 1 },
+  maxFundingRateLong: { key: 'maxFundingRateLong', labelKey: 'riskFundingFilter', step: 0.01, percent: true },
+};
+
+const SLIDERS = Object.values(SLIDER_DEFS);
+const FIELDS = Object.values(FIELD_DEFS);
 
 /**
  * Editable risk settings — the guardrails the engine sizes every trade against.
+ * Grouped into 5 clear thematic categories.
  */
 export function RiskPanel({ risk, onSave }: RiskPanelProps) {
   const { t } = useLanguage();
@@ -312,461 +371,385 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
     return String(raw);
   };
 
-  return (
-    <div className={styles.form}>
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="turboMode" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="turboMode"
-              type="checkbox"
-              checked={turbo}
-              onChange={(e) => {
-                setTurbo(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              {t('turboModeLabel')}
-              <small>{t('turboModeHint')}</small>
-            </span>
+  const renderSwitchCard = (
+    id: string,
+    title: string,
+    sub: string,
+    checked: boolean,
+    onChange: (val: boolean) => void,
+    helpKey?: string
+  ) => {
+    const isHelpOpen = helpKey ? openHelp === helpKey : false;
+    return (
+      <div
+        key={id}
+        className={`${styles.switchCard} ${checked ? styles.switchCardActive : ''}`}
+        style={{ flexDirection: 'column', gap: '0.4rem' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.65rem', width: '100%' }}>
+          <input
+            id={id}
+            type="checkbox"
+            checked={checked}
+            onChange={(e) => {
+              onChange(e.target.checked);
+              setIsDirty(true);
+            }}
+          />
+          <label htmlFor={id} className={styles.switchCardText} style={{ cursor: 'pointer', flex: 1 }}>
+            <span className={styles.switchCardTitle}>{title}</span>
+            <span className={styles.switchCardSub}>{sub}</span>
           </label>
-          <button
-            type="button"
-            className={`${styles.helpBtn} ${openHelp === 'turboMode' ? styles.helpBtnActive : ''}`}
-            onClick={() => setOpenHelp(openHelp === 'turboMode' ? null : 'turboMode')}
-            title="Uitleg bekijken"
-            aria-label="Uitleg voor Turbo modus"
-          >
-            ?
-          </button>
-        </div>
-        {openHelp === 'turboMode' && HELP_TEXTS.turboMode && (
-          <div className={styles.helpBox}>
-            <span className={styles.helpTitle}>💡 {HELP_TEXTS.turboMode.title}</span>
-            <p className={styles.helpDesc}>{HELP_TEXTS.turboMode.desc}</p>
-            {HELP_TEXTS.turboMode.example && (
-              <p className={styles.helpExample}><b>Voorbeeld:</b> {HELP_TEXTS.turboMode.example}</p>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="trendFlipProtection" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="trendFlipProtection"
-              type="checkbox"
-              checked={trendFlipProtection}
-              onChange={(e) => {
-                setTrendFlipProtection(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              {t('trendFlipProtectionLabel')}
-              <small>{t('trendFlipProtectionHint')}</small>
-            </span>
-          </label>
-          <button
-            type="button"
-            className={`${styles.helpBtn} ${openHelp === 'trendFlipProtection' ? styles.helpBtnActive : ''}`}
-            onClick={() => setOpenHelp(openHelp === 'trendFlipProtection' ? null : 'trendFlipProtection')}
-            title="Uitleg bekijken"
-            aria-label="Uitleg voor Trendwissel-bescherming"
-          >
-            ?
-          </button>
-        </div>
-        {openHelp === 'trendFlipProtection' && HELP_TEXTS.trendFlipProtection && (
-          <div className={styles.helpBox}>
-            <span className={styles.helpTitle}>💡 {HELP_TEXTS.trendFlipProtection.title}</span>
-            <p className={styles.helpDesc}>{HELP_TEXTS.trendFlipProtection.desc}</p>
-            {HELP_TEXTS.trendFlipProtection.example && (
-              <p className={styles.helpExample}><b>Voorbeeld:</b> {HELP_TEXTS.trendFlipProtection.example}</p>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="rsFilter" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="rsFilter"
-              type="checkbox"
-              checked={rsFilter}
-              onChange={(e) => {
-                setRsFilter(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              {t('riskRsFilter')}
-              <small>Alleen altcoin longs die minstens gelijke tred houden met Bitcoin (voorkomt trage achterblijvers).</small>
-            </span>
-          </label>
-          <button
-            type="button"
-            className={`${styles.helpBtn} ${openHelp === 'rsFilterEnabled' ? styles.helpBtnActive : ''}`}
-            onClick={() => setOpenHelp(openHelp === 'rsFilterEnabled' ? null : 'rsFilterEnabled')}
-            title="Uitleg bekijken"
-            aria-label="Uitleg voor Marktleiders filter"
-          >
-            ?
-          </button>
-        </div>
-        {openHelp === 'rsFilterEnabled' && HELP_TEXTS.rsFilterEnabled && (
-          <div className={styles.helpBox}>
-            <span className={styles.helpTitle}>💡 {HELP_TEXTS.rsFilterEnabled.title}</span>
-            <p className={styles.helpDesc}>{HELP_TEXTS.rsFilterEnabled.desc}</p>
-            {HELP_TEXTS.rsFilterEnabled.example && (
-              <p className={styles.helpExample}><b>Voorbeeld:</b> {HELP_TEXTS.rsFilterEnabled.example}</p>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="reversal15m" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="reversal15m"
-              type="checkbox"
-              checked={reversal15m}
-              onChange={(e) => {
-                setReversal15m(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              {t('riskReversal15m')}
-              <small>Wacht op een groene 15m candle of kopers-hammer wick (nooit een vallend mes vangen).</small>
-            </span>
-          </label>
-          <button
-            type="button"
-            className={`${styles.helpBtn} ${openHelp === 'reversal15mRequired' ? styles.helpBtnActive : ''}`}
-            onClick={() => setOpenHelp(openHelp === 'reversal15mRequired' ? null : 'reversal15mRequired')}
-            title="Uitleg bekijken"
-            aria-label="Uitleg voor 15m ommekeer-bevestiging"
-          >
-            ?
-          </button>
-        </div>
-        {openHelp === 'reversal15mRequired' && HELP_TEXTS.reversal15mRequired && (
-          <div className={styles.helpBox}>
-            <span className={styles.helpTitle}>💡 {HELP_TEXTS.reversal15mRequired.title}</span>
-            <p className={styles.helpDesc}>{HELP_TEXTS.reversal15mRequired.desc}</p>
-            {HELP_TEXTS.reversal15mRequired.example && (
-              <p className={styles.helpExample}><b>Voorbeeld:</b> {HELP_TEXTS.reversal15mRequired.example}</p>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="pullbackFilter" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="pullbackFilter"
-              type="checkbox"
-              checked={pullbackFilter}
-              onChange={(e) => {
-                setPullbackFilter(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              🎯 Sniper Pullback Filter
-              <small>Wacht op dip naar EMA21 of Fibonacci golden zone — trad nooit op de top.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="breakoutBypass" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="breakoutBypass"
-              type="checkbox"
-              checked={breakoutBypass}
-              onChange={(e) => {
-                setBreakoutBypass(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              🚀 Breakout Momentum Bypass
-              <small>Direct instappen bij uitzonderlijke volume-explosies (≥ 1.8x) zonder te wachten op een dip.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="dynamicRunners" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="dynamicRunners"
-              type="checkbox"
-              checked={dynamicRunners}
-              onChange={(e) => {
-                setDynamicRunners(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              📈 Dynamische Runners (5.0R)
-              <small>Verhoogt de runner-winstdoelen naar 5.0R op sterke altcoin uitbraken na het veiligstellen van TP1.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="btcChopFilter" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="btcChopFilter"
-              type="checkbox"
-              checked={btcChopFilter}
-              onChange={(e) => {
-                setBtcChopFilter(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              🛡️ Bitcoin Chop Filter
-              <small>Pauzeert nieuwe altcoin trades wanneer Bitcoin in een zijwaartse consolidatie (CHOP) zit om valse uitbraken te vermijden.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="pauseNewEntries" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="pauseNewEntries"
-              type="checkbox"
-              checked={pauseNewEntries}
-              onChange={(e) => {
-                setPauseNewEntries(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              ⏸️ Standby Modus (Geen nieuwe trades)
-              <small>Pauzeert het openen van nieuwe posities onmiddellijk, terwijl alle lopende posities (TP, SL, trailing) actief beheerd blijven.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="mssProtection" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="mssProtection"
-              type="checkbox"
-              checked={mssProtection}
-              onChange={(e) => {
-                setMssProtection(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              🔄 Marktstructuur-bescherming (MSS / CHoCH)
-              <small>Sluit openstaande trades direct bij een officiële trendbreuk (candle body close door Higher Low / Lower High) om verlies te voorkomen.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="premiumDiscountFilter" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="premiumDiscountFilter"
-              type="checkbox"
-              checked={premiumDiscountFilter}
-              onChange={(e) => {
-                setPremiumDiscountFilter(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              ⚖️ Premium vs. Discount Filter (50% Equilibrium)
-              <small>Blokkeert LONGs in de dure Premium zone (&gt;50%) en SHORTs in de Discount zone (&lt;50%). Nooit meer kopen op de top!</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="imbalanceScalp" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="imbalanceScalp"
-              type="checkbox"
-              checked={imbalanceScalp}
-              onChange={(e) => {
-                setImbalanceScalp(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              🎯 Imbalance / Golden Zone Scalps
-              <small>Snelle trades naar de Fair Value Gap (FVG) of Fibonacci 0.618 na een liquiditeits-sweep, met strakke stop en hoge Risk/Reward.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="ltfSniper5m" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="ltfSniper5m"
-              type="checkbox"
-              checked={ltfSniper5m}
-              onChange={(e) => {
-                setLtfSniper5m(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              🎯 5-Minuten Sniper Trigger (LTF)
-              <small>Controleert vlak voor instap of de 5m micro-ommekeer is ingezet (groene candle / hammer wick). Voorkomt vangen van een vallend mes.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="smtFilter" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="smtFilter"
-              type="checkbox"
-              checked={smtFilter}
-              onChange={(e) => {
-                setSmtFilter(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              ⚡ SMT Divergentie Filter (Smart Money Technique vs. BTC)
-              <small>Vergelijkt swing highs en swing lows tussen altcoins en Bitcoin om verborgen institutionele accumulatie of distributie te detecteren.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      <div className={styles.field} style={{ gridColumn: '1 / -1' }}>
-        <div className={styles.fieldHeader}>
-          <label htmlFor="volumeProfile" className={styles.turboLabel} style={{ flex: 1 }}>
-            <input
-              id="volumeProfile"
-              type="checkbox"
-              checked={volumeProfile}
-              onChange={(e) => {
-                setVolumeProfile(e.target.checked);
-                setIsDirty(true);
-              }}
-            />
-            <span>
-              📊 Volume Profile & Point of Control (POC)
-              <small>Berekent Point of Control (piekvolume) en Value Area (70% zone). Gebruikt POC als koersmagneet en steun/weerstand.</small>
-            </span>
-          </label>
-        </div>
-      </div>
-
-      {SLIDERS.map((s) => (
-        <div key={s.key} className={styles.field} style={{ gridColumn: '1 / -1' }}>
-          <div className={styles.fieldHeader}>
-            <label htmlFor={s.key}>
-              {t(s.labelKey)} — <strong>{format(s, draft[s.key] ?? s.min)}</strong>
-            </label>
+          {helpKey && HELP_TEXTS[helpKey] && (
             <button
               type="button"
-              className={`${styles.helpBtn} ${openHelp === s.key ? styles.helpBtnActive : ''}`}
-              onClick={() => setOpenHelp(openHelp === s.key ? null : s.key)}
+              className={`${styles.helpBtn} ${isHelpOpen ? styles.helpBtnActive : ''}`}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setOpenHelp(isHelpOpen ? null : helpKey);
+              }}
+              title="Uitleg bekijken"
+              aria-label={`Uitleg voor ${title}`}
+            >
+              ?
+            </button>
+          )}
+        </div>
+        {isHelpOpen && HELP_TEXTS[helpKey] && (
+          <div className={styles.helpBox} style={{ width: '100%', margin: '0.2rem 0 0 0' }}>
+            <span className={styles.helpTitle}>💡 {HELP_TEXTS[helpKey].title}</span>
+            <p className={styles.helpDesc}>{HELP_TEXTS[helpKey].desc}</p>
+            {HELP_TEXTS[helpKey].example && (
+              <p className={styles.helpExample}>
+                <b>Voorbeeld:</b> {HELP_TEXTS[helpKey].example}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderSlider = (s: SliderDef) => {
+    const isHelpOpen = openHelp === s.key;
+    return (
+      <div key={s.key} className={styles.field} style={{ gridColumn: '1 / -1' }}>
+        <div className={styles.fieldHeader}>
+          <label htmlFor={s.key}>
+            {t(s.labelKey)} — <strong>{format(s, draft[s.key] ?? s.min)}</strong>
+          </label>
+          {HELP_TEXTS[s.key] && (
+            <button
+              type="button"
+              className={`${styles.helpBtn} ${isHelpOpen ? styles.helpBtnActive : ''}`}
+              onClick={() => setOpenHelp(isHelpOpen ? null : s.key)}
               title="Uitleg bekijken"
               aria-label={`Uitleg voor ${t(s.labelKey)}`}
             >
               ?
             </button>
-          </div>
-          {openHelp === s.key && HELP_TEXTS[s.key] && (
-            <div className={styles.helpBox}>
-              <span className={styles.helpTitle}>💡 {HELP_TEXTS[s.key].title}</span>
-              <p className={styles.helpDesc}>{HELP_TEXTS[s.key].desc}</p>
-              {HELP_TEXTS[s.key].example && (
-                <p className={styles.helpExample}><b>Voorbeeld:</b> {HELP_TEXTS[s.key].example}</p>
-              )}
-            </div>
           )}
-          <input
-            id={s.key}
-            type="range"
-            className={styles.slider}
-            min={s.min}
-            max={s.max}
-            step={s.step}
-            value={draft[s.key] ?? s.min}
-            onChange={(e) => {
-              setDraft((d) => ({ ...d, [s.key]: Number(e.target.value) }));
-              setIsDirty(true);
-            }}
-          />
-          <div className={styles.sliderScale}>
-            <span>{s.percent ? `${s.min}%` : s.min}</span>
-            <span>{s.percent ? `${s.max}%` : s.max}</span>
-          </div>
         </div>
-      ))}
+        {isHelpOpen && HELP_TEXTS[s.key] && (
+          <div className={styles.helpBox}>
+            <span className={styles.helpTitle}>💡 {HELP_TEXTS[s.key].title}</span>
+            <p className={styles.helpDesc}>{HELP_TEXTS[s.key].desc}</p>
+            {HELP_TEXTS[s.key].example && (
+              <p className={styles.helpExample}>
+                <b>Voorbeeld:</b> {HELP_TEXTS[s.key].example}
+              </p>
+            )}
+          </div>
+        )}
+        <input
+          id={s.key}
+          type="range"
+          className={styles.slider}
+          min={s.min}
+          max={s.max}
+          step={s.step}
+          value={draft[s.key] ?? s.min}
+          onChange={(e) => {
+            setDraft((d) => ({ ...d, [s.key]: Number(e.target.value) }));
+            setIsDirty(true);
+          }}
+        />
+        <div className={styles.sliderScale}>
+          <span>{s.percent ? `${s.min}%` : s.min}</span>
+          <span>{s.percent ? `${s.max}%` : s.max}</span>
+        </div>
+      </div>
+    );
+  };
 
-      {FIELDS.map((f) => (
-        <div key={f.key} className={styles.field}>
-          <div className={styles.fieldHeader}>
-            <label htmlFor={f.key}>{t(f.labelKey)}</label>
+  const renderInput = (f: FieldDef) => {
+    const isHelpOpen = openHelp === f.key;
+    return (
+      <div key={f.key} className={styles.field}>
+        <div className={styles.fieldHeader}>
+          <label htmlFor={f.key}>{t(f.labelKey)}</label>
+          {HELP_TEXTS[f.key] && (
             <button
               type="button"
-              className={`${styles.helpBtn} ${openHelp === f.key ? styles.helpBtnActive : ''}`}
-              onClick={() => setOpenHelp(openHelp === f.key ? null : f.key)}
+              className={`${styles.helpBtn} ${isHelpOpen ? styles.helpBtnActive : ''}`}
+              onClick={() => setOpenHelp(isHelpOpen ? null : f.key)}
               title="Uitleg bekijken"
               aria-label={`Uitleg voor ${t(f.labelKey)}`}
             >
               ?
             </button>
-          </div>
-          {openHelp === f.key && HELP_TEXTS[f.key] && (
-            <div className={styles.helpBox}>
-              <span className={styles.helpTitle}>💡 {HELP_TEXTS[f.key].title}</span>
-              <p className={styles.helpDesc}>{HELP_TEXTS[f.key].desc}</p>
-              {HELP_TEXTS[f.key].example && (
-                <p className={styles.helpExample}><b>Voorbeeld:</b> {HELP_TEXTS[f.key].example}</p>
-              )}
-            </div>
           )}
-          <input
-            id={f.key}
-            type="number"
-            step={f.step}
-            value={draft[f.key] ?? ''}
-            onChange={(e) => {
-              setDraft((d) => ({ ...d, [f.key]: Number(e.target.value) }));
-              setIsDirty(true);
-            }}
-          />
         </div>
-      ))}
+        {isHelpOpen && HELP_TEXTS[f.key] && (
+          <div className={styles.helpBox}>
+            <span className={styles.helpTitle}>💡 {HELP_TEXTS[f.key].title}</span>
+            <p className={styles.helpDesc}>{HELP_TEXTS[f.key].desc}</p>
+            {HELP_TEXTS[f.key].example && (
+              <p className={styles.helpExample}>
+                <b>Voorbeeld:</b> {HELP_TEXTS[f.key].example}
+              </p>
+            )}
+          </div>
+        )}
+        <input
+          id={f.key}
+          type="number"
+          step={f.step}
+          value={draft[f.key] ?? ''}
+          onChange={(e) => {
+            setDraft((d) => ({ ...d, [f.key]: Number(e.target.value) }));
+            setIsDirty(true);
+          }}
+        />
+      </div>
+    );
+  };
 
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      {/* Category 1: 🛡️ Kernbeveiliging & Risicolimieten */}
+      <div className={styles.riskCategoryCard}>
+        <div className={styles.riskCategoryHead}>
+          <span className={styles.riskCategoryTitle}>🛡️ Kernbeveiliging & Risicolimieten</span>
+          <span className={styles.riskCategoryDesc}>Bescherming tegen overmatig verlies en te snelle trade-opeenvolging</span>
+        </div>
+        <div className={styles.riskCategoryBody}>
+          <div className={styles.riskSwitchesGrid}>
+            {renderSwitchCard(
+              'pauseNewEntries',
+              '⏸️ Standby Modus (Geen nieuwe trades)',
+              'Pauzeert het openen van nieuwe posities direct, terwijl actieve trades (TP, SL, trailing) worden beheerd.',
+              pauseNewEntries,
+              setPauseNewEntries,
+              'pauseNewEntries'
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.4rem' }}>
+            {renderSlider(SLIDER_DEFS.maxOpenPositions)}
+            {renderSlider(SLIDER_DEFS.maxSameSidePositions)}
+            {renderSlider(SLIDER_DEFS.entryCooldownMinutes)}
+          </div>
+
+          <div className={styles.riskInputsGrid} style={{ marginTop: '0.5rem' }}>
+            {renderInput(FIELD_DEFS.dailyLossLimitPct)}
+            {renderInput(FIELD_DEFS.maxDrawdownPct)}
+            {renderInput(FIELD_DEFS.maxTotalMarginPct)}
+          </div>
+        </div>
+      </div>
+
+      {/* Category 2: 🎯 Instap- & Timingfilters */}
+      <div className={styles.riskCategoryCard}>
+        <div className={styles.riskCategoryHead}>
+          <span className={styles.riskCategoryTitle}>🎯 Instap- & Timingfilters</span>
+          <span className={styles.riskCategoryDesc}>Voorkomt het vangen van vallende messen en kopen op de top</span>
+        </div>
+        <div className={styles.riskCategoryBody}>
+          <div className={styles.riskSwitchesGrid}>
+            {renderSwitchCard(
+              'ltfSniper5m',
+              '🎯 5-Minuten Sniper Trigger (LTF)',
+              'Wacht tot de 5m micro-ommekeer is bevestigd met een groene candle of hammer-wick vóór instap.',
+              ltfSniper5m,
+              setLtfSniper5m,
+              'ltfSniper5m'
+            )}
+            {renderSwitchCard(
+              'reversal15m',
+              '🕯️ 15m Ommekeer-bevestiging',
+              'Wacht bij een dip op een groene 15m candle of kopers-wick (nooit een vallend mes vangen).',
+              reversal15m,
+              setReversal15m,
+              'reversal15mRequired'
+            )}
+            {renderSwitchCard(
+              'pullbackFilter',
+              '🎯 Sniper Pullback Filter',
+              'Wacht op een dip naar de EMA21 of de Fibonacci Golden Zone — trade nooit op de top.',
+              pullbackFilter,
+              setPullbackFilter,
+              'pullbackFilter'
+            )}
+            {renderSwitchCard(
+              'imbalanceScalp',
+              '⚡ Imbalance / Golden Zone Scalps',
+              'Snelle setups naar de Fair Value Gap (FVG) of Fib 0.618 na een liquiditeits-sweep met strakke stop.',
+              imbalanceScalp,
+              setImbalanceScalp,
+              'imbalanceScalp'
+            )}
+            {renderSwitchCard(
+              'premiumDiscountFilter',
+              '⚖️ Premium vs. Discount (50% Eq)',
+              'Blokkeert LONGs in de dure Premium zone (>50%) en SHORTs in Discount (<50%). Nooit kopen op de top!',
+              premiumDiscountFilter,
+              setPremiumDiscountFilter,
+              'premiumDiscountFilter'
+            )}
+            {renderSwitchCard(
+              'breakoutBypass',
+              '🚀 Breakout Momentum Bypass',
+              'Staat directe instap toe bij een explosieve volume-uitbraak (≥ 1.8x) zonder op een pullback te wachten.',
+              breakoutBypass,
+              setBreakoutBypass,
+              'breakoutBypass'
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Category 3: 🧠 Smart Money & Markt-Afstemming */}
+      <div className={styles.riskCategoryCard}>
+        <div className={styles.riskCategoryHead}>
+          <span className={styles.riskCategoryTitle}>🧠 Smart Money & Markt-Afstemming</span>
+          <span className={styles.riskCategoryDesc}>Afstemming op Bitcoin-trend, institutionele order flow en funding rates</span>
+        </div>
+        <div className={styles.riskCategoryBody}>
+          <div className={styles.riskSwitchesGrid}>
+            {renderSwitchCard(
+              'mssProtection',
+              '🔄 Marktstructuur-bescherming (MSS / CHoCH)',
+              'Sluit openstaande trades direct bij een officiële trendbreuk (candle body close door structuurniveau).',
+              mssProtection,
+              setMssProtection,
+              'mssProtection'
+            )}
+            {renderSwitchCard(
+              'smtFilter',
+              '⚡ SMT Divergentie Filter vs. BTC',
+              'Vergelijkt swing highs/lows tussen altcoins en BTC om Smart Money accumulatie/distributie te spotten.',
+              smtFilter,
+              setSmtFilter,
+              'smtFilter'
+            )}
+            {renderSwitchCard(
+              'volumeProfile',
+              '📊 Volume Profile & Point of Control (POC)',
+              'Berekent POC (piekvolume) en Value Area; gebruikt POC als koersmagneet en steun/weerstand.',
+              volumeProfile,
+              setVolumeProfile,
+              'volumeProfile'
+            )}
+            {renderSwitchCard(
+              'btcChopFilter',
+              '🛡️ Bitcoin Chop Filter',
+              'Pauzeert nieuwe altcoin trades wanneer Bitcoin in zijwaartse consolidatie zit om valse uitbraken te vermijden.',
+              btcChopFilter,
+              setBtcChopFilter,
+              'btcChopFilter'
+            )}
+            {renderSwitchCard(
+              'rsFilter',
+              '💪 Marktleiders filter (Relative Strength)',
+              'Alleen altcoin longs die minstens gelijke tred houden met Bitcoin (voorkomt trage achterblijvers).',
+              rsFilter,
+              setRsFilter,
+              'rsFilterEnabled'
+            )}
+          </div>
+
+          <div className={styles.riskInputsGrid} style={{ marginTop: '0.5rem' }}>
+            {renderInput(FIELD_DEFS.maxFundingRateLong)}
+          </div>
+        </div>
+      </div>
+
+      {/* Category 4: 💰 Inleg, Kapitaal & Hefboom */}
+      <div className={styles.riskCategoryCard}>
+        <div className={styles.riskCategoryHead}>
+          <span className={styles.riskCategoryTitle}>💰 Inleg, Kapitaal & Hefboom</span>
+          <span className={styles.riskCategoryDesc}>Positiegrootte, maximale leverage en opschaling bij hoge conviction</span>
+        </div>
+        <div className={styles.riskCategoryBody}>
+          <div className={styles.riskSwitchesGrid}>
+            {renderSwitchCard(
+              'turboMode',
+              '🚀 Turbo Modus',
+              'Zoekt snellere intraday setups met een hogere hefboom binnen veilige liquidatiemarges.',
+              turbo,
+              setTurbo,
+              'turboMode'
+            )}
+          </div>
+
+          <div style={{ marginTop: '0.4rem' }}>
+            {renderSlider(SLIDER_DEFS.targetStakePct)}
+          </div>
+
+          <div className={styles.riskInputsGrid} style={{ marginTop: '0.5rem' }}>
+            {renderInput(FIELD_DEFS.maxLeverage)}
+            {renderInput(FIELD_DEFS.minStakePct)}
+            {renderInput(FIELD_DEFS.minTradeMarginUsdt)}
+            {renderInput(FIELD_DEFS.baseRiskPct)}
+            {renderInput(FIELD_DEFS.maxRiskPct)}
+            {renderInput(FIELD_DEFS.minConfidence)}
+            {renderInput(FIELD_DEFS.highConvictionConfidence)}
+            {renderInput(FIELD_DEFS.maxOverflowPositions)}
+          </div>
+        </div>
+      </div>
+
+      {/* Category 5: 📈 Winstnames, Trailing Stop & Exits */}
+      <div className={styles.riskCategoryCard}>
+        <div className={styles.riskCategoryHead}>
+          <span className={styles.riskCategoryTitle}>📈 Winstnames, Trailing Stop & Exits</span>
+          <span className={styles.riskCategoryDesc}>Beheer van runners, trailing stop triggers en trendomslag-afbouw</span>
+        </div>
+        <div className={styles.riskCategoryBody}>
+          <div className={styles.riskSwitchesGrid}>
+            {renderSwitchCard(
+              'dynamicRunners',
+              '📈 Dynamische Runners (5.0R)',
+              'Verhoogt runner-winstdoelen naar 5.0R op sterke altcoin uitbraken na veiligstellen van TP1.',
+              dynamicRunners,
+              setDynamicRunners,
+              'dynamicRunners'
+            )}
+            {renderSwitchCard(
+              'trendFlipProtection',
+              '🔄 Trendwissel-bescherming',
+              'Schakelt automatische gedeeltelijke verkoop in zodra de markt echt van richting wisselt tegen je positie.',
+              trendFlipProtection,
+              setTrendFlipProtection,
+              'trendFlipProtection'
+            )}
+          </div>
+
+          <div style={{ marginTop: '0.4rem' }}>
+            {renderSlider(SLIDER_DEFS.trendFlipTrimPortion)}
+          </div>
+
+          <div className={styles.riskInputsGrid} style={{ marginTop: '0.5rem' }}>
+            {renderInput(FIELD_DEFS.trailArmR)}
+            {renderInput(FIELD_DEFS.trailGiveback)}
+            {renderInput(FIELD_DEFS.chopPauseStreak)}
+          </div>
+        </div>
+      </div>
+
+      {/* Save / Reset Bar */}
       <div className={styles.formActions}>
         <button
           type="button"

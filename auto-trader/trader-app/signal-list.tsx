@@ -25,6 +25,7 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
   const [inlineChart, setInlineChart] = useState<Record<string, ChartData | null>>({});
   const [inlineLoading, setInlineLoading] = useState<Record<string, boolean>>({});
   const [inlineError, setInlineError] = useState<Record<string, string | null>>({});
+  const [showAllChecks, setShowAllChecks] = useState<Record<string, boolean>>({});
 
   const toggleExpand = (symbol: string) => {
     if (expandedSymbol === symbol) {
@@ -54,6 +55,9 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
         const chartData = inlineChart[s.symbol];
         const loading = inlineLoading[s.symbol];
         const err = inlineError[s.symbol];
+        const passedChecks = s.checks?.filter((c) => c.passed) || [];
+        const failedChecks = s.checks?.filter((c) => !c.passed) || [];
+        const isChecksExpanded = Boolean(showAllChecks[s.symbol]);
 
         return (
           <div key={s.symbol} className={styles.signal}>
@@ -119,38 +123,86 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
                 }}
               />
             </div>
-            <div className={styles.meta}>
-              <span>
-                Prijs<b>{fmtPrice(s.price)}</b>
-              </span>
-              <span>
-                ATR<b>{pct(s.atrPct, 2)}</b>
-              </span>
-              <span>
-                Hoger TF<b>{s.higherRegime}</b>
-              </span>
-              <span>
-                Ruimte<b>{Number.isFinite(s.roomToStructure) ? `${s.roomToStructure.toFixed(1)}R` : '—'}</b>
-              </span>
+
+            {/* Clean Structured Meta Grid */}
+            <div className={styles.signalMetaGrid}>
+              <div className={styles.metaItem}>
+                <span className={styles.metaLabel}>Prijs</span>
+                <span className={styles.metaVal}>{fmtPrice(s.price)}</span>
+              </div>
+              <div className={styles.metaItem}>
+                <span className={styles.metaLabel}>ATR</span>
+                <span className={styles.metaVal}>{pct(s.atrPct, 2)}</span>
+              </div>
+              <div className={styles.metaItem}>
+                <span className={styles.metaLabel}>Hoger TF</span>
+                <span className={styles.metaVal}>{s.higherRegime}</span>
+              </div>
+              <div className={styles.metaItem}>
+                <span className={styles.metaLabel}>Ruimte</span>
+                <span className={styles.metaVal}>
+                  {Number.isFinite(s.roomToStructure) ? `${s.roomToStructure.toFixed(1)}R` : '—'}
+                </span>
+              </div>
+              {s.fib && (
+                <>
+                  <div className={styles.metaItem}>
+                    <span className={styles.metaLabel}>Golden Zone</span>
+                    <span className={`${styles.metaVal} ${styles.metaHighlight}`}>
+                      {fmtPrice(s.fib.retracements.find((l) => l.ratio === 0.618)!.price)} –{' '}
+                      {fmtPrice(s.fib.retracements.find((l) => l.ratio === 0.382)!.price)}
+                    </span>
+                  </div>
+                  <div className={styles.metaItem}>
+                    <span className={styles.metaLabel}>Fib Swing</span>
+                    <span className={styles.metaVal}>
+                      {fmtPrice(s.fib.swingLow)} – {fmtPrice(s.fib.swingHigh)}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
 
-            {s.fib && (
-              <div className={styles.meta}>
-                <span>
-                  Fib swing<b>{fmtPrice(s.fib.swingLow)} – {fmtPrice(s.fib.swingHigh)}</b>
+            {/* Clean Confluence Bar (Shows only unmet/waiting conditions & summary) */}
+            {s.checks?.length > 0 && (
+              <div className={styles.confluenceBar}>
+                <span
+                  className={`${styles.confluencePill} ${
+                    failedChecks.length === 0 ? styles.confluencePillReady : styles.confluencePillPending
+                  }`}
+                >
+                  {failedChecks.length === 0
+                    ? `🎯 Alle ${s.checks.length} checks OK`
+                    : `⏳ ${passedChecks.length}/${s.checks.length} Confluences`}
                 </span>
-                <span>
-                  Golden zone<b>
-                    {fmtPrice(s.fib.retracements.find((l) => l.ratio === 0.618)!.price)} –{' '}
-                    {fmtPrice(s.fib.retracements.find((l) => l.ratio === 0.382)!.price)}
-                  </b>
-                </span>
+
+                {/* Show ONLY the failed/unmet checks so user immediately sees what is missing */}
+                {failedChecks.map((c) => (
+                  <span
+                    key={c.name}
+                    className={`${styles.check} ${styles.checkFail}`}
+                    title={c.detail}
+                  >
+                    ✗ {c.name}
+                  </span>
+                ))}
+
+                <button
+                  type="button"
+                  className={styles.checkToggleBtn}
+                  onClick={() =>
+                    setShowAllChecks((prev) => ({ ...prev, [s.symbol]: !prev[s.symbol] }))
+                  }
+                  title="Toon/verberg alle individuele checks"
+                >
+                  {isChecksExpanded ? 'Details verbergen ▴' : `Alle checks (${passedChecks.length}✓) ▾`}
+                </button>
               </div>
             )}
 
-            {/* The named conditions the engine weighed before allowing this entry. */}
-            {s.checks?.length > 0 && (
-              <div className={styles.checks}>
+            {/* Expanded full checklist if toggled */}
+            {isChecksExpanded && s.checks?.length > 0 && (
+              <div className={styles.checksExpanded}>
                 {s.checks.map((c) => (
                   <span
                     key={c.name}

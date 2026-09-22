@@ -33,6 +33,7 @@ const DICTIONARY = {
     en: 'Reset account? All positions and history will be wiped.',
   },
   tabLive: { nl: 'Live', en: 'Live' },
+  tabHistory: { nl: '📜 Geschiedenis', en: '📜 History' },
   tabBacktest: { nl: 'Backtest', en: 'Backtest' },
   tabWalkforward: { nl: 'Walk-forward', en: 'Walk-forward' },
   tabOptimize: { nl: 'Optimaliseren', en: 'Optimize' },

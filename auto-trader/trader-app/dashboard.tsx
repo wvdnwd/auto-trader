@@ -15,6 +15,7 @@ import {
 } from './api.js';
 import type { TestOrderResult } from './api.js';
 import { BacktestPage } from './backtest-page.js';
+import { HistoryPanel } from './history-panel.js';
 import { useLanguage } from './i18n.js';
 import { LivePositionRow } from './live-position-row.js';
 import { OptimizePanel } from './optimize-panel.js';
@@ -69,7 +70,7 @@ export function Dashboard() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<'live' | 'backtest' | 'walkforward' | 'optimize' | 'options'>('live');
+  const [tab, setTab] = useState<'live' | 'history' | 'backtest' | 'walkforward' | 'optimize' | 'options'>('live');
   const [chartSymbol, setChartSymbol] = useState<string | null>(null);
   const [chart, setChart] = useState<ChartData | null>(null);
   const [chartError, setChartError] = useState<string | null>(null);
@@ -265,6 +266,13 @@ export function Dashboard() {
           </button>
           <button
             type="button"
+            className={`${styles.tab} ${tab === 'history' ? styles.tabOn : ''}`}
+            onClick={() => setTab('history')}
+          >
+            {t('tabHistory')} ({snap.closed.length})
+          </button>
+          <button
+            type="button"
             className={`${styles.tab} ${tab === 'backtest' ? styles.tabOn : ''}`}
             onClick={() => setTab('backtest')}
           >
@@ -413,6 +421,14 @@ export function Dashboard() {
               </span>
             </span>
           </div>
+        )}
+
+        {tab === 'history' && (
+          <HistoryPanel
+            closed={snap.closed}
+            stats={snap.stats}
+            onOpenChart={setChartSymbol}
+          />
         )}
 
         {tab === 'backtest' && <BacktestPage />}
@@ -771,6 +787,15 @@ export function Dashboard() {
                 {snap.notificationsEnabled ? t('notificationsOn') : t('notificationsOff')}
               </span>
             </div>
+
+            <section className={styles.panel} style={{ marginTop: '0.5rem' }}>
+              <div className={styles.panelHead}>
+                <h2>🛡️ {t('riskManagement')}</h2>
+              </div>
+              <div className={styles.panelBody}>
+                <RiskPanel risk={risk} onSave={(patch: Partial<RiskConfig>) => act(() => updateRisk(patch))} />
+              </div>
+            </section>
           </div>
         )}
 
@@ -922,27 +947,6 @@ export function Dashboard() {
                 )}
               </div>
             </section>
-
-            <section className={styles.panel}>
-              <div className={styles.panelHead}>
-                <h2>{t('tradeHistory')}</h2>
-                <span className={styles.count}>{snap.closed.length}</span>
-              </div>
-              <div className={styles.panelBody}>
-                {snap.closed.length ? (
-                  <div className={styles.rows}>
-                    {[...snap.closed]
-                      .sort((a, b) => (b.closedAt || b.openedAt || 0) - (a.closedAt || a.openedAt || 0)) // Newest first
-                      .slice(0, 20)
-                      .map((p) => (
-                        <PositionRow key={p.id} position={p} />
-                      ))}
-                  </div>
-                ) : (
-                  <p className={styles.empty}>{t('noClosedTrades')}</p>
-                )}
-              </div>
-            </section>
           </div>
 
           <div className={styles.column}>
@@ -980,13 +984,6 @@ export function Dashboard() {
                   <p className={styles.empty}>{t('noActivityYet')}</p>
                 )}
               </div>
-            </section>
-
-            <section className={styles.panel}>
-              <div className={styles.panelHead}>
-                <h2>{t('riskManagement')}</h2>
-              </div>
-              <RiskPanel risk={risk} onSave={(patch: Partial<RiskConfig>) => act(() => updateRisk(patch))} />
             </section>
           </div>
         </div>
