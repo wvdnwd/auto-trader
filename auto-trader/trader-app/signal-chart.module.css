@@ -6,8 +6,12 @@
 
 .chart {
   width: 100%;
-  height: auto;
+  min-height: 320px;
+  max-height: 480px;
   display: block;
+  background: rgba(10, 15, 29, 0.6);
+  border-radius: 8px;
+  border: 1px solid var(--line);
 }
 
 .empty {
@@ -410,6 +414,39 @@
 
 .slBadgeText {
   fill: #f87171;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.entryLine {
+  stroke: #38bdf8;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 3;
+  opacity: 0.9;
+}
+
+.entryBadgeBg {
+  fill: #082f49;
+  stroke: #38bdf8;
+  stroke-width: 1;
+}
+
+.entryBadgeText {
+  fill: #7dd3fc;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.priceBadgeBg {
+  fill: #291e03;
+  stroke: #fbbf24;
+  stroke-width: 1;
+}
+
+.priceBadgeText {
+  fill: #fde68a;
   font-size: 9.5px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;

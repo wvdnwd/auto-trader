@@ -30,8 +30,8 @@ export type SignalChartProps = {
 };
 
 const W = 760;
-const H = 400;
-const PAD = { top: 22, right: 120, bottom: 26, left: 65 };
+const H = 430;
+const PAD = { top: 25, right: 125, bottom: 25, left: 60 };
 
 /**
  * Build a plain-language explanation of what the engine is waiting for on
@@ -70,6 +70,7 @@ export function SignalChart({
   const [showRoute, setShowRoute] = useState(true);
   const [showFib, setShowFib] = useState(true);
   const [showStructure, setShowStructure] = useState(true);
+  const [candleCount, setCandleCount] = useState<number>(45);
   const [interval, setIntervalState] = useState<TimeframeKey>(initialInterval);
   const [loadedData, setLoadedData] = useState<ChartData | null>(null);
   const [loadingTf, setLoadingTf] = useState(false);
@@ -111,7 +112,7 @@ export function SignalChart({
         Number.isFinite(c.close)
     );
     if (validCandles.length < 2) return null;
-    const recent = validCandles.slice(-100);
+    const recent = validCandles.slice(-candleCount);
     const highs = recent.map((c) => c.high);
     const lows = recent.map((c) => c.low);
     let lo = Math.min(...lows);
@@ -204,7 +205,7 @@ export function SignalChart({
     const innerW = W - PAD.left - PAD.right;
     const innerH = H - PAD.top - PAD.bottom;
     const slot = innerW / recent.length;
-    const bodyW = Math.max(1, slot * 0.6);
+    const bodyW = Math.max(3, Math.min(16, slot * 0.72));
     const x = (i: number) => PAD.left + i * slot + slot / 2;
     const y = (v: number) => {
       if (!Number.isFinite(v)) return PAD.top;
@@ -264,7 +265,13 @@ export function SignalChart({
       .map((l) => ({ ratio: l.ratio, price: l.price, y: y(l.price) }))
       .filter((l) => inRange(l.y));
 
-    const ticks = [hi, (hi + lo) / 2, lo].map((v) => ({ v, y: y(v) }));
+    const ticks = [
+      hi,
+      hi - (hi - lo) * 0.25,
+      (hi + lo) / 2,
+      lo + (hi - lo) * 0.25,
+      lo,
+    ].map((v) => ({ v, y: y(v) }));
     const firstLabel = recent[0]?.time ? shortDate(recent[0].time) : '';
     const lastLabel = recent[recent.length - 1]?.time ? shortDate(recent[recent.length - 1].time) : '';
 
@@ -308,6 +315,87 @@ export function SignalChart({
     const pocPrice = effectiveSignal?.marketStructure?.volumeProfile?.poc;
     const pocY = pocPrice !== undefined && inRange(y(pocPrice)) ? y(pocPrice) : undefined;
 
+    const entryY = inRange(y(entryPrice)) ? y(entryPrice) : undefined;
+    const entryLine = effectivePosition && entryY !== undefined ? { price: entryPrice, y: entryY } : undefined;
+    const lastCloseY = lastClose !== undefined && inRange(y(lastClose)) ? y(lastClose) : undefined;
+
+    type RightBadge = {
+      id: string;
+      rawY: number;
+      y: number;
+      kind: 'tp' | 'sl' | 'entry' | 'price';
+      label: string;
+      price: number;
+      pct?: number;
+      hit?: boolean;
+    };
+
+    const rightBadges: RightBadge[] = [];
+    tpLines.forEach((tp) => {
+      if (inRange(tp.y)) {
+        rightBadges.push({
+          id: tp.label,
+          rawY: tp.y,
+          y: tp.y,
+          kind: 'tp',
+          label: tp.label,
+          price: tp.price,
+          pct: tp.pct,
+          hit: tp.hit,
+        });
+      }
+    });
+    if (slLine && inRange(slLine.y)) {
+      rightBadges.push({
+        id: 'sl',
+        rawY: slLine.y,
+        y: slLine.y,
+        kind: 'sl',
+        label: 'SL',
+        price: slLine.price,
+        pct: slLine.pct,
+      });
+    }
+
+    if (entryLine) {
+      rightBadges.push({
+        id: 'entry',
+        rawY: entryLine.y,
+        y: entryLine.y,
+        kind: 'entry',
+        label: 'INSTAP',
+        price: entryLine.price,
+      });
+    }
+
+    if (lastCloseY !== undefined && lastClose !== undefined) {
+      rightBadges.push({
+        id: 'price',
+        rawY: lastCloseY,
+        y: lastCloseY,
+        kind: 'price',
+        label: 'NU',
+        price: lastClose,
+        pct: effectivePosition && entryPrice > 0 ? ((lastClose - entryPrice) / entryPrice) * 100 : undefined,
+      });
+    }
+
+    rightBadges.sort((a, b) => a.rawY - b.rawY);
+
+    for (let i = 1; i < rightBadges.length; i++) {
+      if (rightBadges[i].y < rightBadges[i - 1].y + 19) {
+        rightBadges[i].y = rightBadges[i - 1].y + 19;
+      }
+    }
+    for (let i = rightBadges.length - 1; i >= 1; i--) {
+      if (rightBadges[i].y > H - PAD.bottom) {
+        rightBadges[i].y = H - PAD.bottom;
+        if (rightBadges[i - 1].y > rightBadges[i].y - 19) {
+          rightBadges[i - 1].y = rightBadges[i].y - 19;
+        }
+      }
+    }
+
     // Generate expected price trajectory curve
     let trajectoryPath = '';
     const trajectoryPoints: Array<{ x: number; y: number; label: string }> = [];
@@ -316,15 +404,15 @@ export function SignalChart({
       const last = candlesXY[candlesXY.length - 1];
       const startX = last.x;
       const startY = last.closeY;
-      const entryY = y(entryPrice);
+      const entryYVal = y(entryPrice);
 
       if (isWaitingPullback) {
         // Price is outside the golden zone: show pullback into the zone first, then explosion to TPs!
         const p1X = startX + 28;
-        const p1Y = entryY;
+        const p1Y = entryYVal;
         trajectoryPoints.push({ x: p1X, y: p1Y, label: 'Pullback' });
 
-        const tp1Y = tps[0] ? y(tps[0].price) : entryY;
+        const tp1Y = tps[0] ? y(tps[0].price) : entryYVal;
         const p2X = startX + 56;
         trajectoryPoints.push({ x: p2X, y: tp1Y, label: 'TP1' });
 
@@ -344,10 +432,10 @@ export function SignalChart({
       } else {
         // Price is already at/in entry zone
         const p1X = startX + 24;
-        const p1Y = entryY;
+        const p1Y = entryYVal;
         trajectoryPoints.push({ x: p1X, y: p1Y, label: 'Instap' });
 
-        const tp1Y = tps[0] ? y(tps[0].price) : entryY;
+        const tp1Y = tps[0] ? y(tps[0].price) : entryYVal;
         const p2X = startX + 52;
         trajectoryPoints.push({ x: p2X, y: tp1Y, label: 'TP1' });
 
@@ -387,6 +475,10 @@ export function SignalChart({
       goldenHigh,
       pocPrice,
       pocY,
+      entryLine,
+      lastCloseY,
+      rightBadges,
+      hasActivePosition: Boolean(effectivePosition),
       fibAnchorLines,
       fibDirection: effectiveSignal?.fib?.direction,
       fibSwingHigh: effectiveSignal?.fib?.swingHigh,
@@ -398,7 +490,7 @@ export function SignalChart({
       trajectoryPath,
       trajectoryPoints,
     };
-  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade]);
+  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade, candleCount]);
 
   const notes = waitingOn(effectiveSignal);
 
@@ -475,6 +567,26 @@ export function SignalChart({
             </button>
           ))}
           {loadingTf && <span className={styles.tfLoading}>Laden…</span>}
+        </div>
+
+        <div className={styles.tfBar}>
+          <span className={styles.tfTitle}>Zoom:</span>
+          <button
+            type="button"
+            className={`${styles.tfBtn} ${candleCount === 45 ? styles.tfBtnActive : ''}`}
+            onClick={() => setCandleCount(45)}
+            title="45 candles — grote, duidelijke candles"
+          >
+            🔍 Detail (45)
+          </button>
+          <button
+            type="button"
+            className={`${styles.tfBtn} ${candleCount === 90 ? styles.tfBtnActive : ''}`}
+            onClick={() => setCandleCount(90)}
+            title="90 candles — breder trendoverzicht"
+          >
+            📊 Overzicht (90)
+          </button>
         </div>
 
         <div className={styles.filterBar}>
@@ -807,75 +919,67 @@ export function SignalChart({
             </g>
           ))}
 
-        {/* Take Profit Lines & Badges */}
-        {showTargets &&
-          chart.tpLines.map((tp) => (
-            <g key={tp.label}>
-              <line
-                x1={PAD.left}
-                y1={tp.y}
-                x2={W - PAD.right}
-                y2={tp.y}
-                className={tp.hit ? styles.tpLineHit : styles.tpLine}
-              />
-              <rect
-                x={W - PAD.right + 4}
-                y={tp.y - 9}
-                width={PAD.right - 8}
-                height={18}
-                rx={4}
-                className={tp.hit ? styles.tpBadgeBgHit : styles.tpBadgeBg}
-              />
-              <text x={W - 8} y={tp.y + 4} textAnchor="end" className={styles.tpBadgeText}>
-                {tp.label}: {fmtPrice(tp.price)} ({tp.pct >= 0 ? '+' : ''}
-                {tp.pct.toFixed(1)}%)
-              </text>
-            </g>
-          ))}
-
-        {/* Stop Loss Line & Badge */}
-        {showTargets && chart.slLine && (
-          <g>
-            <line
-              x1={PAD.left}
-              y1={chart.slLine.y}
-              x2={W - PAD.right}
-              y2={chart.slLine.y}
-              className={styles.slLine}
-            />
-            <rect
-              x={W - PAD.right + 4}
-              y={chart.slLine.y - 9}
-              width={PAD.right - 8}
-              height={18}
-              rx={4}
-              className={styles.slBadgeBg}
-            />
-            <text x={W - 8} y={chart.slLine.y + 4} textAnchor="end" className={styles.slBadgeText}>
-              SL: {fmtPrice(chart.slLine.price)} ({chart.slLine.pct >= 0 ? '+' : ''}
-              {chart.slLine.pct.toFixed(1)}%)
-            </text>
-          </g>
+        {/* Entry Line (when position is active) */}
+        {chart.entryLine && (
+          <line
+            x1={PAD.left}
+            y1={chart.entryLine.y}
+            x2={W - PAD.right}
+            y2={chart.entryLine.y}
+            className={styles.entryLine}
+          />
         )}
 
-        {/* Candlesticks */}
+        {/* Current Price Line */}
+        {chart.lastCloseY !== undefined && (
+          <line
+            x1={PAD.left}
+            y1={chart.lastCloseY}
+            x2={W - PAD.right}
+            y2={chart.lastCloseY}
+            className={styles.priceLine}
+            style={{ stroke: '#fbbf24', strokeDasharray: '3 3', opacity: 0.8 }}
+          />
+        )}
+
+        {/* Take Profit Lines */}
+        {showTargets &&
+          chart.tpLines.map((tp) => (
+            <line
+              key={tp.label}
+              x1={PAD.left}
+              y1={tp.y}
+              x2={W - PAD.right}
+              y2={tp.y}
+              className={tp.hit ? styles.tpLineHit : styles.tpLine}
+            />
+          ))}
+
+        {/* Stop Loss Line */}
+        {showTargets && chart.slLine && (
+          <line
+            x1={PAD.left}
+            y1={chart.slLine.y}
+            x2={W - PAD.right}
+            y2={chart.slLine.y}
+            className={styles.slLine}
+          />
+        )}
+
+        {/* Candlesticks (Prominent, crisp & clear) */}
         {chart.candlesXY.map((c, i) => (
           <g key={i} className={c.up ? styles.up : styles.down}>
-            <line x1={c.x} y1={c.highY} x2={c.x} y2={c.lowY} className={styles.wick} />
+            <line x1={c.x} y1={c.highY} x2={c.x} y2={c.lowY} className={styles.wick} strokeWidth={1.5} />
             <rect
               x={c.x - chart.bodyW / 2}
               y={Math.min(c.openY, c.closeY)}
               width={chart.bodyW}
-              height={Math.max(1, Math.abs(c.closeY - c.openY))}
+              height={Math.max(2, Math.abs(c.closeY - c.openY))}
+              rx={1.5}
               className={styles.body}
             />
           </g>
         ))}
-
-        {/* Current Price Line */}
-        {chart.priceY !== undefined && (
-          <line x1={PAD.left} y1={chart.priceY} x2={W - PAD.right} y2={chart.priceY} className={styles.priceLine} />
-        )}
 
         {/* Projected Expected Price Path ("Tekening wat die verwacht") */}
         {showRoute && chart.trajectoryPath && (
@@ -923,6 +1027,64 @@ export function SignalChart({
             })}
           </g>
         )}
+
+        {/* Right-Side Badges (Zero Collision) */}
+        {chart.rightBadges
+          .filter((b) => (b.kind === 'tp' || b.kind === 'sl' ? showTargets : true))
+          .map((b) => {
+            const isEntry = b.kind === 'entry';
+            const isPrice = b.kind === 'price';
+            const isSl = b.kind === 'sl';
+            const badgeBg = isEntry
+              ? styles.entryBadgeBg
+              : isPrice
+              ? styles.priceBadgeBg
+              : isSl
+              ? styles.slBadgeBg
+              : b.hit
+              ? styles.tpBadgeBgHit
+              : styles.tpBadgeBg;
+            const badgeText = isEntry
+              ? styles.entryBadgeText
+              : isPrice
+              ? styles.priceBadgeText
+              : isSl
+              ? styles.slBadgeText
+              : styles.tpBadgeText;
+            const textVal = isEntry
+              ? `INSTAP: ${fmtPrice(b.price)}`
+              : isPrice
+              ? `NU: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`
+              : isSl
+              ? `SL: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`
+              : `${b.label}: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`;
+            return (
+              <g key={b.id}>
+                {Math.abs(b.y - b.rawY) > 2 && (
+                  <line
+                    x1={W - PAD.right}
+                    y1={b.rawY}
+                    x2={W - PAD.right + 4}
+                    y2={b.y}
+                    stroke={isEntry ? '#38bdf8' : isPrice ? '#fbbf24' : isSl ? '#ef4444' : '#22c55e'}
+                    strokeWidth={1}
+                    opacity={0.6}
+                  />
+                )}
+                <rect
+                  x={W - PAD.right + 4}
+                  y={b.y - 9}
+                  width={PAD.right - 8}
+                  height={18}
+                  rx={4}
+                  className={badgeBg}
+                />
+                <text x={W - 8} y={b.y + 4} textAnchor="end" className={badgeText}>
+                  {textVal}
+                </text>
+              </g>
+            );
+          })}
 
         <text x={PAD.left} y={H - 6} className={styles.axisLabel}>
           {chart.firstLabel}
