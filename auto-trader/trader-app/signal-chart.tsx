@@ -1,20 +1,32 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styles from './signal-chart.module.css';
-import { price as fmtPrice, shortDate } from './format.js';
-import type { Candle, Position, Signal, TradePlan } from './types.js';
+import { fetchChart } from './api.js';
+import { pct, price as fmtPrice, shortDate } from './format.js';
+import type { Candle, ChartData, Position, Signal, TradePlan } from './types.js';
+
+export type TimeframeKey = 'Min5' | 'Min15' | 'Min60' | 'Hour4';
+
+export const TIMEFRAMES: Array<{ key: TimeframeKey; label: string; name: string }> = [
+  { key: 'Min5', label: '5m', name: '5m (Sniper detail)' },
+  { key: 'Min15', label: '15m', name: '15m (Timing & reversal)' },
+  { key: 'Min60', label: '1u', name: '1u (Standaard strategie)' },
+  { key: 'Hour4', label: '4u', name: '4u (Macro trend context)' },
+];
 
 /** Props for {@link SignalChart}. */
 export type SignalChartProps = {
   /** Entry-timeframe candles the strategy scores, oldest first. */
-  candles: Candle[];
+  candles?: Candle[];
   /** The current signal for this symbol, used to draw the swing, golden zone and checks. */
-  signal: Signal | null;
+  signal?: Signal | null;
   /** Contract symbol, e.g. `BTC_USDT`, used only for the aria-label. */
   symbol: string;
   /** Active open position for this symbol, if any. */
   position?: Position | null;
   /** Planned trade with TP ladder and SL, if computable. */
   plannedTrade?: TradePlan | null;
+  /** Initial timeframe key (defaults to 'Min60'). */
+  initialInterval?: TimeframeKey;
 };
 
 const W = 760;
@@ -46,15 +58,51 @@ export function waitingOn(signal: Signal | null): string[] {
  * high/low, Fibonacci golden zone, current price, TP1/TP2/TP3 targets, Stop Loss,
  * and an expected price trajectory projection drawn on top.
  */
-export function SignalChart({ candles = [], signal, symbol, position, plannedTrade }: SignalChartProps) {
+export function SignalChart({
+  candles = [],
+  signal,
+  symbol,
+  position,
+  plannedTrade,
+  initialInterval = 'Min60',
+}: SignalChartProps) {
   const [showTargets, setShowTargets] = useState(true);
   const [showRoute, setShowRoute] = useState(true);
   const [showFib, setShowFib] = useState(true);
   const [showStructure, setShowStructure] = useState(true);
+  const [interval, setIntervalState] = useState<TimeframeKey>(initialInterval);
+  const [loadedData, setLoadedData] = useState<ChartData | null>(null);
+  const [loadingTf, setLoadingTf] = useState(false);
+
+  // Sync state when symbol or initialInterval changes
+  useEffect(() => {
+    setLoadedData(null);
+    setIntervalState(initialInterval);
+  }, [symbol, initialInterval]);
+
+  const handleTimeframeChange = (tf: TimeframeKey) => {
+    if (tf === interval) return;
+    setIntervalState(tf);
+    setLoadingTf(true);
+    fetchChart(symbol, tf)
+      .then((data) => {
+        setLoadedData(data);
+        setLoadingTf(false);
+      })
+      .catch((err) => {
+        console.warn('Failed to switch timeframe:', err);
+        setLoadingTf(false);
+      });
+  };
+
+  const effectiveCandles = loadedData?.candles || candles || [];
+  const effectiveSignal = loadedData?.signal || signal || null;
+  const effectivePosition = loadedData?.position || position || null;
+  const effectivePlannedTrade = loadedData?.plannedTrade || plannedTrade || null;
 
   const chart = useMemo(() => {
-    if (!candles || candles.length < 2) return null;
-    const validCandles = candles.filter(
+    if (!effectiveCandles || effectiveCandles.length < 2) return null;
+    const validCandles = effectiveCandles.filter(
       (c) =>
         c &&
         Number.isFinite(c.high) &&
@@ -69,29 +117,29 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
     let lo = Math.min(...lows);
     let hi = Math.max(...highs);
 
-    if (signal?.fib) {
-      if (Number.isFinite(signal.fib.swingLow)) lo = Math.min(lo, signal.fib.swingLow);
-      if (Number.isFinite(signal.fib.swingHigh)) hi = Math.max(hi, signal.fib.swingHigh);
+    if (effectiveSignal?.fib) {
+      if (Number.isFinite(effectiveSignal.fib.swingLow)) lo = Math.min(lo, effectiveSignal.fib.swingLow);
+      if (Number.isFinite(effectiveSignal.fib.swingHigh)) hi = Math.max(hi, effectiveSignal.fib.swingHigh);
     }
 
     // Determine entry reference price
     const lastClose = recent[recent.length - 1]?.close;
-    const rawEntry = position?.entry ?? plannedTrade?.entry ?? signal?.price ?? lastClose;
+    const rawEntry = effectivePosition?.entry ?? effectivePlannedTrade?.entry ?? effectiveSignal?.price ?? lastClose;
     const entryPrice = Number.isFinite(rawEntry) && rawEntry > 0 ? rawEntry : lastClose;
-    const side = position?.side ?? plannedTrade?.side ?? signal?.side ?? 'LONG';
+    const side = effectivePosition?.side ?? effectivePlannedTrade?.side ?? effectiveSignal?.side ?? 'LONG';
     const dir = side === 'LONG' ? 1 : -1;
 
     // Determine Stop Loss
-    let slPrice: number | undefined = position?.stopLoss ?? plannedTrade?.stopLoss;
-    if (slPrice === undefined && signal && Number.isFinite(signal.price) && signal.price > 0) {
-      const stopDist = Math.max(0.015, (signal.atrPct || 0.02) * 1.5);
-      slPrice = signal.price * (1 - dir * stopDist);
+    let slPrice: number | undefined = effectivePosition?.stopLoss ?? effectivePlannedTrade?.stopLoss;
+    if (slPrice === undefined && effectiveSignal && Number.isFinite(effectiveSignal.price) && effectiveSignal.price > 0) {
+      const stopDist = Math.max(0.015, (effectiveSignal.atrPct || 0.02) * 1.5);
+      slPrice = effectiveSignal.price * (1 - dir * stopDist);
     }
 
     // Determine Take Profit targets
     let tps: Array<{ price: number; portion?: number; rMultiple?: number; hit?: boolean; label: string }> = [];
-    if (position?.takeProfits?.length) {
-      tps = position.takeProfits
+    if (effectivePosition?.takeProfits?.length) {
+      tps = effectivePosition.takeProfits
         .filter((t) => Number.isFinite(t.price) && t.price > 0)
         .map((t, idx) => ({
           price: t.price,
@@ -100,8 +148,8 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
           hit: t.hit,
           label: `TP${idx + 1}`,
         }));
-    } else if (plannedTrade?.takeProfits?.length) {
-      tps = plannedTrade.takeProfits
+    } else if (effectivePlannedTrade?.takeProfits?.length) {
+      tps = effectivePlannedTrade.takeProfits
         .filter((t) => Number.isFinite(t.price) && t.price > 0)
         .map((t, idx) => ({
           price: t.price,
@@ -110,12 +158,12 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
           hit: false,
           label: `TP${idx + 1}`,
         }));
-    } else if (signal && Number.isFinite(signal.price) && signal.price > 0) {
-      const stopDist = Math.max(0.015, (signal.atrPct || 0.02) * 1.5);
+    } else if (effectiveSignal && Number.isFinite(effectiveSignal.price) && effectiveSignal.price > 0) {
+      const stopDist = Math.max(0.015, (effectiveSignal.atrPct || 0.02) * 1.5);
       tps = [
-        { price: signal.price * (1 + dir * stopDist * 1.5), portion: 0.33, rMultiple: 1.5, hit: false, label: 'TP1' },
-        { price: signal.price * (1 + dir * stopDist * 2.5), portion: 0.33, rMultiple: 2.5, hit: false, label: 'TP2' },
-        { price: signal.price * (1 + dir * stopDist * 3.5), portion: 0.34, rMultiple: 3.5, hit: false, label: 'TP3' },
+        { price: effectiveSignal.price * (1 + dir * stopDist * 1.5), portion: 0.33, rMultiple: 1.5, hit: false, label: 'TP1' },
+        { price: effectiveSignal.price * (1 + dir * stopDist * 2.5), portion: 0.33, rMultiple: 2.5, hit: false, label: 'TP2' },
+        { price: effectiveSignal.price * (1 + dir * stopDist * 3.5), portion: 0.34, rMultiple: 3.5, hit: false, label: 'TP3' },
       ];
     }
 
@@ -169,16 +217,16 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       time: c.time,
     }));
 
-    const goldenTop = signal?.fib?.retracements?.find((l) => l.ratio === 0.382)?.price;
-    const goldenBottom = signal?.fib?.retracements?.find((l) => l.ratio === 0.618)?.price;
+    const goldenTop = effectiveSignal?.fib?.retracements?.find((l) => l.ratio === 0.382)?.price;
+    const goldenBottom = effectiveSignal?.fib?.retracements?.find((l) => l.ratio === 0.618)?.price;
 
     const inRange = (v: number) => Number.isFinite(v) && v >= PAD.top - 0.5 && v <= H - PAD.bottom + 0.5;
 
     const fibAnchorLines: Array<{ label: string; ratio: number; price: number; y: number }> = [];
-    if (signal?.fib) {
-      const isUp = signal.fib.direction === 'UP';
-      const topPrice = signal.fib.swingHigh;
-      const botPrice = signal.fib.swingLow;
+    if (effectiveSignal?.fib) {
+      const isUp = effectiveSignal.fib.direction === 'UP';
+      const topPrice = effectiveSignal.fib.swingHigh;
+      const botPrice = effectiveSignal.fib.swingLow;
       if (Number.isFinite(topPrice) && Number.isFinite(botPrice)) {
         const topY = y(topPrice);
         const botY = y(botPrice);
@@ -201,12 +249,12 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       }
     }
 
-    const retracementLines = (signal?.fib?.retracements || [])
+    const retracementLines = (effectiveSignal?.fib?.retracements || [])
       .filter((l) => Number.isFinite(l.price))
       .map((l) => ({ ratio: l.ratio, price: l.price, y: y(l.price) }))
       .filter((l) => inRange(l.y));
 
-    const extensionLines = (signal?.fib?.extensions || [])
+    const extensionLines = (effectiveSignal?.fib?.extensions || [])
       .filter((l) => Number.isFinite(l.price))
       .map((l) => ({ ratio: l.ratio, price: l.price, y: y(l.price) }))
       .filter((l) => inRange(l.y));
@@ -219,6 +267,16 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       goldenBottom !== undefined && goldenTop !== undefined ? Math.min(goldenBottom, goldenTop) : undefined;
     const goldenHigh =
       goldenBottom !== undefined && goldenTop !== undefined ? Math.max(goldenBottom, goldenTop) : undefined;
+
+    const isPriceInZone =
+      goldenLow !== undefined && goldenHigh !== undefined && lastClose >= goldenLow && lastClose <= goldenHigh;
+    const isWaitingPullback =
+      side === 'LONG'
+        ? goldenHigh !== undefined && lastClose > goldenHigh
+        : goldenLow !== undefined && lastClose < goldenLow;
+
+    const waitTopY = goldenHigh !== undefined && inRange(y(goldenHigh)) ? y(goldenHigh) : undefined;
+    const waitBottomY = goldenLow !== undefined && inRange(y(goldenLow)) ? y(goldenLow) : undefined;
 
     // Calculate TP and SL lines with Y coordinates and relative %
     const tpLines = tps.map((tp) => {
@@ -241,7 +299,7 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
           }
         : undefined;
 
-    const pocPrice = signal?.marketStructure?.volumeProfile?.poc;
+    const pocPrice = effectiveSignal?.marketStructure?.volumeProfile?.poc;
     const pocY = pocPrice !== undefined && inRange(y(pocPrice)) ? y(pocPrice) : undefined;
 
     // Generate expected price trajectory curve
@@ -254,24 +312,50 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       const startY = last.closeY;
       const entryY = y(entryPrice);
 
-      const p1X = startX + 25;
-      const p1Y = entryY;
-      trajectoryPoints.push({ x: p1X, y: p1Y, label: 'Instap' });
+      if (isWaitingPullback) {
+        // Price is outside the golden zone: show pullback into the zone first, then explosion to TPs!
+        const p1X = startX + 28;
+        const p1Y = entryY;
+        trajectoryPoints.push({ x: p1X, y: p1Y, label: 'Pullback' });
 
-      const tp1Y = tps[0] ? y(tps[0].price) : entryY;
-      const p2X = startX + 50;
-      trajectoryPoints.push({ x: p2X, y: tp1Y, label: 'TP1' });
+        const tp1Y = tps[0] ? y(tps[0].price) : entryY;
+        const p2X = startX + 56;
+        trajectoryPoints.push({ x: p2X, y: tp1Y, label: 'TP1' });
 
-      const tp2Y = tps[1] ? y(tps[1].price) : tp1Y;
-      const p3X = startX + 75;
-      trajectoryPoints.push({ x: p3X, y: tp2Y, label: 'TP2' });
+        const tp2Y = tps[1] ? y(tps[1].price) : tp1Y;
+        const p3X = startX + 84;
+        trajectoryPoints.push({ x: p3X, y: tp2Y, label: 'TP2' });
 
-      const tp3Y = tps[2] ? y(tps[2].price) : tp2Y;
-      const p4X = Math.min(W - PAD.right - 10, startX + 100);
-      trajectoryPoints.push({ x: p4X, y: tp3Y, label: 'TP3' });
+        const tp3Y = tps[2] ? y(tps[2].price) : tp2Y;
+        const p4X = Math.min(W - PAD.right - 10, startX + 110);
+        trajectoryPoints.push({ x: p4X, y: tp3Y, label: 'TP3' });
 
-      if ([startX, startY, p1X, p1Y, p2X, tp1Y, p3X, tp2Y, p4X, tp3Y].every((n) => Number.isFinite(n))) {
-        trajectoryPath = `M ${startX} ${startY} Q ${p1X} ${p1Y} ${p2X} ${tp1Y} T ${p3X} ${tp2Y} T ${p4X} ${tp3Y}`;
+        if ([startX, startY, p1X, p1Y, p2X, tp1Y, p3X, tp2Y, p4X, tp3Y].every((n) => Number.isFinite(n))) {
+          // Dip into pullback then curve up to TP1, TP2, TP3
+          const midY = side === 'LONG' ? Math.max(startY, p1Y) + 5 : Math.min(startY, p1Y) - 5;
+          trajectoryPath = `M ${startX} ${startY} Q ${(startX + p1X) / 2} ${midY} ${p1X} ${p1Y} Q ${(p1X + p2X) / 2} ${(p1Y + tp1Y) / 2} ${p2X} ${tp1Y} T ${p3X} ${tp2Y} T ${p4X} ${tp3Y}`;
+        }
+      } else {
+        // Price is already at/in entry zone
+        const p1X = startX + 24;
+        const p1Y = entryY;
+        trajectoryPoints.push({ x: p1X, y: p1Y, label: 'Instap' });
+
+        const tp1Y = tps[0] ? y(tps[0].price) : entryY;
+        const p2X = startX + 52;
+        trajectoryPoints.push({ x: p2X, y: tp1Y, label: 'TP1' });
+
+        const tp2Y = tps[1] ? y(tps[1].price) : tp1Y;
+        const p3X = startX + 78;
+        trajectoryPoints.push({ x: p3X, y: tp2Y, label: 'TP2' });
+
+        const tp3Y = tps[2] ? y(tps[2].price) : tp2Y;
+        const p4X = Math.min(W - PAD.right - 10, startX + 104);
+        trajectoryPoints.push({ x: p4X, y: tp3Y, label: 'TP3' });
+
+        if ([startX, startY, p1X, p1Y, p2X, tp1Y, p3X, tp2Y, p4X, tp3Y].every((n) => Number.isFinite(n))) {
+          trajectoryPath = `M ${startX} ${startY} Q ${p1X} ${p1Y} ${p2X} ${tp1Y} T ${p3X} ${tp2Y} T ${p4X} ${tp3Y}`;
+        }
       }
     }
 
@@ -283,9 +367,14 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       lastLabel,
       side,
       entryPrice,
-      priceY: signal && Number.isFinite(signal.price) ? y(signal.price) : undefined,
-      swingLowY: signal && Number.isFinite(signal.swingLow) ? y(signal.swingLow) : undefined,
-      swingHighY: signal && Number.isFinite(signal.swingHigh) ? y(signal.swingHigh) : undefined,
+      lastClose,
+      isPriceInZone,
+      isWaitingPullback,
+      waitTopY,
+      waitBottomY,
+      priceY: effectiveSignal && Number.isFinite(effectiveSignal.price) ? y(effectiveSignal.price) : undefined,
+      swingLowY: effectiveSignal && Number.isFinite(effectiveSignal.swingLow) ? y(effectiveSignal.swingLow) : undefined,
+      swingHighY: effectiveSignal && Number.isFinite(effectiveSignal.swingHigh) ? y(effectiveSignal.swingHigh) : undefined,
       goldenTopY: goldenTop !== undefined ? y(goldenTop) : undefined,
       goldenBottomY: goldenBottom !== undefined ? y(goldenBottom) : undefined,
       goldenLow,
@@ -293,9 +382,9 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       pocPrice,
       pocY,
       fibAnchorLines,
-      fibDirection: signal?.fib?.direction,
-      fibSwingHigh: signal?.fib?.swingHigh,
-      fibSwingLow: signal?.fib?.swingLow,
+      fibDirection: effectiveSignal?.fib?.direction,
+      fibSwingHigh: effectiveSignal?.fib?.swingHigh,
+      fibSwingLow: effectiveSignal?.fib?.swingLow,
       retracementLines,
       extensionLines,
       tpLines,
@@ -303,9 +392,9 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
       trajectoryPath,
       trajectoryPoints,
     };
-  }, [candles, signal, position, plannedTrade]);
+  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade]);
 
-  const notes = waitingOn(signal);
+  const notes = waitingOn(effectiveSignal);
 
   if (!chart) {
     return <p className={styles.empty}>Te weinig candles om een grafiek te tekenen.</p>;
@@ -363,6 +452,58 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
 
   return (
     <div className={styles.wrap}>
+      {/* Top Controls: Timeframe Selector & Layer Filters */}
+      <div className={styles.topBar}>
+        <div className={styles.tfBar}>
+          <span className={styles.tfTitle}>Tijdsframe:</span>
+          {TIMEFRAMES.map((tf) => (
+            <button
+              key={tf.key}
+              type="button"
+              className={`${styles.tfBtn} ${interval === tf.key ? styles.tfBtnActive : ''}`}
+              title={tf.name}
+              disabled={loadingTf}
+              onClick={() => handleTimeframeChange(tf.key)}
+            >
+              {tf.label}
+            </button>
+          ))}
+          {loadingTf && <span className={styles.tfLoading}>Laden…</span>}
+        </div>
+
+        <div className={styles.filterBar}>
+          <span className={styles.filterTitle}>Lagen:</span>
+          <button
+            type="button"
+            className={`${styles.filterBtn} ${showTargets ? styles.filterBtnActive : ''}`}
+            onClick={() => setShowTargets(!showTargets)}
+          >
+            🎯 Doelen (TP/SL)
+          </button>
+          <button
+            type="button"
+            className={`${styles.filterBtn} ${showRoute ? styles.filterBtnActive : ''}`}
+            onClick={() => setShowRoute(!showRoute)}
+          >
+            🚀 Koersroute
+          </button>
+          <button
+            type="button"
+            className={`${styles.filterBtn} ${showFib ? styles.filterBtnActive : ''}`}
+            onClick={() => setShowFib(!showFib)}
+          >
+            📏 Fibonacci
+          </button>
+          <button
+            type="button"
+            className={`${styles.filterBtn} ${showStructure ? styles.filterBtnActive : ''}`}
+            onClick={() => setShowStructure(!showStructure)}
+          >
+            🧱 Structuur
+          </button>
+        </div>
+      </div>
+
       {/* Visual Prediction Banner */}
       <div className={`${styles.projectionCard} ${isLong ? '' : styles.projectionCardShort}`}>
         <div className={styles.projectionTitle}>
@@ -370,8 +511,12 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
           <span>
             <b>Verwachte koersroute ({chart.side}):</b>{' '}
             {isLong
-              ? 'Consolidatie/pullback in instapzone ➔ opwaartse impuls richting TP1, TP2 en TP3'
-              : 'Pullback/afwijzing bij weerstand ➔ neerwaartse impuls richting TP1, TP2 en TP3'}
+              ? chart.isWaitingPullback
+                ? 'Wacht op pullback in instapzone ➔ opwaartse reactie richting TP1, TP2 en TP3'
+                : 'Instapzone bereikt ➔ opwaartse impuls richting TP1, TP2 en TP3'
+              : chart.isWaitingPullback
+                ? 'Wacht op pullback omhoog bij weerstand ➔ neerwaartse afwijzing richting TP1, TP2 en TP3'
+                : 'Weerstand bereikt ➔ neerwaartse impuls richting TP1, TP2 en TP3'}
           </span>
         </div>
         <div className={styles.projectionTargets}>
@@ -387,9 +532,9 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
               {chart.slLine.pct.toFixed(1)}%)
             </span>
           )}
-          {signal?.marketStructure?.smtDivergence && (
+          {effectiveSignal?.marketStructure?.smtDivergence && (
             <span className={styles.projectionBadge} style={{ borderColor: '#a855f7', color: '#c084fc' }}>
-              ⚡ <b>SMT {signal.marketStructure.smtDivergence.type}:</b> {signal.marketStructure.smtDivergence.reason}
+              ⚡ <b>SMT {effectiveSignal.marketStructure.smtDivergence.type}:</b> {effectiveSignal.marketStructure.smtDivergence.reason}
             </span>
           )}
         </div>
@@ -403,8 +548,8 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
             <span>
               <b>Fibonacci Analyse ({chart.fibDirection === 'UP' ? 'Opwaartse impuls' : 'Neerwaartse impuls'}):</b>{' '}
               {(() => {
-                const p = signal?.price ?? 0;
-                if (p >= chart.goldenLow && p <= chart.goldenHigh) {
+                const p = chart.lastClose || effectiveSignal?.price || 0;
+                if (chart.isPriceInZone) {
                   return '🎯 Koers bevindt zich nu in de Golden Zone (0.382–0.618) — sterke reactiezone!';
                 }
                 if (chart.side === 'LONG') {
@@ -427,48 +572,15 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
                 📍 <b>Impuls bereik:</b> {fmtPrice(chart.fibSwingLow)} ➔ {fmtPrice(chart.fibSwingHigh)}
               </span>
             )}
-            {signal && (
+            {effectiveSignal && (
               <span className={styles.fibBadge}>
                 🛡️ <b>Stop anchor (structuur):</b>{' '}
-                {chart.side === 'LONG' ? fmtPrice(signal.swingLow) : fmtPrice(signal.swingHigh)}
+                {chart.side === 'LONG' ? fmtPrice(effectiveSignal.swingLow) : fmtPrice(effectiveSignal.swingHigh)}
               </span>
             )}
           </div>
         </div>
       )}
-
-      {/* Layer Filter Toolbar */}
-      <div className={styles.filterBar}>
-        <span className={styles.filterTitle}>Lagen:</span>
-        <button
-          type="button"
-          className={`${styles.filterBtn} ${showTargets ? styles.filterBtnActive : ''}`}
-          onClick={() => setShowTargets(!showTargets)}
-        >
-          🎯 Doelen (TP/SL)
-        </button>
-        <button
-          type="button"
-          className={`${styles.filterBtn} ${showRoute ? styles.filterBtnActive : ''}`}
-          onClick={() => setShowRoute(!showRoute)}
-        >
-          🚀 Koersroute
-        </button>
-        <button
-          type="button"
-          className={`${styles.filterBtn} ${showFib ? styles.filterBtnActive : ''}`}
-          onClick={() => setShowFib(!showFib)}
-        >
-          📏 Fibonacci
-        </button>
-        <button
-          type="button"
-          className={`${styles.filterBtn} ${showStructure ? styles.filterBtnActive : ''}`}
-          onClick={() => setShowStructure(!showStructure)}
-        >
-          🧱 Structuur
-        </button>
-      </div>
 
       <svg
         className={styles.chart}
@@ -511,14 +623,50 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
           </g>
         ))}
 
-        {showFib && chart.goldenTopY !== undefined && chart.goldenBottomY !== undefined && (
-          <rect
-            x={PAD.left}
-            y={Math.min(chart.goldenTopY, chart.goldenBottomY)}
-            width={W - PAD.left - PAD.right}
-            height={Math.max(2, Math.abs(chart.goldenBottomY - chart.goldenTopY))}
-            className={styles.goldenZone}
-          />
+        {/* Highlighted Wachtzone / Instapgebied (Golden Zone & Pullback) */}
+        {showFib && chart.waitTopY !== undefined && chart.waitBottomY !== undefined && (
+          <g>
+            <rect
+              x={PAD.left}
+              y={Math.min(chart.waitTopY, chart.waitBottomY)}
+              width={W - PAD.left - PAD.right}
+              height={Math.max(8, Math.abs(chart.waitBottomY - chart.waitTopY))}
+              className={styles.waitZone}
+            />
+            <line
+              x1={PAD.left}
+              y1={Math.min(chart.waitTopY, chart.waitBottomY)}
+              x2={W - PAD.right}
+              y2={Math.min(chart.waitTopY, chart.waitBottomY)}
+              className={styles.waitZoneBorder}
+            />
+            <line
+              x1={PAD.left}
+              y1={Math.max(chart.waitTopY, chart.waitBottomY)}
+              x2={W - PAD.right}
+              y2={Math.max(chart.waitTopY, chart.waitBottomY)}
+              className={styles.waitZoneBorder}
+            />
+            <rect
+              x={PAD.left + 6}
+              y={Math.min(chart.waitTopY, chart.waitBottomY) + 2}
+              width={chart.isPriceInZone ? 160 : 225}
+              height={15}
+              rx={3}
+              className={styles.waitZoneBadgeBg}
+            />
+            <text
+              x={PAD.left + 10}
+              y={Math.min(chart.waitTopY, chart.waitBottomY) + 13}
+              className={styles.waitZoneBadgeText}
+            >
+              {chart.isPriceInZone
+                ? '🎯 INSTAPZONE BEREIKT'
+                : isLong
+                  ? '⏳ WACHT OP PULLBACK IN DEZE ZONE'
+                  : '⏳ WACHT OP PULLBACK OMHOOG IN ZONE'}
+            </text>
+          </g>
         )}
 
         {/* Fibonacci Anchor Lines (0.000 Top & 1.000 Bodem) */}
@@ -550,7 +698,7 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
           })}
 
         {/* Structure Support / Resistance lines (Stop anchors) */}
-        {showStructure && chart.swingHighY !== undefined && signal && (
+        {showStructure && chart.swingHighY !== undefined && effectiveSignal && (
           <g>
             <line
               x1={PAD.left}
@@ -565,11 +713,11 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
               className={styles.axisLabel}
               style={{ fill: '#60a5fa', fontWeight: 600 }}
             >
-              Weerstand (structuur): {fmtPrice(signal.swingHigh)}
+              Weerstand (structuur): {fmtPrice(effectiveSignal.swingHigh)}
             </text>
           </g>
         )}
-        {showStructure && chart.swingLowY !== undefined && signal && (
+        {showStructure && chart.swingLowY !== undefined && effectiveSignal && (
           <g>
             <line
               x1={PAD.left}
@@ -584,7 +732,7 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
               className={styles.axisLabel}
               style={{ fill: '#60a5fa', fontWeight: 600 }}
             >
-              Steun (structuur): {fmtPrice(signal.swingLow)}
+              Steun (structuur): {fmtPrice(effectiveSignal.swingLow)}
             </text>
           </g>
         )}
@@ -802,17 +950,126 @@ export function SignalChart({ candles = [], signal, symbol, position, plannedTra
         </span>
       </div>
 
-      <div className={styles.waiting}>
-        <h4>Waar de bot op wacht</h4>
-        {notes.length === 0 ? (
-          <p className={styles.ready}>Alle voorwaarden zijn vervuld — instap kan bij de volgende scan volgen.</p>
-        ) : (
-          <ul>
-            {notes.map((n) => (
-              <li key={n}>{n}</li>
-            ))}
-          </ul>
-        )}
+      {/* Hoe & Wat: Strategie & Wacht-Uitleg */}
+      <div className={styles.howAndWhatCard}>
+        <div className={styles.howAndWhatHead}>
+          <span className={styles.howAndWhatTitle}>
+            💡 <b>Hoe & Wat: Strategie & Wacht-Uitleg</b> ({symbol.replace('_', '/')})
+          </span>
+          <span
+            className={`${styles.howAndWhatStatusBadge} ${
+              notes.length === 0
+                ? styles.statusReady
+                : chart.isWaitingPullback
+                  ? styles.statusWaiting
+                  : styles.statusWaiting
+            }`}
+          >
+            {notes.length === 0
+              ? '🎯 Gereed voor instap'
+              : chart.isWaitingPullback
+                ? '⏳ Wacht op pullback'
+                : chart.isPriceInZone
+                  ? '⏱️ Wacht op trigger in zone'
+                  : '⏳ Wacht op voorwaarden'}
+          </span>
+        </div>
+
+        <p className={styles.howAndWhatSummary}>
+          {(() => {
+            const sideName = isLong ? 'LONG (Koop)' : 'SHORT (Verkoop)';
+            const conf = effectiveSignal ? pct(effectiveSignal.confidence, 0) : '—';
+            const lev = effectiveSignal?.plannedLeverage ? `${effectiveSignal.plannedLeverage}x` : '5x';
+            if (notes.length === 0) {
+              return `De bot ziet een sterke ${sideName} kans met ${conf} overtuiging (${lev} hefboom). Alle marktstructuur- en momentumvoorwaarden zijn vervuld. Zodra de scanner de volgende cyclus draait, kan de order direct geactiveerd worden.`;
+            }
+            if (chart.isWaitingPullback && chart.goldenLow !== undefined && chart.goldenHigh !== undefined) {
+              return `De overkoepelende structuur is ${isLong ? 'bullish (opwaarts)' : 'bearish (neerwaarts)'}, maar de huidige koers (${fmtPrice(chart.lastClose)}) staat te ver buiten de ideale instap. De bot wacht geduldig tot de prijs terugkeert naar de Golden Zone (${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)}) om met minimaal risico in te stappen.`;
+            }
+            if (chart.isPriceInZone) {
+              return `De koers bevindt zich in de Golden Zone (${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)})! De bot wacht nu op de micro-timing trigger (een bevestigende reversal candle op het 15m/5m tijdsframe met stijgende RSI) om een valse uitbraak te voorkomen.`;
+            }
+            return `De bot monitort ${symbol.replace('_', '/')} voor een potentiële ${sideName} positie. Er wordt gewacht op bevestiging van het hogere tijdsframe en het bereiken van de optimale marktstructuur.`;
+          })()}
+        </p>
+
+        <div className={styles.howAndWhatGrid}>
+          <div className={styles.howAndWhatItem}>
+            <span className={styles.howAndWhatItemHead}>
+              📍 <b>1. Wachtzone & Prijsactie</b>
+            </span>
+            <p className={styles.howAndWhatItemDesc}>
+              {chart.goldenLow !== undefined && chart.goldenHigh !== undefined
+                ? `Golden Zone: ${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)} (0.382–0.618 Fib). ${
+                    chart.isPriceInZone
+                      ? 'Koers is momenteel in de zone.'
+                      : chart.isWaitingPullback
+                        ? `Wacht op ${isLong ? 'daling' : 'stijging'} van ${Math.abs(((chart.lastClose - (isLong ? chart.goldenHigh : chart.goldenLow)) / chart.lastClose) * 100).toFixed(1)}% naar de zone.`
+                        : 'Buiten de zone.'
+                  }`
+                : `Huidige prijs is ${fmtPrice(chart.lastClose)}. Wacht op swingstructuur.`}
+            </p>
+          </div>
+
+          <div className={styles.howAndWhatItem}>
+            <span className={styles.howAndWhatItemHead}>
+              ⏱️ <b>2. Tijdsframe & Micro-Trigger</b>
+            </span>
+            <p className={styles.howAndWhatItemDesc}>
+              Geselecteerd TF: <b>{TIMEFRAMES.find((t) => t.key === interval)?.label}</b>. 4u-macrotrend is{' '}
+              <b>{effectiveSignal?.higherRegime || 'Onbekend'}</b>{' '}
+              {effectiveSignal?.alignedWithHigher ? '(✓ Bevestigd)' : '(⏳ Nog niet uitgelijnd)'}. Vereist een bevestigde 15m/5m reversal candle voor orderactivatie.
+            </p>
+          </div>
+
+          <div className={styles.howAndWhatItem}>
+            <span className={styles.howAndWhatItemHead}>
+              🛡️ <b>3. Stop Loss Bescherming</b>
+            </span>
+            <p className={styles.howAndWhatItemDesc}>
+              {chart.slLine
+                ? `SL op ${fmtPrice(chart.slLine.price)} (${chart.slLine.pct >= 0 ? '+' : ''}${chart.slLine.pct.toFixed(1)}%). Geplaatst onder de structuur/swing ${isLong ? 'low' : 'high'} om verlies strak te begrenzen.`
+                : 'SL wordt berekend op basis van ATR en structuursteun.'}
+            </p>
+          </div>
+
+          <div className={styles.howAndWhatItem}>
+            <span className={styles.howAndWhatItemHead}>
+              🎯 <b>4. Winstdoelen (TP Ladder)</b>
+            </span>
+            <p className={styles.howAndWhatItemDesc}>
+              {chart.tpLines.length > 0
+                ? chart.tpLines
+                    .map((t) => `${t.label}: ${fmtPrice(t.price)} (${t.pct >= 0 ? '+' : ''}${t.pct.toFixed(1)}%)`)
+                    .join(' · ') + ' (Bij TP1 gaat SL automatisch naar Break-Even)'
+                : 'TP doelen worden berekend op 1.5R, 2.5R en 3.5R.'}
+            </p>
+          </div>
+        </div>
+
+        {/* Gedetailleerde Conditie-Checklist */}
+        <div className={styles.howAndWhatChecklist}>
+          <span style={{ fontSize: '0.76rem', fontWeight: 600, color: 'var(--muted)', marginTop: '0.2rem' }}>
+            Condities & Confluenties:
+          </span>
+          {effectiveSignal?.checks && effectiveSignal.checks.length > 0 ? (
+            effectiveSignal.checks.map((c) => (
+              <div key={c.name} className={styles.checkRow}>
+                <span className={c.passed ? styles.checkSuccess : styles.checkPending}>
+                  {c.passed ? '✓' : '⏳'}
+                </span>
+                <span>
+                  <b>{c.name}:</b> {c.detail}
+                </span>
+              </div>
+            ))
+          ) : (
+            <div className={styles.checkRow}>
+              <span className={styles.checkPending}>⏳</span>
+              <span>Wachten op volledige evaluatie van de checks…</span>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

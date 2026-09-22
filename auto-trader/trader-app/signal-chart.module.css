@@ -426,3 +426,212 @@
   font-weight: 700;
 }
 
+/* ---------- Top Control Bar (Timeframes & Layers) ---------- */
+.topBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+}
+
+.tfBar {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.tfTitle {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-weight: 600;
+  margin-right: 0.2rem;
+}
+
+.tfBtn {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 5px;
+  padding: 0.22rem 0.6rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.tfBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.tfBtnActive {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 0 8px rgba(91, 140, 255, 0.4);
+}
+
+.tfLoading {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-style: italic;
+  margin-left: 0.3rem;
+}
+
+/* ---------- Wait Zone / Instapgebied in SVG ---------- */
+.waitZone {
+  fill: #f59e0b;
+  fill-opacity: 0.14;
+}
+
+.waitZoneBorder {
+  stroke: #f59e0b;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
+.waitZoneBadgeBg {
+  fill: #1c1404;
+  stroke: #f59e0b;
+  stroke-width: 1;
+}
+
+.waitZoneBadgeText {
+  fill: #fbbf24;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+/* ---------- Hoe & Wat Explanation Card ---------- */
+.howAndWhatCard {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.howAndWhatHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.5rem;
+}
+
+.howAndWhatTitle {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.howAndWhatStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+}
+
+.statusWaiting {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.statusReady {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.statusBlocked {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.howAndWhatSummary {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.howAndWhatGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.6rem;
+}
+
+.howAndWhatItem {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.howAndWhatItemHead {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.howAndWhatItemDesc {
+  font-size: 0.74rem;
+  color: var(--muted);
+  line-height: 1.35;
+  margin: 0;
+}
+
+.howAndWhatChecklist {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+}
+
+.checkRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.checkSuccess {
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.checkPending {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.checkFailed {
+  color: #f87171;
+  font-weight: 600;
+}
+

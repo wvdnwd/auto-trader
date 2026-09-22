@@ -684,6 +684,21 @@
 
 .miniBtn:hover { color: var(--red); border-color: rgba(255, 84, 112, 0.4); }
 
+.miniBtnActive {
+  background: rgba(91, 140, 255, 0.18);
+  border-color: var(--accent);
+  color: #93c5fd;
+}
+
+.inlineChartWrap {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
 /* ---------- take-profit breakdown ---------- */
 .tpTable {
   display: flex;
