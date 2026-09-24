@@ -18,7 +18,9 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 3000,
-        HOST: '127.0.0.1',
+        HOST: '0.0.0.0',
+        AUTOSTART: 'true',
+        ALLOW_IN_MEMORY_STORE: 'true',
         EXCHANGE_VENUE: process.env.EXCHANGE_VENUE || 'mexc',
         LIVE_TRADING_ENABLED: process.env.LIVE_TRADING_ENABLED || 'false',
         FUTURES_API_BASE: 'https://contract.mexc.com/api/v1/contract',

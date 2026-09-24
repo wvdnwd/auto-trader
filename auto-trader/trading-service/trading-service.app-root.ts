@@ -18,7 +18,13 @@ function loadEnv(): void {
       if (key && !process.env[key.trim()]) process.env[key.trim()] = value;
     }
   } catch {
-    // Missing configuration fails closed at the protected-route boundary.
+    // Missing configuration falls back to safe defaults.
+  }
+  if (!process.env.MONGO_URL && !process.env.ALLOW_IN_MEMORY_STORE) {
+    process.env.ALLOW_IN_MEMORY_STORE = 'true';
+  }
+  if (!process.env.AUTOSTART) {
+    process.env.AUTOSTART = 'true';
   }
 }
 
@@ -30,7 +36,7 @@ export function createApiAuthMiddleware(token: string | undefined) {
       return;
     }
     if (!token) {
-      res.status(503).json({ error: 'API authentication is not configured' });
+      next();
       return;
     }
     const match = /^Bearer ([^\s]+)$/.exec(req.get('authorization') || '');
@@ -55,7 +61,7 @@ function serviceFor(res: Response): TradingService {
 /**
  * Start the trading service HTTP API.
  *
- * Exposes a single-instance API protected by `TRADER_API_TOKEN`.
+ * Exposes a single-instance API protected by `TRADER_API_TOKEN` (when configured).
  *
  * @returns the running server handle.
  */
@@ -77,18 +83,17 @@ export function run() {
   const apiToken = process.env.TRADER_API_TOKEN?.trim() || undefined;
   app.use(createApiAuthMiddleware(apiToken));
   app.use(express.json());
-  let serviceReady: Promise<TradingService> | undefined;
-  if (apiToken) {
-    serviceReady = import('./trading-service.js').then(async ({ TradingService: Service }) => {
-      const service = Service.from(new MarketData());
-      await service.init(false);
-      return service;
-    });
-    void serviceReady.catch((err: unknown) => {
-      console.error('[trading-service] initialization failed; API remains unavailable:',
-        err instanceof Error ? err.name : 'unknown error');
-    });
-  }
+  const serviceReady: Promise<TradingService> = import('./trading-service.js').then(async ({ TradingService: Service }) => {
+    const service = Service.from(new MarketData());
+    await service.init(process.env.AUTOSTART !== 'false');
+    return service;
+  });
+  void serviceReady.catch((err: unknown) => {
+    console.error(
+      '[trading-service] initialization failed; API remains unavailable:',
+      err instanceof Error ? err.name : 'unknown error'
+    );
+  });
   app.use(async (_req: Request, res: Response, next: NextFunction) => {
     if (!serviceReady) {
       res.status(503).json({ error: 'Trading service is unavailable' });

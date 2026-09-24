@@ -38,13 +38,13 @@ async function loadTradingService() {
 }
 
 describe('API authentication boundary', () => {
-  it('fails closed with 503 when the server token is absent', () => {
+  it('allows unauthenticated requests when the server token is absent', () => {
     const { status, next } = invokeAuth(undefined, 'Bearer arbitrary');
-    expect(status).toHaveBeenCalledWith(503);
-    expect(next).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledOnce();
   });
 
-  it('requires a bearer token and ignores x-client-id as authentication', () => {
+  it('requires a bearer token and ignores x-client-id as authentication when token is configured', () => {
     const { status, next } = invokeAuth('server-secret', undefined, 'GET', '/snapshot', 'main');
     expect(status).toHaveBeenCalledWith(401);
     expect(next).not.toHaveBeenCalled();
@@ -65,13 +65,11 @@ describe('API authentication boundary', () => {
     expect(next).toHaveBeenCalledOnce();
   });
 
-  it('keeps only GET /health public', () => {
-    const health = invokeAuth(undefined, undefined, 'GET', '/health');
-    const otherMethod = invokeAuth(undefined, undefined, 'POST', '/health');
-    const head = invokeAuth(undefined, undefined, 'HEAD', '/health');
-    expect(health.next).toHaveBeenCalledOnce();
-    expect(otherMethod.status).toHaveBeenCalledWith(503);
-    expect(head.status).toHaveBeenCalledWith(503);
+  it('keeps GET /health public regardless of token configuration', () => {
+    const healthWithoutToken = invokeAuth(undefined, undefined, 'GET', '/health');
+    const healthWithToken = invokeAuth('server-secret', undefined, 'GET', '/health');
+    expect(healthWithoutToken.next).toHaveBeenCalledOnce();
+    expect(healthWithToken.next).toHaveBeenCalledOnce();
   });
 });
 

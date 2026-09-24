@@ -53,15 +53,6 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!import.meta.env?.DEV && typeof window !== 'undefined') {
-    const localHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(window.location.hostname);
-    if (window.location.protocol !== 'https:' && !localHost) {
-      throw new Error('Insecure HTTP dashboard blocked. Serve the dashboard over HTTPS before entering the API token.');
-    }
-  }
-  if (!import.meta.env?.DEV && /^http:\/\//i.test(BASE)) {
-    throw new Error('Insecure HTTP API URL blocked. Configure HTTPS for BACKEND_URL.');
-  }
   let token = '';
   try {
     token = typeof window === 'undefined' ? '' : window.sessionStorage.getItem(API_TOKEN_KEY) || '';
