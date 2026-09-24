@@ -182,7 +182,7 @@ export class TradingService {
     private readonly optimizer: OptimizerRunner,
     private readonly walkForward: WalkForwardRunner,
     private readonly scout: MarketScout,
-    private readonly exchange: IExchangeAdapter = new MexcExchangeAdapter()
+    private exchange: IExchangeAdapter = new MexcExchangeAdapter()
   ) {
     this.store.onFailure?.(() => {
       this.engine.stop();
@@ -208,8 +208,22 @@ export class TradingService {
         : 'Explicit non-live local development: using in-memory state',
     });
     const stored = await this.store.exchangeCredentials();
-    if (stored.apiKey && stored.apiSecret && 'setCredentials' in this.exchange) {
-      (this.exchange as MexcExchangeAdapter).setCredentials(stored.apiKey, stored.apiSecret);
+    const venue = stored.venue || ((stored.walletAddress || process.env.HYPERLIQUID_WALLET) ? 'hyperliquid' : 'mexc');
+    if (venue === 'hyperliquid') {
+      const adapter = new HyperliquidExchangeAdapter(
+        stored.walletAddress || process.env.HYPERLIQUID_WALLET,
+        stored.privateKey || process.env.HYPERLIQUID_PRIVATE_KEY,
+        stored.isTestnet ?? (process.env.HYPERLIQUID_TESTNET === 'true')
+      );
+      this.exchange = adapter;
+      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
+    } else {
+      const adapter = new MexcExchangeAdapter(
+        stored.apiKey || process.env.MEXC_API_KEY,
+        stored.apiSecret || process.env.MEXC_API_SECRET
+      );
+      this.exchange = adapter;
+      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
     }
 
     const isConfigured = Boolean(this.exchange?.isConfigured?.());
@@ -592,7 +606,9 @@ export class TradingService {
 
     const contractSize = detail?.contractSize || 1;
     const rawVol = (usdtAmount * leverage) / (contractSize * price);
-    const vol = Math.max(detail?.minVol || 1, Math.round(rawVol));
+    const vol = this.exchange.venue === 'hyperliquid'
+      ? rawVol
+      : Math.max(detail?.minVol || 1, Math.round(rawVol));
     if (detail?.maxVol && vol > detail.maxVol) {
       throw new Error(`bedrag te groot — max ordergrootte voor ${symbol} is ${detail.maxVol} contracten`);
     }
@@ -737,19 +753,85 @@ export class TradingService {
    * @param apiSecret the API secret, or '' to disconnect.
    * @returns the resulting live-trading status.
    */
-  async saveExchangeCredentials(apiKey: string, apiSecret: string): Promise<LiveTradingStatus> {
-    await this.store.saveExchangeCredentials({ apiKey, apiSecret });
-    if ('setCredentials' in this.exchange) {
-      (this.exchange as MexcExchangeAdapter).setCredentials(apiKey, apiSecret);
+  /** Run a market scout scan immediately without waiting for the timer. */
+  async runScout(): Promise<void> {
+    await this.scout.run(true);
+  }
+
+  /**
+   * Switch the active trading exchange venue (MEXC or Hyperliquid).
+   */
+  async setExchangeVenue(venue: 'mexc' | 'hyperliquid'): Promise<LiveTradingStatus> {
+    const stored = await this.store.exchangeCredentials();
+    stored.venue = venue;
+    await this.store.saveExchangeCredentials(stored);
+
+    if (venue === 'hyperliquid') {
+      const adapter = new HyperliquidExchangeAdapter(
+        stored.walletAddress,
+        stored.privateKey,
+        stored.isTestnet
+      );
+      this.exchange = adapter;
+      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
+    } else {
+      const adapter = new MexcExchangeAdapter(stored.apiKey, stored.apiSecret);
+      this.exchange = adapter;
+      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
     }
+
     await this.store.addEvent({
       at: Date.now(),
       level: 'info',
-      message:
-        apiKey && apiSecret
-          ? 'Exchange credentials opgeslagen.'
-          : 'Exchange credentials verwijderd.',
+      message: `Exchange gewisseld naar ${venue.toUpperCase()}.`,
     });
+
+    return this.exchange.status();
+  }
+
+  /**
+   * Save credentials for either MEXC or Hyperliquid.
+   */
+  async saveExchangeCredentials(
+    credentialsOrApiKey: { apiKey?: string; apiSecret?: string; walletAddress?: string; privateKey?: string; isTestnet?: boolean; venue?: 'mexc' | 'hyperliquid' } | string,
+    maybeSecret?: string
+  ): Promise<LiveTradingStatus> {
+    const creds = typeof credentialsOrApiKey === 'string'
+      ? { apiKey: credentialsOrApiKey, apiSecret: maybeSecret || '', venue: 'mexc' as const }
+      : credentialsOrApiKey;
+
+    const current = await this.store.exchangeCredentials();
+    const updated = {
+      ...current,
+      ...creds,
+      venue: creds.venue || current.venue || (creds.walletAddress ? 'hyperliquid' : 'mexc'),
+    };
+
+    await this.store.saveExchangeCredentials(updated);
+
+    if (updated.venue === 'hyperliquid') {
+      const adapter = new HyperliquidExchangeAdapter(
+        updated.walletAddress,
+        updated.privateKey,
+        updated.isTestnet
+      );
+      this.exchange = adapter;
+      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
+    } else {
+      const adapter = new MexcExchangeAdapter(updated.apiKey, updated.apiSecret);
+      this.exchange = adapter;
+      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
+    }
+
+    const hasCreds = Boolean((updated.apiKey && updated.apiSecret) || (updated.walletAddress && updated.privateKey));
+    await this.store.addEvent({
+      at: Date.now(),
+      level: 'info',
+      message: hasCreds
+        ? `Exchange credentials opgeslagen voor ${updated.venue?.toUpperCase() || 'exchange'}.`
+        : 'Exchange credentials verwijderd.',
+    });
+
     return this.exchange.status();
   }
 

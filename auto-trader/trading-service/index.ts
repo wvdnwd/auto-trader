@@ -20,6 +20,7 @@ export {
   signRequest,
   toSortedQuery,
 } from './exchange-adapter.js';
+export { HyperliquidExchangeAdapter } from './hyperliquid-adapter.js';
 export type {
   ClosePositionInput,
   ExchangeAccountAsset,

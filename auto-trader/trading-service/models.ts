@@ -246,6 +246,18 @@ export class ExchangeCredentialsDoc {
 
   @prop({ type: () => String, default: '' })
   public apiSecret!: string;
+
+  @prop({ type: () => String, default: '' })
+  public walletAddress?: string;
+
+  @prop({ type: () => String, default: '' })
+  public privateKey?: string;
+
+  @prop({ type: () => Boolean, default: false })
+  public isTestnet?: boolean;
+
+  @prop({ type: () => String, default: 'mexc' })
+  public venue?: string;
 }
 
 export const PositionModel = getModelForClass(PositionDoc);

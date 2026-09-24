@@ -196,16 +196,24 @@ export function run() {
     }
   });
 
-  app.post('/exchange/credentials', async (req, res) => {
-    const { apiKey, apiSecret } = req.body || {};
-    if (typeof apiKey !== 'string' || typeof apiSecret !== 'string') {
-      res.status(400).json({ error: 'apiKey (string) and apiSecret (string) required' });
+  app.post('/exchange/venue', async (req, res) => {
+    const { venue } = req.body || {};
+    if (venue !== 'mexc' && venue !== 'hyperliquid') {
+      res.status(400).json({ error: 'venue must be "mexc" or "hyperliquid"' });
       return;
     }
     try {
-      res.json(await serviceFor(res).saveExchangeCredentials(apiKey.trim(), apiSecret.trim()));
-    } catch {
-      res.status(503).json({ error: 'Credential storage is unavailable' });
+      res.json(await serviceFor(res).setExchangeVenue(venue));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/exchange/credentials', async (req, res) => {
+    try {
+      res.json(await serviceFor(res).saveExchangeCredentials(req.body || {}));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
     }
   });
 
@@ -304,6 +312,15 @@ export function run() {
 
   app.post('/simulate', (_req, res) => {
     res.status(409).json({ error: 'Price simulation is disabled on the trading service' });
+  });
+
+  app.post('/scout/run', async (_req, res) => {
+    try {
+      await serviceFor(res).runScout();
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   app.post('/scout/:symbol/approve', async (req, res) => {

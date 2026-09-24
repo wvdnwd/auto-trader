@@ -1,5 +1,6 @@
 import styles from './trader-app.module.css';
-import { approveScoutCandidate, dismissScoutCandidate } from './api.js';
+import { useState } from 'react';
+import { approveScoutCandidate, dismissScoutCandidate, runScoutNow } from './api.js';
 import { duration, pct, since, time } from './format.js';
 import type { ScoutStatus } from './types.js';
 
@@ -19,12 +20,34 @@ export function ScoutPanel({ scout, onDecision }: ScoutPanelProps) {
   const decide = (action: (symbol: string) => Promise<unknown>, symbol: string) => {
     void action(symbol).then(() => onDecision?.());
   };
+  const [triggering, setTriggering] = useState(false);
+  const handleScanNow = async () => {
+    setTriggering(true);
+    try {
+      await runScoutNow();
+      onDecision?.();
+    } finally {
+      setTriggering(false);
+    }
+  };
 
   return (
     <section className={styles.panel}>
       <div className={styles.panelHead}>
         <h2>Marktscan</h2>
-        <span className={styles.count}>{scout.universeExtras.length} toegevoegd</span>
+        <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+          <span className={styles.count}>{scout.universeExtras.length} toegevoegd</span>
+          <button
+            type="button"
+            className={`${styles.btn} ${styles.btnSmall}`}
+            disabled={scout.running || triggering}
+            onClick={() => void handleScanNow()}
+            title="Start direct een nieuwe scan naar nieuwe liquide markten"
+            style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem' }}
+          >
+            {scout.running || triggering ? '⏳ Scannen…' : '🔍 Scan nu'}
+          </button>
+        </div>
       </div>
       <div className={styles.panelBody}>
         <p className={styles.cardSub} style={{ marginBottom: '0.75rem' }}>

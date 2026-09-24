@@ -85,7 +85,7 @@ export class Store {
       dayKey: new Date().toISOString().slice(0, 10),
     },
     scout: { universeExtras: [], cooldowns: {}, lastRunAt: null },
-    exchangeCredentials: { apiKey: '', apiSecret: '' },
+    exchangeCredentials: { apiKey: '', apiSecret: '', walletAddress: '', privateKey: '', isTestnet: false, venue: 'mexc' },
     learning: { factorStats: {}, penalties: {} },
   };
 
@@ -608,16 +608,30 @@ export class Store {
     this.assertHealthy();
     if (this.connected) {
       const doc = await this.storageOperation(() => ExchangeCredentialsModel.findOne({ key: this.tenantId }).lean());
-      if (doc?.apiKey && doc?.apiSecret) {
-        return { apiKey: doc.apiKey, apiSecret: doc.apiSecret };
+      if (doc) {
+        const d = doc as unknown as Record<string, unknown>;
+        if (d.apiKey || d.walletAddress) {
+          return {
+            apiKey: (d.apiKey as string) || '',
+            apiSecret: (d.apiSecret as string) || '',
+            walletAddress: (d.walletAddress as string) || '',
+            privateKey: (d.privateKey as string) || '',
+            isTestnet: Boolean(d.isTestnet),
+            venue: (d.venue as 'mexc' | 'hyperliquid') || (d.apiKey ? 'mexc' : 'hyperliquid'),
+          };
+        }
       }
     }
-    if (this.memory.exchangeCredentials.apiKey && this.memory.exchangeCredentials.apiSecret) {
+    if (this.memory.exchangeCredentials.apiKey || this.memory.exchangeCredentials.walletAddress) {
       return { ...this.memory.exchangeCredentials };
     }
     return {
       apiKey: process.env.MEXC_API_KEY || '',
       apiSecret: process.env.MEXC_API_SECRET || '',
+      walletAddress: process.env.HYPERLIQUID_WALLET || '',
+      privateKey: process.env.HYPERLIQUID_PRIVATE_KEY || '',
+      isTestnet: process.env.HYPERLIQUID_TESTNET === 'true',
+      venue: (process.env.EXCHANGE_VENUE as 'mexc' | 'hyperliquid') || (process.env.HYPERLIQUID_WALLET ? 'hyperliquid' : 'mexc'),
     };
   }
 
@@ -662,8 +676,13 @@ export type ScoutState = {
    * MEXC API credentials persisted for the single service instance.
  */
 export type ExchangeCredentials = {
-  apiKey: string;
-  apiSecret: string;
+  apiKey?: string;
+  apiSecret?: string;
+  walletAddress?: string;
+  privateKey?: string;
+  isTestnet?: boolean;
+  venue?: 'mexc' | 'hyperliquid';
+
 };
 
 function toPosition(doc: Record<string, unknown>): Position {

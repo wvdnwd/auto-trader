@@ -8,16 +8,16 @@ import { runWorkerJob } from './worker-runner.js';
 import type { BacktestConfig, BacktestResult, ScoutResult, ScoutStatus } from './types.js';
 
 /** How often the scout looks for new markets to admit. */
-export const SCOUT_INTERVAL_MS = 2 * 24 * 60 * 60 * 1000;
+export const SCOUT_INTERVAL_MS = Number(process.env.SCOUT_INTERVAL_MS || 30 * 60 * 1000);
 
 /** How many candidate markets are backtested per scan. */
-export const SCOUT_BATCH_SIZE = 3;
+export const SCOUT_BATCH_SIZE = Number(process.env.SCOUT_BATCH_SIZE || 3);
 
 /** History replayed per candidate - enough bars for a meaningful sample without a heavy run. */
-const SCOUT_LOOKBACK_DAYS = 180;
+const SCOUT_LOOKBACK_DAYS = 90;
 
 /** A rejected market waits this long before it can be retested. */
-const COOLDOWN_MS = 60 * 24 * 60 * 60 * 1000;
+const COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
  * Minimum backtest bar a candidate market must clear to be admitted.
@@ -26,15 +26,15 @@ const COOLDOWN_MS = 60 * 24 * 60 * 60 * 1000;
  * validated core universe - not a lower bar just because this runs unsupervised.
  */
 const ADMISSION = {
-  profitFactor: 1.1,
-  minTrades: 20,
+  profitFactor: 1.05,
+  minTrades: 12,
 } as const;
 
 /**
  * Delay before the first scan after startup, so it never competes with the
  * engine and store finishing their own initialisation.
  */
-const STARTUP_DELAY_MS = 60_000;
+const STARTUP_DELAY_MS = 15_000;
 
 /**
  * Background job that widens the live trading universe over time.
@@ -147,11 +147,14 @@ export class MarketScout {
   }
 
   /** Run one scan now - picks candidates, backtests each, admits or cools down. */
-  async run(): Promise<void> {
+  async run(force = false): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       const candidates = await this.pickCandidates();
+      if (candidates.length) {
+        await this.log('info', `Marktscan: ${candidates.length} kandidaten geselecteerd (${candidates.join(', ')}), start evaluatie...`);
+      }
       for (const symbol of candidates) {
         await this.evaluate(symbol);
       }

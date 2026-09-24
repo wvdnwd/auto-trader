@@ -1,3 +1,12 @@
+import {
+  ExchangeClient,
+  InfoClient,
+  HttpTransport,
+  MAINNET_API_URL,
+  TESTNET_API_URL,
+} from '@nktkas/hyperliquid';
+import { formatPrice, formatSize } from '@nktkas/hyperliquid/utils';
+import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import type {
   ClosePositionInput,
   ExchangeAccountAsset,
@@ -11,8 +20,8 @@ import type {
 } from './exchange-adapter.js';
 import type { Side } from './types.js';
 
-export const HYPERLIQUID_MAINNET_API = 'https://api.hyperliquid.xyz';
-export const HYPERLIQUID_TESTNET_API = 'https://api.hyperliquid-testnet.xyz';
+export const HYPERLIQUID_MAINNET_API = MAINNET_API_URL;
+export const HYPERLIQUID_TESTNET_API = TESTNET_API_URL;
 
 export type HyperliquidConfig = {
   walletAddress?: string;
@@ -34,6 +43,13 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
   private isTestnet: boolean;
   private baseUrl: string;
 
+  private account: PrivateKeyAccount | null = null;
+  private exchangeClient: ExchangeClient | null = null;
+  private infoClient: InfoClient;
+
+  private metaUniverse: Array<{ szDecimals: number; name: string; maxLeverage: number }> = [];
+  private metaLoadedAt = 0;
+
   constructor(
     walletAddress = process.env.HYPERLIQUID_WALLET || '',
     privateKey = process.env.HYPERLIQUID_PRIVATE_KEY || '',
@@ -42,14 +58,40 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
     this.walletAddress = walletAddress.trim();
     this.privateKey = privateKey.trim();
     this.isTestnet = isTestnet;
-    this.baseUrl = isTestnet ? HYPERLIQUID_TESTNET_API : HYPERLIQUID_MAINNET_API;
+    this.baseUrl = isTestnet ? TESTNET_API_URL : MAINNET_API_URL;
+
+    const transport = new HttpTransport({ isTestnet: this.isTestnet });
+    this.infoClient = new InfoClient({ transport });
+    this.initClients();
+  }
+
+  private initClients(): void {
+    const transport = new HttpTransport({ isTestnet: this.isTestnet });
+    this.infoClient = new InfoClient({ transport });
+    if (this.privateKey) {
+      try {
+        const formattedKey = (this.privateKey.startsWith('0x') ? this.privateKey : `0x${this.privateKey}`) as `0x${string}`;
+        this.account = privateKeyToAccount(formattedKey);
+        if (!this.walletAddress) {
+          this.walletAddress = this.account.address;
+        }
+        this.exchangeClient = new ExchangeClient({ transport, wallet: this.account });
+      } catch {
+        this.account = null;
+        this.exchangeClient = null;
+      }
+    } else {
+      this.account = null;
+      this.exchangeClient = null;
+    }
   }
 
   setCredentials(walletAddress: string, privateKey: string, isTestnet = false): void {
     this.walletAddress = walletAddress.trim();
     this.privateKey = privateKey.trim();
     this.isTestnet = isTestnet;
-    this.baseUrl = isTestnet ? HYPERLIQUID_TESTNET_API : HYPERLIQUID_MAINNET_API;
+    this.baseUrl = isTestnet ? TESTNET_API_URL : MAINNET_API_URL;
+    this.initClients();
   }
 
   isConfigured(): boolean {
@@ -57,14 +99,21 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
   }
 
   status(): LiveTradingStatus {
-    const enabled = this.isConfigured() && process.env.LIVE_TRADING_ENABLED === 'true';
+    const isArmedReady = Boolean(this.walletAddress && this.privateKey && this.exchangeClient);
+    const enabled = isArmedReady && process.env.LIVE_TRADING_ENABLED === 'true';
     return {
-      configured: this.isConfigured(),
+      configured: Boolean(this.walletAddress),
       enabled,
       baseUrl: this.baseUrl,
       executionDisabledReason: enabled
         ? undefined
-        : 'Hyperliquid niet geconfigureerd of live trading niet ingeschakeld (LIVE_TRADING_ENABLED=true vereist)',
+        : !this.walletAddress
+        ? 'Hyperliquid walletadres ontbreekt'
+        : !this.privateKey
+        ? 'Hyperliquid private key ontbreekt voor live orders (alleen read-only modus)'
+        : !this.exchangeClient
+        ? 'Hyperliquid private key is ongeldig (moet een geldige 32-byte hex key zijn)'
+        : 'Hyperliquid live trading staat uitgeschakeld (LIVE_TRADING_ENABLED=true vereist)',
       venue: this.venue,
     };
   }
@@ -73,13 +122,9 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
    * Fetch USDC account balance from Hyperliquid clearinghouse state.
    */
   async getAccountAssets(): Promise<ExchangeAccountAsset[]> {
-    if (!this.isConfigured()) return [];
+    if (!this.walletAddress) return [];
     try {
-      const state = await this.infoQuery<{
-        crossMarginSummary?: { accountValue?: string; totalNtlPos?: string; totalRawUsd?: string };
-        withdrawable?: string;
-      }>({ type: 'clearinghouseState', user: this.walletAddress });
-
+      const state = await this.infoClient.clearinghouseState({ user: this.walletAddress as `0x${string}` });
       const equity = Number(state.crossMarginSummary?.accountValue || 0);
       const available = Number(state.withdrawable || 0);
       const frozen = Math.max(0, equity - available);
@@ -101,22 +146,9 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
    * Fetch active open positions on Hyperliquid.
    */
   async getOpenPositions(): Promise<ExchangePosition[]> {
-    if (!this.isConfigured()) return [];
+    if (!this.walletAddress) return [];
     try {
-      const state = await this.infoQuery<{
-        assetPositions?: Array<{
-          position: {
-            coin: string;
-            szi: string;
-            leverage: { value: number; type: string };
-            entryPx: string;
-            liquidationPx?: string | null;
-            unrealizedPnl: string;
-            returnOnEquity?: string;
-          };
-        }>;
-      }>({ type: 'clearinghouseState', user: this.walletAddress });
-
+      const state = await this.infoClient.clearinghouseState({ user: this.walletAddress as `0x${string}` });
       const list = state.assetPositions || [];
       return list
         .map((p) => p.position)
@@ -140,19 +172,80 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
   }
 
   /**
-   * Place an order on Hyperliquid.
+   * Place an order on Hyperliquid using limit with slippage and FrontendMarket TIF.
    */
   async placeMarketOrder(input: PlaceOrderInput): Promise<ExchangeOrderResult> {
     this.assertArmed();
-    const coin = this.normalizeCoin(input.symbol);
+    if (!this.exchangeClient) {
+      throw new Error('Hyperliquid exchangeClient niet geïnitialiseerd — private key vereist');
+    }
+
+    const { assetId, szDecimals, coin } = await this.getCoinMeta(input.symbol);
     const isBuy = input.intent === 'OPEN_LONG' || input.intent === 'CLOSE_SHORT';
-    
-    // Hyperliquid uses action payload with EIP-712 signature
-    const orderId = `hl-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    
-    // Set leverage if opening
+    const isReduce = input.intent === 'CLOSE_LONG' || input.intent === 'CLOSE_SHORT';
+
+    // Set leverage before opening
     if (input.intent === 'OPEN_LONG' || input.intent === 'OPEN_SHORT') {
-      await this.setLeverage(input.symbol, input.leverage || 5, isBuy ? 'LONG' : 'SHORT').catch(() => {});
+      await this.setLeverage(input.symbol, input.leverage || 5, isBuy ? 'LONG' : 'SHORT', input.openType || 'isolated').catch(() => {});
+    }
+
+    // Determine market execution price with 5% slippage bound from mid
+    const mids = await this.infoClient.allMids();
+    const midStr = mids[coin];
+    if (!midStr) {
+      throw new Error(`Geen actuele mid-prijs gevonden voor ${coin} op Hyperliquid`);
+    }
+    const midPrice = Number(midStr);
+    const slippagePrice = isBuy ? midPrice * 1.05 : midPrice * 0.95;
+
+    const formattedPrice = formatPrice(slippagePrice, szDecimals);
+    const formattedSize = formatSize(input.vol, szDecimals);
+
+    if (Number(formattedSize) <= 0) {
+      throw new Error(`Ordergrootte ${input.vol} te klein voor ${coin} (minimaal ${Math.pow(10, -szDecimals)})`);
+    }
+
+    const res = await this.exchangeClient.order({
+      orders: [
+        {
+          a: assetId,
+          b: isBuy,
+          p: formattedPrice,
+          s: formattedSize,
+          r: isReduce,
+          t: { limit: { tif: 'FrontendMarket' } },
+        },
+      ],
+      grouping: 'na',
+    });
+
+    const status = res.response.data.statuses[0];
+    if (typeof status === 'object' && 'error' in status) {
+      throw new Error(`Hyperliquid order geweigerd: ${status.error}`);
+    }
+
+    let orderId = `hl-${Date.now()}`;
+    if (typeof status === 'object') {
+      if ('filled' in status) orderId = String(status.filled.oid);
+      else if ('resting' in status) orderId = String(status.resting.oid);
+    }
+
+    // Place attached stop loss or take profit trigger orders if requested
+    if (input.stopLossPrice && (input.intent === 'OPEN_LONG' || input.intent === 'OPEN_SHORT')) {
+      await this.placeStopOrder({
+        symbol: input.symbol,
+        side: input.intent === 'OPEN_LONG' ? 'LONG' : 'SHORT',
+        vol: input.vol,
+        triggerPrice: input.stopLossPrice,
+      }).catch(() => {});
+    }
+    if (input.takeProfitPrice && (input.intent === 'OPEN_LONG' || input.intent === 'OPEN_SHORT')) {
+      await this.placeTakeProfitOrder({
+        symbol: input.symbol,
+        side: input.intent === 'OPEN_LONG' ? 'LONG' : 'SHORT',
+        vol: input.vol,
+        triggerPrice: input.takeProfitPrice,
+      }).catch(() => {});
     }
 
     return {
@@ -174,7 +267,47 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
 
   async placeStopOrder(input: PlaceStopOrderInput): Promise<ExchangeOrderResult> {
     this.assertArmed();
-    const orderId = `hl-stop-${Date.now()}`;
+    if (!this.exchangeClient) {
+      throw new Error('Hyperliquid exchangeClient niet geïnitialiseerd — private key vereist');
+    }
+
+    const { assetId, szDecimals } = await this.getCoinMeta(input.symbol);
+    // When protecting a LONG, sell to exit (b = false); when protecting a SHORT, buy to exit (b = true)
+    const isBuy = input.side === 'SHORT';
+    const formattedPrice = formatPrice(input.triggerPrice, szDecimals);
+    const formattedSize = formatSize(input.vol, szDecimals);
+
+    const res = await this.exchangeClient.order({
+      orders: [
+        {
+          a: assetId,
+          b: isBuy,
+          p: formattedPrice,
+          s: formattedSize,
+          r: true,
+          t: {
+            trigger: {
+              isMarket: true,
+              triggerPx: formattedPrice,
+              tpsl: 'sl',
+            },
+          },
+        },
+      ],
+      grouping: 'na',
+    });
+
+    const status = res.response.data.statuses[0];
+    if (typeof status === 'object' && 'error' in status) {
+      throw new Error(`Hyperliquid stop order geweigerd: ${status.error}`);
+    }
+
+    let orderId = `hl-sl-${Date.now()}`;
+    if (typeof status === 'object') {
+      if ('resting' in status) orderId = String(status.resting.oid);
+      else if ('filled' in status) orderId = String(status.filled.oid);
+    }
+
     return {
       orderId,
       symbol: input.symbol,
@@ -183,40 +316,138 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
 
   async placeTakeProfitOrder(input: PlaceStopOrderInput): Promise<ExchangeOrderResult> {
     this.assertArmed();
-    const orderId = `hl-tp-${Date.now()}`;
+    if (!this.exchangeClient) {
+      throw new Error('Hyperliquid exchangeClient niet geïnitialiseerd — private key vereist');
+    }
+
+    const { assetId, szDecimals } = await this.getCoinMeta(input.symbol);
+    // When taking profit on a LONG, sell (b = false); when taking profit on a SHORT, buy (b = true)
+    const isBuy = input.side === 'SHORT';
+    const formattedPrice = formatPrice(input.triggerPrice, szDecimals);
+    const formattedSize = formatSize(input.vol, szDecimals);
+
+    const res = await this.exchangeClient.order({
+      orders: [
+        {
+          a: assetId,
+          b: isBuy,
+          p: formattedPrice,
+          s: formattedSize,
+          r: true,
+          t: {
+            trigger: {
+              isMarket: true,
+              triggerPx: formattedPrice,
+              tpsl: 'tp',
+            },
+          },
+        },
+      ],
+      grouping: 'na',
+    });
+
+    const status = res.response.data.statuses[0];
+    if (typeof status === 'object' && 'error' in status) {
+      throw new Error(`Hyperliquid TP order geweigerd: ${status.error}`);
+    }
+
+    let orderId = `hl-tp-${Date.now()}`;
+    if (typeof status === 'object') {
+      if ('resting' in status) orderId = String(status.resting.oid);
+      else if ('filled' in status) orderId = String(status.filled.oid);
+    }
+
     return {
       orderId,
       symbol: input.symbol,
     };
   }
 
-  async cancelOrder(orderId: string): Promise<void> {
+  async cancelOrder(orderId: string, symbol?: string): Promise<void> {
     this.assertArmed();
-    void orderId;
+    if (!this.exchangeClient) return;
+    const oid = Number(orderId);
+    if (!Number.isFinite(oid)) return;
+
+    let assetId = 0;
+    if (symbol) {
+      const meta = await this.getCoinMeta(symbol);
+      assetId = meta.assetId;
+    } else {
+      const openOrders = await this.infoClient.frontendOpenOrders({ user: this.walletAddress as `0x${string}` });
+      const target = openOrders.find((o) => o.oid === oid);
+      if (target) {
+        const meta = await this.getCoinMeta(target.coin);
+        assetId = meta.assetId;
+      }
+    }
+
+    await this.exchangeClient.cancel({
+      cancels: [{ a: assetId, o: oid }],
+    });
   }
 
   async cancelStopOrder(orderId: string, symbol?: string): Promise<void> {
-    this.assertArmed();
-    void orderId;
-    void symbol;
+    return this.cancelOrder(orderId, symbol);
   }
 
   async cancelPlanOrders(orders: Array<{ symbol: string; orderId: string }>): Promise<void> {
     this.assertArmed();
-    void orders;
+    if (!this.exchangeClient || !orders.length) return;
+    const cancels: Array<{ a: number; o: number }> = [];
+    for (const o of orders) {
+      const oid = Number(o.orderId);
+      if (Number.isFinite(oid)) {
+        try {
+          const meta = await this.getCoinMeta(o.symbol);
+          cancels.push({ a: meta.assetId, o: oid });
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (cancels.length) {
+      await this.exchangeClient.cancel({ cancels });
+    }
   }
 
   async cancelAllPlanOrders(symbol?: string): Promise<void> {
     this.assertArmed();
-    void symbol;
+    if (!this.exchangeClient || !this.walletAddress) return;
+    try {
+      const openOrders = await this.infoClient.frontendOpenOrders({ user: this.walletAddress as `0x${string}` });
+      const cleanCoin = symbol ? this.normalizeCoin(symbol) : null;
+      const filtered = openOrders.filter((o) => !cleanCoin || o.coin === cleanCoin);
+      if (!filtered.length) return;
+
+      const cancels: Array<{ a: number; o: number }> = [];
+      for (const o of filtered) {
+        const meta = await this.getCoinMeta(o.coin);
+        cancels.push({ a: meta.assetId, o: o.oid });
+      }
+      if (cancels.length) {
+        await this.exchangeClient.cancel({ cancels });
+      }
+    } catch {
+      // ignore
+    }
   }
 
   async setLeverage(symbol: string, leverage: number, side: Side, openType: OpenType = 'isolated'): Promise<void> {
     this.assertArmed();
-    void symbol;
-    void leverage;
+    if (!this.exchangeClient) return;
     void side;
-    void openType;
+    try {
+      const { assetId, maxLeverage } = await this.getCoinMeta(symbol);
+      const validLev = Math.max(1, Math.min(Math.round(leverage), maxLeverage));
+      await this.exchangeClient.updateLeverage({
+        asset: assetId,
+        isCross: openType === 'cross',
+        leverage: validLev,
+      });
+    } catch {
+      // ignore
+    }
   }
 
   async getOpenPlanOrders(symbol?: string): Promise<
@@ -230,8 +461,44 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
       createTime: number;
     }>
   > {
-    void symbol;
-    return [];
+    if (!this.walletAddress) return [];
+    try {
+      const openOrders = await this.infoClient.frontendOpenOrders({ user: this.walletAddress as `0x${string}` });
+      const cleanCoin = symbol ? this.normalizeCoin(symbol) : null;
+      return openOrders
+        .filter((o) => !cleanCoin || o.coin === cleanCoin)
+        .map((o) => ({
+          id: String(o.oid),
+          symbol: o.coin.includes('_') ? o.coin : `${o.coin}_USDT`,
+          side: o.side === 'B' ? 1 : 2,
+          triggerType: o.isTrigger ? 1 : 0,
+          triggerPrice: Number(o.triggerPx || o.limitPx),
+          vol: Number(o.sz),
+          createTime: o.timestamp,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  private async getCoinMeta(symbol: string): Promise<{ assetId: number; szDecimals: number; maxLeverage: number; coin: string }> {
+    if (!this.metaUniverse.length || Date.now() - this.metaLoadedAt > 300_000) {
+      const meta = await this.infoClient.meta();
+      this.metaUniverse = meta.universe;
+      this.metaLoadedAt = Date.now();
+    }
+    const coin = this.normalizeCoin(symbol);
+    const assetId = this.metaUniverse.findIndex((u) => u.name === coin);
+    if (assetId === -1) {
+      throw new Error(`Coin ${coin} (${symbol}) niet gevonden in Hyperliquid perpetuals universum`);
+    }
+    const item = this.metaUniverse[assetId];
+    return {
+      assetId,
+      szDecimals: item.szDecimals,
+      maxLeverage: item.maxLeverage,
+      coin,
+    };
   }
 
   private normalizeCoin(symbol: string): string {
@@ -245,17 +512,5 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
     if (process.env.LIVE_TRADING_ENABLED !== 'true') {
       throw new Error('Live trading staat niet aan (LIVE_TRADING_ENABLED=true vereist)');
     }
-  }
-
-  private async infoQuery<T>(payload: Record<string, unknown>): Promise<T> {
-    const res = await fetch(`${this.baseUrl}/info`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      throw new Error(`Hyperliquid info query failed: ${res.statusText}`);
-    }
-    return res.json() as Promise<T>;
   }
 }

@@ -10,6 +10,7 @@ import {
   resetAccount,
   runCycle,
   saveExchangeCredentials,
+  setExchangeVenue,
   setApiToken,
   setEngineRunning,
   setLiveTrading,
@@ -124,8 +125,12 @@ export function Dashboard() {
   const [chart, setChart] = useState<ChartData | null>(null);
   const [chartError, setChartError] = useState<string | null>(null);
   const [showKeyForm, setShowKeyForm] = useState(false);
+  const [venueTab, setVenueTab] = useState<'mexc' | 'hyperliquid'>('hyperliquid');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [apiSecretInput, setApiSecretInput] = useState('');
+  const [walletAddressInput, setWalletAddressInput] = useState('');
+  const [privateKeyInput, setPrivateKeyInput] = useState('');
+  const [isTestnetInput, setIsTestnetInput] = useState(false);
   const [showTestOrder, setShowTestOrder] = useState(false);
   const [testSymbol, setTestSymbol] = useState('BTC_USDT');
   const [testSide, setTestSide] = useState<'LONG' | 'SHORT'>('LONG');
@@ -662,11 +667,15 @@ export function Dashboard() {
               <span>{snap.exchange.enabled ? '🔴' : snap.exchange.configured ? '🟡' : '🔌'}</span>
               <span className={styles.exchangeRow}>
                 <span>
-                  <b>{t('mexcLinkLabel')}</b>{' '}
+                  <b>{snap.exchange.venue === 'hyperliquid' ? '⚡ Hyperliquid DEX (L1)' : '🏛️ MEXC Futures'}</b>{' '}
                   {snap.exchange.enabled
-                    ? t('mexcLinkEnabled')
+                    ? (snap.exchange.venue === 'hyperliquid'
+                        ? '🔴 Live trading actief op Hyperliquid L1 — orders worden direct on-chain geplaatst!'
+                        : t('mexcLinkEnabled'))
                     : snap.exchange.configured
-                      ? t('mexcLinkConfigured')
+                      ? (snap.exchange.venue === 'hyperliquid'
+                          ? '🟡 Hyperliquid wallet gekoppeld (klaar voor live trading)'
+                          : t('mexcLinkConfigured'))
                       : t('mexcLinkNone')}
                 </span>
                 <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -685,6 +694,22 @@ export function Dashboard() {
                   >
                     {snap.exchange.configured ? t('changeKey') : t('enterOwnKey')}
                   </button>
+                  {snap.exchange.configured && (
+                    <button
+                      type="button"
+                      className={styles.btn}
+                      disabled={busy}
+                      title="Wissel direct tussen Hyperliquid en MEXC"
+                      onClick={() => {
+                        const targetVenue = snap.exchange.venue === 'hyperliquid' ? 'mexc' : 'hyperliquid';
+                        if (window.confirm(`Wil je overschakelen naar ${targetVenue === 'hyperliquid' ? 'Hyperliquid DEX' : 'MEXC Futures'}?`)) {
+                          void act(() => setExchangeVenue(targetVenue));
+                        }
+                      }}
+                    >
+                      🔄 Wissel naar {snap.exchange.venue === 'hyperliquid' ? 'MEXC' : 'Hyperliquid'}
+                    </button>
+                  )}
                   {snap.exchange.configured && (
                     <button
                       type="button"
@@ -764,7 +789,7 @@ export function Dashboard() {
                     </select>
                   </div>
                   <div className={styles.field}>
-                    <label htmlFor="test-amount">{t('amountUsdt')}</label>
+                    <label htmlFor="test-amount">{snap.exchange.venue === 'hyperliquid' ? 'Bedrag (USDC)' : t('amountUsdt')}</label>
                     <input
                       id="test-amount"
                       type="number"
@@ -934,68 +959,178 @@ export function Dashboard() {
               <div className={styles.notice}>
                 <span>🔑</span>
                 <span className={styles.exchangeRow} style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                  <span>{t('apiKeyFormIntro')}</span>
-                  <div className={styles.field}>
-                    <label htmlFor="mexc-api-key">{t('apiKeyLabel')}</label>
-                    <input
-                      id="mexc-api-key"
-                      type="text"
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="mx0v..."
-                      value={apiKeyInput}
-                      onChange={(e) => setApiKeyInput(e.target.value)}
-                    />
-                  </div>
-                  <div className={styles.field}>
-                    <label htmlFor="mexc-api-secret">{t('apiSecretLabel')}</label>
-                    <input
-                      id="mexc-api-secret"
-                      type="password"
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="••••••••"
-                      value={apiSecretInput}
-                      onChange={(e) => setApiSecretInput(e.target.value)}
-                    />
-                  </div>
-                  <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem' }}>
                     <button
                       type="button"
-                      className={`${styles.btn} ${styles.btnPrimary}`}
-                      disabled={busy || !apiKeyInput.trim() || !apiSecretInput.trim()}
-                      onClick={() =>
-                        void act(async () => {
-                          await saveExchangeCredentials(apiKeyInput.trim(), apiSecretInput.trim());
-                          setApiKeyInput('');
-                          setApiSecretInput('');
-                          setShowKeyForm(false);
-                        })
-                      }
+                      className={`${styles.btn} ${venueTab === 'hyperliquid' ? styles.btnPrimary : ''}`}
+                      onClick={() => setVenueTab('hyperliquid')}
                     >
-                      {t('saveAndConnect')}
+                      ⚡ Hyperliquid DEX (L1)
                     </button>
-                    {snap.exchange.configured && (
-                      <button
-                        type="button"
-                        className={`${styles.btn} ${styles.btnDanger}`}
-                        disabled={busy}
-                        onClick={() => {
-                          if (window.confirm(t('removeConnectionConfirm'))) {
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${venueTab === 'mexc' ? styles.btnPrimary : ''}`}
+                      onClick={() => setVenueTab('mexc')}
+                    >
+                      🏛️ MEXC Futures
+                    </button>
+                  </div>
+
+                  {venueTab === 'hyperliquid' ? (
+                    <>
+                      <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.85rem', color: '#94a3b8' }}>
+                        Verbind via Hyperliquid L1 met USDC als onderpand. Orders worden direct op de on-chain orderboeken geplaatst via EIP-712 ondertekening.
+                      </p>
+                      <div className={styles.field}>
+                        <label htmlFor="hl-wallet-address">Wallet Adres (0x...)</label>
+                        <input
+                          id="hl-wallet-address"
+                          type="text"
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="0x..."
+                          value={walletAddressInput}
+                          onChange={(e) => setWalletAddressInput(e.target.value)}
+                        />
+                      </div>
+                      <div className={styles.field}>
+                        <label htmlFor="hl-private-key">Private Key (voor live trading via Agent Wallet of Main Wallet)</label>
+                        <input
+                          id="hl-private-key"
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="0x... of 64 hex tekens"
+                          value={privateKeyInput}
+                          onChange={(e) => setPrivateKeyInput(e.target.value)}
+                        />
+                        <small style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.2rem' }}>
+                          Tip: Maak op app.hyperliquid.xyz bij voorkeur een Agent Wallet aan met beperkte rechten voor geautomatiseerde handel.
+                        </small>
+                      </div>
+                      <div style={{ margin: '0.5rem 0 0.8rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input
+                          id="hl-testnet"
+                          type="checkbox"
+                          checked={isTestnetInput}
+                          onChange={(e) => setIsTestnetInput(e.target.checked)}
+                          style={{ cursor: 'pointer' }}
+                        />
+                        <label htmlFor="hl-testnet" style={{ cursor: 'pointer', fontSize: '0.85rem' }}>
+                          Gebruik Hyperliquid Testnet (api.hyperliquid-testnet.xyz)
+                        </label>
+                      </div>
+                      <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className={`${styles.btn} ${styles.btnPrimary}`}
+                          disabled={busy || !walletAddressInput.trim()}
+                          onClick={() =>
                             void act(async () => {
-                              await saveExchangeCredentials('', '');
+                              await saveExchangeCredentials({
+                                venue: 'hyperliquid',
+                                walletAddress: walletAddressInput.trim(),
+                                privateKey: privateKeyInput.trim(),
+                                isTestnet: isTestnetInput,
+                              });
                               setShowKeyForm(false);
-                            });
+                            })
                           }
-                        }}
-                      >
-                        {t('removeConnection')}
-                      </button>
-                    )}
-                    <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
-                      {t('cancel')}
-                    </button>
-                  </span>
+                        >
+                          ⚡ Verbind & Activeer Hyperliquid
+                        </button>
+                        {snap.exchange.configured && (
+                          <button
+                            type="button"
+                            className={`${styles.btn} ${styles.btnDanger}`}
+                            disabled={busy}
+                            onClick={() => {
+                              if (window.confirm('Weet je zeker dat je de exchange verbinding wilt verwijderen?')) {
+                                void act(async () => {
+                                  await saveExchangeCredentials('', '');
+                                  setShowKeyForm(false);
+                                });
+                              }
+                            }}
+                          >
+                            Verbinding Verbreken
+                          </button>
+                        )}
+                        <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
+                          {t('cancel')}
+                        </button>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span>{t('apiKeyFormIntro')}</span>
+                      <div className={styles.field}>
+                        <label htmlFor="mexc-api-key">{t('apiKeyLabel')}</label>
+                        <input
+                          id="mexc-api-key"
+                          type="text"
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="mx0v..."
+                          value={apiKeyInput}
+                          onChange={(e) => setApiKeyInput(e.target.value)}
+                        />
+                      </div>
+                      <div className={styles.field}>
+                        <label htmlFor="mexc-api-secret">{t('apiSecretLabel')}</label>
+                        <input
+                          id="mexc-api-secret"
+                          type="password"
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder="••••••••"
+                          value={apiSecretInput}
+                          onChange={(e) => setApiSecretInput(e.target.value)}
+                        />
+                      </div>
+                      <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className={`${styles.btn} ${styles.btnPrimary}`}
+                          disabled={busy || !apiKeyInput.trim() || !apiSecretInput.trim()}
+                          onClick={() =>
+                            void act(async () => {
+                              await saveExchangeCredentials({
+                                venue: 'mexc',
+                                apiKey: apiKeyInput.trim(),
+                                apiSecret: apiSecretInput.trim(),
+                              });
+                              setApiKeyInput('');
+                              setApiSecretInput('');
+                              setShowKeyForm(false);
+                            })
+                          }
+                        >
+                          {t('saveAndConnect')}
+                        </button>
+                        {snap.exchange.configured && (
+                          <button
+                            type="button"
+                            className={`${styles.btn} ${styles.btnDanger}`}
+                            disabled={busy}
+                            onClick={() => {
+                              if (window.confirm(t('removeConnectionConfirm'))) {
+                                void act(async () => {
+                                  await saveExchangeCredentials('', '');
+                                  setShowKeyForm(false);
+                                });
+                              }
+                            }}
+                          >
+                            {t('removeConnection')}
+                          </button>
+                        )}
+                        <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
+                          {t('cancel')}
+                        </button>
+                      </span>
+                    </>
+                  )}
                 </span>
               </div>
             )}

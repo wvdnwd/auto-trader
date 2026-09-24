@@ -34,6 +34,9 @@ importers:
       '@mdx-js/react':
         specifier: 3.1.1
         version: 3.1.1(@types/react@19.2.14)(react@19.2.4)
+      '@nktkas/hyperliquid':
+        specifier: ^0.33.3
+        version: 0.33.3(typescript@5.9.3)
       '@teambit/mdx.ui.mdx-scope-context':
         specifier: 1.1.1
         version: 1.1.1(react@19.2.4)
@@ -75,7 +78,7 @@ importers:
         version: 16.14.2
       jsdom:
         specifier: ^29.0.0
-        version: 29.1.1
+        version: 29.1.1(@noble/hashes@2.4.0)
       mongoose:
         specifier: ^9.10.0
         version: 9.10.1(socks@2.8.10)
@@ -103,6 +106,9 @@ importers:
       sass-loader:
         specifier: ^16.0.8
         version: 16.0.8(@rspack/core@2.2.6)(sass-embedded@1.104.1)(sass@1.98.0)(webpack@5.111.0)
+      viem:
+        specifier: ^2.56.8
+        version: 2.56.8(typescript@5.9.3)
       vite:
         specifier: ^8.0.0
         version: 8.3.0(@types/node@22.13.14)(esbuild@0.27.7)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(yaml@2.9.1)
@@ -112,10 +118,10 @@ importers:
     devDependencies:
       '@bitdev/node.node-env':
         specifier: 6.0.22
-        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
       '@bitdev/react.react-env':
         specifier: 6.0.28
-        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@testing-library/react':
         specifier: ^16.0.0
         version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3)(@types/react@19.2.14)(react-dom@19.2.4)(react@19.2.4)
@@ -155,7 +161,7 @@ importers:
     devDependencies:
       '@bitdev/react.react-env':
         specifier: 6.0.28
-        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@testing-library/react':
         specifier: ^16.0.0
         version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3)(@types/react@19.2.14)(react-dom@19.2.4)(react@19.2.4)
@@ -180,7 +186,7 @@ importers:
     devDependencies:
       '@bitdev/node.node-env':
         specifier: 6.0.22
-        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
 
   auto-trader/trading-service:
     dependencies:
@@ -211,7 +217,7 @@ importers:
     devDependencies:
       '@bitdev/node.node-env':
         specifier: 6.0.22
-        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@24.1.3)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@24.1.3)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
 
   node_modules/.bit_roots/bitdev.node_node-env@6.0.22:
     dependencies:
@@ -220,7 +226,7 @@ importers:
         version: 7.29.0
       '@bitdev/node.node-env':
         specifier: 6.0.22
-        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
       '@mdx-js/mdx':
         specifier: 3.1.1
         version: 3.1.1
@@ -295,7 +301,7 @@ importers:
         version: 7.29.0
       '@bitdev/react.react-env':
         specifier: 6.0.28
-        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@mdx-js/mdx':
         specifier: 3.1.1
         version: 3.1.1
@@ -355,7 +361,7 @@ importers:
         version: 16.14.2
       jsdom:
         specifier: ^29.0.0
-        version: 29.1.1
+        version: 29.1.1(@noble/hashes@2.4.0)
       oxlint:
         specifier: 1.55.0
         version: 1.55.0(oxlint-tsgolint@0.17.0)
@@ -457,7 +463,7 @@ importers:
         version: 16.14.2
       jsdom:
         specifier: ^29.0.0
-        version: 29.1.1
+        version: 29.1.1(@noble/hashes@2.4.0)
       oxlint:
         specifier: 1.55.0
         version: 1.55.0(oxlint-tsgolint@0.17.0)
@@ -491,7 +497,7 @@ importers:
     devDependencies:
       '@bitdev/react.react-env':
         specifier: 6.0.28
-        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@testing-library/react':
         specifier: ^16.0.0
         version: 16.3.3(@testing-library/dom@10.4.1)(@types/react-dom@19.2.3)(@types/react@19.2.14)(react-dom@19.2.4)(react@19.2.4)
@@ -573,7 +579,7 @@ importers:
     devDependencies:
       '@bitdev/node.node-env':
         specifier: 6.0.22
-        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
 
   node_modules/.bit_roots/minecraft7900.auto-trader_trading-service:
     dependencies:
@@ -658,12 +664,15 @@ importers:
     devDependencies:
       '@bitdev/node.node-env':
         specifier: 6.0.22
-        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
+        version: 6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)
 
 packages:
 
   '@adobe/css-tools@4.5.0':
     resolution: {integrity: sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==}
+
+  '@adraffy/ens-normalize@1.11.1':
+    resolution: {integrity: sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ==}
 
   '@apollo/cache-control-types@1.0.3':
     resolution: {integrity: sha512-F17/vCp7QVwom9eG7ToauIKdAxpSoadsJnqIfyryLFSkLSOEqu+eC5Z3N8OXcUVStuOMcNHlyraRsA6rRICu4g==}
@@ -2105,6 +2114,30 @@ packages:
       '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
       '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
 
+  '@nktkas/hyperliquid@0.33.3':
+    resolution: {integrity: sha512-fvnEw/2ejN14ZZVXA+nFQ9YgfFNjCI1yLliYyUboC6hr3Gwd/RwC4Ox90K4e8tkKWqkVpOcLRQ30p0nTeK4NBQ==}
+    engines: {node: '>=22.12.0'}
+
+  '@nktkas/rews@4.1.0':
+    resolution: {integrity: sha512-lPcTIPD2AE8JsJgnI+YGn9hzOhZHW3E0hrzDNUpyuVP5d1NERNz7EugR1IxW4Ly7QsM9/WmVeLif4olZsKVKjQ==}
+    engines: {node: '>=22.12.0'}
+
+  '@noble/ciphers@1.3.0':
+    resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/curves@1.9.1':
+    resolution: {integrity: sha512-k11yZxZg+t+gWvBbIswW0yoJlu8cHOC7dhunwOzoWH/mXGBiYyR4YY6hAEK/3EUs4UpB8la1RfdRpeGsFHkWsA==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
+    engines: {node: '>= 20.19.0'}
+
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
     engines: {node: '>= 8'}
@@ -3078,6 +3111,15 @@ packages:
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
 
+  '@scure/base@1.2.6':
+    resolution: {integrity: sha512-g/nm5FgUa//MCj1gV09zTJTaM6KBAHqLN907YVQqf7zC49+DcO4B1so4ZX07Ef10Twr6nuqYEH9GEggFXA4Fmg==}
+
+  '@scure/bip32@1.7.0':
+    resolution: {integrity: sha512-E4FFX/N3f4B80AKWp5dP6ow+flD1LQZo/w8UnLGYZO674jS6YnYeepycOOksv+vLPSpgN35wgKgy+ybfTb2SMw==}
+
+  '@scure/bip39@1.6.0':
+    resolution: {integrity: sha512-+lF0BbLiJNwVlev4eKelw1WWLaiKXw7sSl8T6FvBlWkdX+94aGJ4o8XjUdlyhTCjd8c+B3KT3JfS8P0bLRNU6A==}
+
   '@sinclair/typebox@0.27.12':
     resolution: {integrity: sha512-hhyNJ+nbR6ZR7pToHvllEFun9TL0sbL+tk/ON75lo+Xas054uez98qRbsuNt7MBCyZKK4+8Yli/OAGZhmfBZ/g==}
 
@@ -3739,6 +3781,17 @@ packages:
   abbrev@2.0.0:
     resolution: {integrity: sha512-6/mh1E2u2YgEsCHdY0Yx5oW+61gZU+1vXaoiHHrpKeuRNNgFvS+/jrwHiQhB5apAf5oB7UB7E19ol2R2LKH8hQ==}
     engines: {node: ^14.17.0 || ^16.13.0 || >=18.0.0}
+
+  abitype@1.2.3:
+    resolution: {integrity: sha512-Ofer5QUnuUdTFsBRwARMoWKOH1ND5ehwYhJ3OJ/BQO+StkwQjHw0XyVh4vDttzHB7QOFhPHa/o413PJ82gU/Tg==}
+    peerDependencies:
+      typescript: '>=5.0.4'
+      zod: ^3.22.0 || ^4.0.0
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+      zod:
+        optional: true
 
   accepts@1.3.8:
     resolution: {integrity: sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==}
@@ -4813,6 +4866,9 @@ packages:
   eventemitter3@4.0.7:
     resolution: {integrity: sha512-8guHBZCwKnFhYdHr2ysuRWErTwhoN2X8XELRlrRwpmfeY2jjuUN4taQMsULKUVo1K4DvZl+0pgfyoysHxvmvEw==}
 
+  eventemitter3@5.0.1:
+    resolution: {integrity: sha512-GWkBvjiSZK87ELrYOSESUYeVIc9mvLLf/nXalMOS5dYrgZq9o5OVkbZAVM06CVxYsCwH9BDZFPlQTlPA1j4ahA==}
+
   events@3.3.0:
     resolution: {integrity: sha512-mQw+2fkQbALzQ7V0MY0IqdnXNOeTtP4r0lN9z7AAawCXgqea7bDii20AYrIBrFd/Hx0M2Ocz6S111CaFkUcb0Q==}
     engines: {node: '>=0.8.x'}
@@ -5619,6 +5675,11 @@ packages:
   isomorphic-timers-promises@1.0.1:
     resolution: {integrity: sha512-u4sej9B1LPSxTGKB/HiuzvEQnXH0ECYkSVQU39koSwmFAxhlEAFl9RdTvLv4TOTQUgBS5O3O5fwUxk6byBZ+IQ==}
     engines: {node: '>=10'}
+
+  isows@1.0.7:
+    resolution: {integrity: sha512-I1fSfDCZL5P0v33sVqeTDSpcstAg/N+wF5HS033mogOVIp4B+oHC7oOCsA3axAbBSGTJ8QubbNmnIRN/h8U7hg==}
+    peerDependencies:
+      ws: '*'
 
   istanbul-lib-coverage@3.2.2:
     resolution: {integrity: sha512-O8dpsF+r0WV/8MNRKfnmrtCWhuKjxrq2w+jpzBL5UZKTi2LeVWnWOmWRxFlesJONmc+wLAGvKQZEOanko0LFTg==}
@@ -6564,6 +6625,14 @@ packages:
   own-keys@1.0.2:
     resolution: {integrity: sha512-19YVAg7T+WTrxggPukVq7DjTv6+PJ867TmhCvBsYwmbFCsZd344rq2Ld1p0wo8f8Qrrhgp82c6FJRqdXWtSEhg==}
     engines: {node: '>= 0.4'}
+
+  ox@0.14.45:
+    resolution: {integrity: sha512-jpsQ+p0JZh9mKCxxzxz0d5qFHZZg2/O9xW18IpEC/dNXXPVqmDJ0c//9RMz0CILkbSGPA42+cbU0fC/ghwJ03w==}
+    peerDependencies:
+      typescript: '>=5.4.0'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
 
   oxlint-tsgolint@0.17.0:
     resolution: {integrity: sha512-TdrKhDZCgEYqONFo/j+KvGan7/k3tP5Ouz88wCqpOvJtI2QmcLfGsm1fcMvDnTik48Jj6z83IJBqlkmK9DnY1A==}
@@ -8047,6 +8116,14 @@ packages:
     deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
+  valibot@1.5.0:
+    resolution: {integrity: sha512-nil6AkP2TChWL43Z5uJ6GTxX01CUA+g8LWUM+N/rB9NBbkUMaUsi9PUNzlUPgoKASgmx9f7eGOYpJ04/fSa6FQ==}
+    peerDependencies:
+      typescript: '>=5'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+
   validate-npm-package-license@3.0.4:
     resolution: {integrity: sha512-DpKm2Ui/xN7/HQKCtpZxoRWBhZ9Z0kqtygG8XCgNQ8ZlDnxuQmWhj566j8fN4Cu3/JmbhsDo7fcAJq4s9h27Ew==}
 
@@ -8081,6 +8158,14 @@ packages:
 
   vfile@6.0.3:
     resolution: {integrity: sha512-KzIbH/9tXat2u30jf+smMwFCsno4wHVdNmzFyL+T/L3UGqqk6JKfVqOFOZEpZSHADH1k40ab6NUIXZq422ov3Q==}
+
+  viem@2.56.8:
+    resolution: {integrity: sha512-vD1DsnYxySMml5/02m/+boWQYfZtWug2VYzm6+hdVT+VDmULBZfpoh9gPDAENdMMBmQKW/2QJ/1DuZaslBJDAg==}
+    peerDependencies:
+      typescript: '>=5.0.4'
+    peerDependenciesMeta:
+      typescript:
+        optional: true
 
   vite@8.0.2:
     resolution: {integrity: sha512-1gFhNi+bHhRE/qKZOJXACm6tX4bA3Isy9KuKF15AgSRuRazNBOJfdDemPBU16/mpMxApDPrWvZ08DcLPEoRnuA==}
@@ -8377,6 +8462,18 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  ws@8.21.0:
+    resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   ws@8.21.3:
     resolution: {integrity: sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==}
     engines: {node: '>=10.0.0'}
@@ -8446,6 +8543,8 @@ bit:
 snapshots:
 
   '@adobe/css-tools@4.5.0': {}
+
+  '@adraffy/ens-normalize@1.11.1': {}
 
   '@apollo/cache-control-types@1.0.3(graphql@16.14.2)':
     dependencies:
@@ -9499,7 +9598,7 @@ snapshots:
       '@types/node': 25.5.0
       lodash: 4.18.1
 
-  '@bitdev/node.node-env@6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@24.1.3)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)':
+  '@bitdev/node.node-env@6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@24.1.3)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)':
     dependencies:
       '@babel/core': 7.29.0
       '@babel/plugin-proposal-decorators': 7.29.0(@babel/core@7.29.0)
@@ -9510,7 +9609,7 @@ snapshots:
       '@bitdev/node.generators.node-starters': 1.0.2
       '@bitdev/node.generators.node-templates': 6.0.6
       '@bitdev/react.eslint.eslint-config-bit-react': 2.0.2(eslint-plugin-import@2.32.0)(eslint@8.57.1)(typescript@5.9.3)
-      '@bitdev/react.react-env': 6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+      '@bitdev/react.react-env': 6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@eslint/eslintrc': 3.3.7
       '@mdx-js/mdx': 3.1.1
       '@mdx-js/react': 3.1.1(@types/react@19.2.14)(react@19.2.4)
@@ -9588,7 +9687,7 @@ snapshots:
       - webpack-hot-middleware
       - yaml
 
-  '@bitdev/node.node-env@6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)':
+  '@bitdev/node.node-env@6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)':
     dependencies:
       '@babel/core': 7.29.0
       '@babel/plugin-proposal-decorators': 7.29.0(@babel/core@7.29.0)
@@ -9599,7 +9698,7 @@ snapshots:
       '@bitdev/node.generators.node-starters': 1.0.2
       '@bitdev/node.generators.node-templates': 6.0.6
       '@bitdev/react.eslint.eslint-config-bit-react': 2.0.2(eslint-plugin-import@2.32.0)(eslint@8.57.1)(typescript@5.9.3)
-      '@bitdev/react.react-env': 6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+      '@bitdev/react.react-env': 6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@eslint/eslintrc': 3.3.7
       '@mdx-js/mdx': 3.1.1
       '@mdx-js/react': 3.1.1(@types/react@19.2.14)(react@19.2.4)
@@ -9677,7 +9776,7 @@ snapshots:
       - webpack-hot-middleware
       - yaml
 
-  '@bitdev/node.node-env@6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)':
+  '@bitdev/node.node-env@6.0.22(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint-plugin-import@2.32.0)(eslint@8.57.1)(jsdom@29.1.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(sass@1.98.0)(terser@5.51.2)(typescript@5.9.3)(webpack@5.111.0)(yaml@2.9.1)':
     dependencies:
       '@babel/core': 7.29.0
       '@babel/plugin-proposal-decorators': 7.29.0(@babel/core@7.29.0)
@@ -9688,7 +9787,7 @@ snapshots:
       '@bitdev/node.generators.node-starters': 1.0.2
       '@bitdev/node.generators.node-templates': 6.0.6
       '@bitdev/react.eslint.eslint-config-bit-react': 2.0.2(eslint-plugin-import@2.32.0)(eslint@8.57.1)(typescript@5.9.3)
-      '@bitdev/react.react-env': 6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
+      '@bitdev/react.react-env': 6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)
       '@eslint/eslintrc': 3.3.7
       '@mdx-js/mdx': 3.1.1
       '@mdx-js/react': 3.1.1(@types/react@19.2.14)(react@19.2.4)
@@ -9870,7 +9969,7 @@ snapshots:
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
 
-  '@bitdev/react.react-env@6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)':
+  '@bitdev/react.react-env@6.0.27(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)':
     dependencies:
       '@apollo/client': 4.3.0(graphql@16.14.2)(react-dom@19.2.4)(react@19.2.4)(rxjs@7.8.2)
       '@babel/core': 7.29.0
@@ -9903,7 +10002,7 @@ snapshots:
       browserslist: 4.28.1
       find-root: 1.1.0
       graphql: 16.14.2
-      jsdom: 29.1.1
+      jsdom: 29.1.1(@noble/hashes@2.4.0)
       lodash-es: 4.18.1
       oxlint: 1.55.0(oxlint-tsgolint@0.17.0)
       oxlint-tsgolint: 0.17.0
@@ -9957,7 +10056,7 @@ snapshots:
       - webpack
       - yaml
 
-  '@bitdev/react.react-env@6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)':
+  '@bitdev/react.react-env@6.0.28(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@noble/hashes@2.4.0)(@opentelemetry/api@1.9.1)(esbuild@0.27.7)(eslint@8.57.1)(react-refresh@0.18.0)(rollup@4.63.3)(rxjs@7.8.2)(sass-embedded@1.104.1)(terser@5.51.2)(webpack@5.111.0)(yaml@2.9.1)':
     dependencies:
       '@apollo/client': 4.3.0(graphql@16.14.2)(react-dom@19.2.4)(react@19.2.4)(rxjs@7.8.2)
       '@babel/core': 7.29.0
@@ -9990,7 +10089,7 @@ snapshots:
       browserslist: 4.28.1
       find-root: 1.1.0
       graphql: 16.14.2
-      jsdom: 29.1.1
+      jsdom: 29.1.1(@noble/hashes@2.4.0)
       lodash-es: 4.18.1
       oxlint: 1.55.0(oxlint-tsgolint@0.17.0)
       oxlint-tsgolint: 0.17.0
@@ -10237,7 +10336,9 @@ snapshots:
 
   '@eslint/js@8.57.1': {}
 
-  '@exodus/bytes@1.15.1': {}
+  '@exodus/bytes@1.15.1(@noble/hashes@2.4.0)':
+    optionalDependencies:
+      '@noble/hashes': 2.4.0
 
   '@floating-ui/core@0.7.3': {}
 
@@ -10682,6 +10783,27 @@ snapshots:
       '@emnapi/runtime': 1.11.3
       '@tybys/wasm-util': 0.10.4
     optional: true
+
+  '@nktkas/hyperliquid@0.33.3(typescript@5.9.3)':
+    dependencies:
+      '@nktkas/rews': 4.1.0
+      '@noble/hashes': 2.4.0
+      decimal.js: 10.6.0
+      valibot: 1.5.0(typescript@5.9.3)
+    transitivePeerDependencies:
+      - typescript
+
+  '@nktkas/rews@4.1.0': {}
+
+  '@noble/ciphers@1.3.0': {}
+
+  '@noble/curves@1.9.1':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
+  '@noble/hashes@1.8.0': {}
+
+  '@noble/hashes@2.4.0': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -11398,6 +11520,19 @@ snapshots:
       '@rspack/core': 2.2.6
 
   '@rtsao/scc@1.1.0': {}
+
+  '@scure/base@1.2.6': {}
+
+  '@scure/bip32@1.7.0':
+    dependencies:
+      '@noble/curves': 1.9.1
+      '@noble/hashes': 1.8.0
+      '@scure/base': 1.2.6
+
+  '@scure/bip39@1.6.0':
+    dependencies:
+      '@noble/hashes': 1.8.0
+      '@scure/base': 1.2.6
 
   '@sinclair/typebox@0.27.12': {}
 
@@ -12749,6 +12884,10 @@ snapshots:
 
   abbrev@2.0.0: {}
 
+  abitype@1.2.3(typescript@5.9.3):
+    optionalDependencies:
+      typescript: 5.9.3
+
   accepts@1.3.8:
     dependencies:
       mime-types: 2.1.35
@@ -13420,10 +13559,10 @@ snapshots:
       whatwg-mimetype: 4.0.0
       whatwg-url: 14.2.0
 
-  data-urls@7.0.0:
+  data-urls@7.0.0(@noble/hashes@2.4.0):
     dependencies:
       whatwg-mimetype: 5.0.0
-      whatwg-url: 16.0.1
+      whatwg-url: 16.0.1(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - '@noble/hashes'
 
@@ -14088,6 +14227,8 @@ snapshots:
 
   eventemitter3@4.0.7: {}
 
+  eventemitter3@5.0.1: {}
+
   events@3.3.0: {}
 
   evp_bytestokey@1.0.3:
@@ -14669,9 +14810,9 @@ snapshots:
     dependencies:
       whatwg-encoding: 3.1.1
 
-  html-encoding-sniffer@6.0.0:
+  html-encoding-sniffer@6.0.0(@noble/hashes@2.4.0):
     dependencies:
-      '@exodus/bytes': 1.15.1
+      '@exodus/bytes': 1.15.1(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - '@noble/hashes'
 
@@ -15034,6 +15175,10 @@ snapshots:
 
   isomorphic-timers-promises@1.0.1: {}
 
+  isows@1.0.7(ws@8.21.0):
+    dependencies:
+      ws: 8.21.0
+
   istanbul-lib-coverage@3.2.2: {}
 
   istanbul-lib-report@3.0.1:
@@ -15140,17 +15285,17 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  jsdom@29.1.1:
+  jsdom@29.1.1(@noble/hashes@2.4.0):
     dependencies:
       '@asamuzakjp/css-color': 5.1.11
       '@asamuzakjp/dom-selector': 7.1.1
       '@bramus/specificity': 2.4.2
       '@csstools/css-syntax-patches-for-csstree': 1.1.14(css-tree@3.2.1)
-      '@exodus/bytes': 1.15.1
+      '@exodus/bytes': 1.15.1(@noble/hashes@2.4.0)
       css-tree: 3.2.1
-      data-urls: 7.0.0
+      data-urls: 7.0.0(@noble/hashes@2.4.0)
       decimal.js: 10.6.0
-      html-encoding-sniffer: 6.0.0
+      html-encoding-sniffer: 6.0.0(@noble/hashes@2.4.0)
       is-potential-custom-element-name: 1.0.1
       lru-cache: 11.5.2
       parse5: 8.0.1
@@ -15161,7 +15306,7 @@ snapshots:
       w3c-xmlserializer: 5.0.0
       webidl-conversions: 8.0.1
       whatwg-mimetype: 5.0.0
-      whatwg-url: 16.0.1
+      whatwg-url: 16.0.1(@noble/hashes@2.4.0)
       xml-name-validator: 5.0.0
     transitivePeerDependencies:
       - '@noble/hashes'
@@ -16294,6 +16439,21 @@ snapshots:
       get-intrinsic: 1.3.0
       object-keys: 1.1.1
       safe-push-apply: 1.0.0
+
+  ox@0.14.45(typescript@5.9.3):
+    dependencies:
+      '@adraffy/ens-normalize': 1.11.1
+      '@noble/ciphers': 1.3.0
+      '@noble/curves': 1.9.1
+      '@noble/hashes': 1.8.0
+      '@scure/bip32': 1.7.0
+      '@scure/bip39': 1.6.0
+      abitype: 1.2.3(typescript@5.9.3)
+      eventemitter3: 5.0.1
+    optionalDependencies:
+      typescript: 5.9.3
+    transitivePeerDependencies:
+      - zod
 
   oxlint-tsgolint@0.17.0:
     optionalDependencies:
@@ -18032,6 +18192,10 @@ snapshots:
 
   uuid@9.0.1: {}
 
+  valibot@1.5.0(typescript@5.9.3):
+    optionalDependencies:
+      typescript: 5.9.3
+
   validate-npm-package-license@3.0.4:
     dependencies:
       spdx-correct: 3.2.0
@@ -18085,6 +18249,23 @@ snapshots:
     dependencies:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
+
+  viem@2.56.8(typescript@5.9.3):
+    dependencies:
+      '@noble/curves': 1.9.1
+      '@noble/hashes': 1.8.0
+      '@scure/bip32': 1.7.0
+      '@scure/bip39': 1.6.0
+      abitype: 1.2.3(typescript@5.9.3)
+      isows: 1.0.7(ws@8.21.0)
+      ox: 0.14.45(typescript@5.9.3)
+      ws: 8.21.0
+    optionalDependencies:
+      typescript: 5.9.3
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+      - zod
 
   vite@8.0.2(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@types/node@22.13.14)(esbuild@0.27.7)(sass-embedded@1.104.1)(sass@1.104.1)(terser@5.51.2)(yaml@2.9.1):
     dependencies:
@@ -18241,7 +18422,7 @@ snapshots:
       '@opentelemetry/api': 1.9.1
       '@types/node': 22.13.14
       '@vitest/coverage-istanbul': 4.1.11(vitest@4.1.11)
-      jsdom: 29.1.1
+      jsdom: 29.1.1(@noble/hashes@2.4.0)
     transitivePeerDependencies:
       - msw
 
@@ -18375,9 +18556,9 @@ snapshots:
       tr46: 5.1.1
       webidl-conversions: 7.0.0
 
-  whatwg-url@16.0.1:
+  whatwg-url@16.0.1(@noble/hashes@2.4.0):
     dependencies:
-      '@exodus/bytes': 1.15.1
+      '@exodus/bytes': 1.15.1(@noble/hashes@2.4.0)
       tr46: 6.0.0
       webidl-conversions: 8.0.1
     transitivePeerDependencies:
@@ -18461,6 +18642,8 @@ snapshots:
       strip-ansi: 7.2.0
 
   wrappy@1.0.2: {}
+
+  ws@8.21.0: {}
 
   ws@8.21.3: {}
 

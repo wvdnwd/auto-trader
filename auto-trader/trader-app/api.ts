@@ -226,17 +226,41 @@ export function setLiveTrading(armed: boolean): Promise<LiveTradingStatus> {
   return request('/exchange/toggle', { method: 'POST', body: JSON.stringify({ armed }) });
 }
 
+export type ExchangeCredentialsInput = {
+  apiKey?: string;
+  apiSecret?: string;
+  walletAddress?: string;
+  privateKey?: string;
+  isTestnet?: boolean;
+  venue?: 'mexc' | 'hyperliquid';
+};
+
 /**
- * Save (or clear, when passed empty strings) the MEXC API key and secret used
- * for live order execution. Lets anyone running this deployment connect their
- * own MEXC account from the dashboard, without touching server configuration.
- *
- * @param apiKey the MEXC API key, or '' to disconnect.
- * @param apiSecret the MEXC API secret, or '' to disconnect.
- * @returns the resulting live-trading status.
+ * Save (or clear, when passed empty strings) the MEXC or Hyperliquid credentials
+ * used for live order execution.
  */
-export function saveExchangeCredentials(apiKey: string, apiSecret: string): Promise<LiveTradingStatus> {
-  return request('/exchange/credentials', { method: 'POST', body: JSON.stringify({ apiKey, apiSecret }) });
+export function saveExchangeCredentials(
+  credsOrApiKey: ExchangeCredentialsInput | string,
+  apiSecret?: string
+): Promise<LiveTradingStatus> {
+  const payload = typeof credsOrApiKey === 'string'
+    ? { apiKey: credsOrApiKey, apiSecret: apiSecret || '', venue: 'mexc' }
+    : credsOrApiKey;
+  return request('/exchange/credentials', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+/**
+ * Switch active execution venue between MEXC and Hyperliquid.
+ */
+export function setExchangeVenue(venue: 'mexc' | 'hyperliquid'): Promise<LiveTradingStatus> {
+  return request('/exchange/venue', { method: 'POST', body: JSON.stringify({ venue }) });
+}
+
+/**
+ * Trigger an immediate market scout run without waiting for the timer.
+ */
+export function runScoutNow(): Promise<{ ok: boolean }> {
+  return request('/scout/run', { method: 'POST' });
 }
 
 /**

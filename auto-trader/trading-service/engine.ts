@@ -293,7 +293,7 @@ export class Engine {
      * whenever live trading is armed. Shared with {@link TradingService} so a
      * credential save from the dashboard is visible here immediately.
      */
-    private readonly exchange: IExchangeAdapter = new MexcExchangeAdapter(),
+    private exchange: IExchangeAdapter = new MexcExchangeAdapter(),
     /**
      * Seconds between cycles once a setup is near its trigger. The strategy runs
      * on 1h bars, so this does not produce new signal information — it exists so
@@ -316,6 +316,16 @@ export class Engine {
   /** Whether the engine is currently watching a setup on the fast cycle. */
   get watching(): boolean {
     return this.fast;
+  }
+
+  /** Set or switch the active exchange adapter at runtime (e.g. MEXC <-> Hyperliquid). */
+  setExchange(exchange: IExchangeAdapter): void {
+    this.exchange = exchange;
+  }
+
+  /** Get the active exchange adapter. */
+  get currentExchange(): IExchangeAdapter {
+    return this.exchange;
   }
 
   /** The active risk configuration. */
@@ -711,7 +721,7 @@ export class Engine {
     if (this.exchange.status().enabled) {
       try {
         const assets = await this.exchange.getAccountAssets();
-        const usdt = assets.find((a) => a.currency === 'USDT');
+        const usdt = assets.find((a) => a.currency === 'USDT' || a.currency === 'USDC');
         if (usdt && Number.isFinite(usdt.equity) && usdt.equity > 0) {
           const balance = usdt.available;
           const equity = usdt.equity;
