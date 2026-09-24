@@ -977,11 +977,151 @@ export class Engine {
       const expectedVol = Math.floor((position.remainingQuantity ?? position.quantity) / contractSize);
       if (expectedVol > 0 && Math.abs(venue.vol - expectedVol) >= 1) {
         const newQty = venue.vol * contractSize;
-        await this.log('warn', `Reconciliatie: ${position.symbol} ${position.side} venue-volume ${venue.vol} wijkt af van lokaal ${expectedVol}; alleen open volume bijgewerkt, geen fill/TP-status afgeleid.`);
-        await this.store.updatePosition(position.id, {
-          remainingQuantity: newQty,
-        });
-        position.remainingQuantity = Math.max(0, newQty);
+        const detail = await this.market
+          .contractDetail(position.symbol)
+          .catch(() => ({ contractSize, minVol: 1, maxVol: 100000, priceScale: 4 }));
+        const priceScale = detail.priceScale ?? 4;
+        const isLiveArmed = this.exchange.status().enabled;
+
+        if (venue.vol > expectedVol) {
+          // Handmatige bijkoop op exchange / manual scale-in
+          const addedVol = venue.vol - expectedVol;
+          const addedQty = addedVol * contractSize;
+          const oldEntry = position.entry;
+          const newEntry = venue.entryPrice > 0 ? venue.entryPrice : oldEntry;
+          const isLong = position.side === 'LONG';
+          const dir = isLong ? 1 : -1;
+
+          // Bereken stop distance. Als er al een SL was, behoud het risico vanaf de nieuwe gewogen entry
+          const oldStopDist = Math.abs(oldEntry - position.stopLoss);
+          const stopDist = oldStopDist > 0 ? oldStopDist : newEntry * 0.05;
+
+          // Bepaal nieuwe SL prijs:
+          // Als de positie al break-even of trailing was, mag het risico niet verslechteren
+          let newStopLoss = position.stopLoss;
+          if (isLong) {
+            const calculatedSl = Number((newEntry - stopDist).toFixed(priceScale));
+            newStopLoss = position.breakEven || position.trailingArmed
+              ? Math.max(position.stopLoss, calculatedSl)
+              : calculatedSl;
+          } else {
+            const calculatedSl = Number((newEntry + stopDist).toFixed(priceScale));
+            newStopLoss = position.breakEven || position.trailingArmed
+              ? Math.min(position.stopLoss, calculatedSl)
+              : calculatedSl;
+          }
+
+          // Bereken nieuwe TP targets geschaald vanaf de nieuwe gewogen entry
+          const currentRisk = Math.abs(newEntry - newStopLoss);
+          const updatedTakeProfits = (position.takeProfits && position.takeProfits.length > 0)
+            ? position.takeProfits.map((tp) => ({
+                ...tp,
+                hit: false,
+                price: Number((newEntry + dir * currentRisk * (tp.rMultiple || 1.8)).toFixed(priceScale)),
+              }))
+            : [
+                { price: Number((newEntry + dir * currentRisk * 1.8).toFixed(priceScale)), portion: 0.45, rMultiple: 1.8, hit: false },
+                { price: Number((newEntry + dir * currentRisk * 2.7).toFixed(priceScale)), portion: 0.28, rMultiple: 2.7, hit: false },
+                { price: Number((newEntry + dir * currentRisk * 5.76).toFixed(priceScale)), portion: 0.27, rMultiple: 5.76, hit: false },
+              ];
+
+          const newNotional = newQty * newEntry;
+          const leverage = venue.leverage || position.leverage || 9;
+          const newMargin = newNotional / leverage;
+
+          // 1. Update orders op de exchange als live trading actief is
+          if (isLiveArmed) {
+            try {
+              // Annuleer oude plan orders zodat we geen verouderde volumes of triggers overhouden
+              await this.exchange.cancelAllPlanOrders(position.symbol);
+
+              // Plaats nieuwe SL order voor het VOLLEDIGE nieuwe volume
+              const stop = await this.exchange.placeStopOrder({
+                symbol: position.symbol,
+                side: position.side,
+                vol: venue.vol,
+                triggerPrice: newStopLoss,
+                externalOid: `${position.id}-stop-${Date.now()}`,
+              });
+              position.liveStopOrderId = stop.orderId;
+
+              // Plaats nieuwe TP orders voor het volledige volume
+              let remainingVol = venue.vol;
+              for (let i = 0; i < updatedTakeProfits.length; i++) {
+                const tp = updatedTakeProfits[i];
+                const isLast = i === updatedTakeProfits.length - 1;
+                const tpVol = isLast ? remainingVol : Math.max(detail.minVol, Math.round(venue.vol * tp.portion));
+                remainingVol -= tpVol;
+                if (tpVol > 0) {
+                  await this.exchange
+                    .placeTakeProfitOrder({
+                      symbol: position.symbol,
+                      side: position.side,
+                      vol: tpVol,
+                      triggerPrice: tp.price,
+                      externalOid: `${position.id}-tp-${i + 1}-${Date.now()}`,
+                    })
+                    .catch((err) => {
+                      void this.log('warn', `TP${i + 1} herplaatsen na handmatige aankoop mislukt: ${(err as Error).message}`);
+                    });
+                }
+              }
+            } catch (err) {
+              await this.log('warn', `Orders updaten op exchange na handmatige bijkoop mislukt voor ${position.symbol}: ${(err as Error).message}`);
+            }
+          }
+
+          // 2. Update positie in database en geheugen
+          await this.store.updatePosition(position.id, {
+            entry: newEntry,
+            quantity: position.quantity + addedQty,
+            remainingQuantity: newQty,
+            notional: newNotional,
+            margin: newMargin,
+            leverage,
+            stopLoss: newStopLoss,
+            takeProfit: updatedTakeProfits[0]?.price ?? position.takeProfit,
+            takeProfits: updatedTakeProfits,
+            liveStopOrderId: position.liveStopOrderId,
+            scaleInCount: (position.scaleInCount ?? 0) + 1,
+            scaledInAt: Date.now(),
+          });
+
+          position.entry = newEntry;
+          position.quantity += addedQty;
+          position.remainingQuantity = newQty;
+          position.notional = newNotional;
+          position.margin = newMargin;
+          position.leverage = leverage;
+          position.stopLoss = newStopLoss;
+          position.takeProfit = updatedTakeProfits[0]?.price ?? position.takeProfit;
+          position.takeProfits = updatedTakeProfits;
+          position.scaleInCount = (position.scaleInCount ?? 0) + 1;
+          position.scaledInAt = Date.now();
+
+          await this.log(
+            'trade',
+            `🔄 Handmatige bijkoop gedetecteerd voor ${position.symbol}: volume gestegen van ${expectedVol} naar ${venue.vol} contracts (${newQty.toFixed(2)} eenheden). Nieuwe avg entry: ${newEntry.toFixed(priceScale)}. SL aangepast naar ${newStopLoss.toFixed(priceScale)}, TPs herberekend voor het volledige volume.`
+          );
+          void notify({
+            kind: 'trade-open',
+            message: `🔄 Handmatige bijkoop: ${position.symbol} ${position.side} nu ${venue.vol} contracts @ avg ${newEntry.toFixed(priceScale)}. SL: ${newStopLoss.toFixed(priceScale)}, TP1: ${updatedTakeProfits[0]?.price}. Orders geüpdatet op exchange!`,
+          });
+        } else {
+          // Volume op venue is lager (deel gesloten of TP geraakt)
+          await this.log(
+            'info',
+            `Reconciliatie: ${position.symbol} ${position.side} venue-volume ${venue.vol} lager dan lokaal ${expectedVol}. Restant bijgewerkt naar ${newQty}.`
+          );
+          if (isLiveArmed && position.liveStopOrderId) {
+            await this.moveLiveStop(position, position.stopLoss, newQty).catch(() => {});
+          }
+          await this.store.updatePosition(position.id, {
+            remainingQuantity: newQty,
+            liveStopOrderId: position.liveStopOrderId,
+          });
+          position.remainingQuantity = Math.max(0, newQty);
+        }
       }
     }
 
