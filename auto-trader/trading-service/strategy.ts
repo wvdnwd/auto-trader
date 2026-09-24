@@ -233,8 +233,8 @@ export function buildSignal(
   const volPenalty = volatility > 0.03 ? 0.75 : 1;
   if (volPenalty < 1) reasons.push(`Hoge volatiliteit ATR ${(volatility * 100).toFixed(2)}%`);
 
-  // Chop is untradeable — heavily discount it so it rarely clears the threshold.
-  const regimePenalty = regime === 'CHOP' ? 0.45 : 1;
+  // In sideways/consolidation markets, discount lower-conviction chop without paralyzing the entire engine.
+  const regimePenalty = regime === 'CHOP' ? 0.70 : 1;
 
   const side: Side = raw >= 0 ? 'LONG' : 'SHORT';
   const price = ticker.lastPrice;
@@ -266,17 +266,19 @@ export function buildSignal(
     (side === 'SHORT' && higherRegime === 'TREND_UP') ||
     macroEmaOpposes;
 
+  const higherAlignedStrict =
+    (side === 'LONG' && higherRegime === 'TREND_UP') ||
+    (side === 'SHORT' && higherRegime === 'TREND_DOWN');
+
+  // When 4h is neutral (RANGE), a solid 1h setup does not fight the macro trend
+  const higherNeutralAllowed = higherRegime === 'RANGE' && !macroEmaOpposes;
+
   const alignedWithHigher =
     !macroEmaOpposes &&
-    ((side === 'LONG' && higherRegime === 'TREND_UP') ||
-      (side === 'SHORT' && higherRegime === 'TREND_DOWN'));
+    (higherAlignedStrict || higherNeutralAllowed);
 
-  // `requireHigherAlignment` (the mandatory entry gate in risk.ts) only lets a
-  // trade through when the higher timeframe is ACTIVELY trending the same way
-  // — a neutral regime (RANGE/CHOP) does not clear it, even though it is not
-  // outright opposed either. This check now mirrors that real gate exactly, so
-  // a green tick here means the trade can actually fire, not just "not fighting
-  // the trend".
+  // `requireHigherAlignment` (the entry gate in risk.ts) permits trades when the higher
+  // timeframe is actively aligned OR neutral (RANGE), while strictly vetoing when it opposes.
   checks.push({
     name: 'Hoger tijdsframe',
     passed: alignedWithHigher,
@@ -285,7 +287,9 @@ export function buildSignal(
         ? `Koers vecht tegen macro EMA (${macroEma?.toFixed(2)}) op hoger tijdsframe`
         : `1u/4u-trend (${higherRegime}) gaat tegen deze ${side} in`
       : alignedWithHigher
-        ? `1u/4u-trend ${higherRegime} bevestigt richting (in lijn met macro EMA)`
+        ? (higherNeutralAllowed
+            ? `1u/4u macro neutraal (${higherRegime}) — instap toegestaan (niet tegengesteld aan macro)`
+            : `1u/4u-trend ${higherRegime} bevestigt richting (in lijn met macro EMA)`)
         : `1u/4u-trend ${higherRegime} — nog geen bevestiging (niet tegengesteld, maar ook niet bevestigd)`,
   });
 
@@ -628,7 +632,7 @@ export function buildSignal(
   ).length;
   const checkPenalty = Math.max(0.35, 1 - softFails * 0.16);
   const stats = learning?.factorStats;
-  const alignmentBonus = alignedWithHigher ? adaptiveFactorMultiplier('Trend Alignment', 1.12, stats) : 1;
+  const alignmentBonus = higherAlignedStrict ? adaptiveFactorMultiplier('Trend Alignment', 1.12, stats) : 1;
   const fibBonus = fibConfluence ? adaptiveFactorMultiplier('Fibonacci Golden Zone', 1.08, stats) : 1;
   const sweepBonus = liquiditySwept ? 1.1 : 1;
   const sniperBonus = isTrending && inPullback ? adaptiveFactorMultiplier('Sniper Pullback', 1.08, stats) : 1;
@@ -808,10 +812,16 @@ export function btcTrendConflict(
   symbol: string,
   side: Side,
   btcRegime?: Regime | null,
-  chopFilterEnabled: boolean = true
+  chopFilterEnabled: boolean = true,
+  hasVolumeSpurt: boolean = false,
+  relativeStrength?: number
 ): { blocked: boolean; reason: string } {
   if (!btcRegime || symbol === 'BTC_USDT') return { blocked: false, reason: '' };
-  if (chopFilterEnabled && btcRegime === 'CHOP') {
+
+  // Coin in Play exemption: if an altcoin has high volume (>1.5x) or strong relative strength,
+  // allow it to trade during BTC CHOP (independent momentum).
+  const isCoinInPlay = hasVolumeSpurt || (relativeStrength !== undefined && relativeStrength > 0.015);
+  if (chopFilterEnabled && btcRegime === 'CHOP' && !isCoinInPlay) {
     return {
       blocked: true,
       reason: 'Bitcoin zit in CHOP (zijwaartse markt) — nieuwe trades gepauzeerd om fakeouts te voorkomen',

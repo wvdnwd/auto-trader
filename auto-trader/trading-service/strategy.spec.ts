@@ -185,6 +185,20 @@ describe('btcTrendConflict (Bitcoin Gatekeeper)', () => {
     // Never blocks BTC itself even in CHOP
     expect(btcTrendConflict('BTC_USDT', 'LONG', 'CHOP', true).blocked).toBe(false);
   });
+
+  it('exempts Coin in Play with volume spurt or relative strength from BTC CHOP block', () => {
+    // Volume spurt bypasses BTC CHOP
+    const withVolume = btcTrendConflict('SOL_USDT', 'LONG', 'CHOP', true, true);
+    expect(withVolume.blocked).toBe(false);
+
+    // Relative strength outperforming BTC bypasses BTC CHOP
+    const withRS = btcTrendConflict('PEPE_USDT', 'LONG', 'CHOP', true, false, 0.025);
+    expect(withRS.blocked).toBe(false);
+
+    // Still blocks when BTC is actively in TREND_DOWN even with volume
+    const duringCrash = btcTrendConflict('SOL_USDT', 'LONG', 'TREND_DOWN', true, true);
+    expect(duringCrash.blocked).toBe(true);
+  });
 });
 
 describe('rsiSeries and detectRsiDivergence', () => {

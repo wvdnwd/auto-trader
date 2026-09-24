@@ -68,8 +68,8 @@ export const DEFAULT_RISK: RiskConfig = {
   maxTotalMarginPct: 0.95,
   maxDrawdownPct: 0.25,
   dailyLossLimitPct: 0.08,
-  // Raised from 0.45 to 0.60: only trade strong signals to cut low-conviction chop losses.
-  minConfidence: 0.6,
+  // Calibrated to 0.54: allows high-conviction setups, range bounces and volume surges without noise.
+  minConfidence: 0.54,
   // Reduced from 48h to 36h: allows profitable runners to develop without keeping capital tied up for days.
   maxPositionHours: 36,
   // Stale Trade Exit: close unconfirmed positions (TP1 not reached) after 12h if price has made no significant headway.
@@ -128,11 +128,9 @@ export const DEFAULT_RISK: RiskConfig = {
   minFundingRateShort: -0.0005,
   // Price action confirmation: require 15m candle reversal before entering pullbacks.
   reversal15mRequired: true,
-  // 6 consecutive cycles with zero tradeable signal across the whole universe
-  // (roughly 4.5 hours at the 45s baseline, since a dead cycle also has nothing
-  // to trigger the fast 5s watch mode) is treated as a dead trending regime —
-  // pause new entries rather than force a low-edge trade to stay busy.
-  chopPauseStreak: 6,
+  // 40 consecutive cycles (~30 mins) with zero tradeable signal across the universe
+  // before pausing new entries, allowing market structure to develop without locking out setups early.
+  chopPauseStreak: 40,
   // Off by default — a deliberate opt-in for a small starting balance (see
   // `turboMode` doc comment on RiskConfig).
   turboMode: false,

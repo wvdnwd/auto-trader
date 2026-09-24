@@ -1674,7 +1674,8 @@ export class Engine {
     // regime with no trending edge to size a position against.
     const anyTradeable = signals.some((s) => s.confidence >= this.risk.minConfidence);
     this.chopStreak = anyTradeable ? 0 : this.chopStreak + 1;
-    if (this.chopStreak >= this.risk.chopPauseStreak) {
+    const maxChopStreak = this.risk.chopPauseStreak ?? 40;
+    if (this.chopStreak >= maxChopStreak) {
       const regimeBlock: BlockedState = {
         kind: 'regime',
         message: `Geen kansrijke trend in ${this.chopStreak} scans op rij — nieuwe entries gepauzeerd tot een markt weer trending regime toont.`,
@@ -1808,15 +1809,24 @@ export class Engine {
 
       // Bitcoin Gatekeeper: block altcoins that fight Bitcoin's dominant trend or when BTC is in CHOP
       if (this.risk.btcFilterEnabled !== false && signal.symbol !== 'BTC_USDT') {
+        const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed) ?? false;
+        const rs = ticker && btcTicker ? ticker.changeRate24h - btcChange : undefined;
         const btcCheck = btcTrendConflict(
           signal.symbol,
           signal.side,
           btcRegime,
-          this.risk.btcChopFilterEnabled !== false
+          this.risk.btcChopFilterEnabled !== false,
+          hasVolumeSpurt,
+          rs
         );
         if (btcCheck.blocked) {
           await this.logSkip(signal.symbol, btcCheck.reason);
           continue;
+        } else if (btcRegime === 'CHOP' && (hasVolumeSpurt || (rs !== undefined && rs > 0.015))) {
+          await this.log(
+            'info',
+            `🚀 Coin in Play: ${signal.symbol} toont sterke eigen dynamiek (${hasVolumeSpurt ? 'Volume Spurt' : `RS +${((rs ?? 0) * 100).toFixed(1)}%`}) — BTC Chop Filter omzeild!`
+          );
         }
       }
 
@@ -1929,20 +1939,24 @@ export class Engine {
       if (this.risk.pullbackFilterEnabled) {
         const pullbackCheck = signal.checks?.find((c) => c.name === 'Sniper Pullback');
         if (pullbackCheck && !pullbackCheck.passed) {
-          // Breakout Momentum Bypass: allow immediate entry on abnormal volume surges (>= 1.8x) with high conviction
+          // Breakout Momentum & Range/SMC Bypass: allow immediate entry on abnormal volume surges (>= 1.8x)
+          // or confirmed Range SMC / Asian sweeps with adequate conviction (no trend pullback required in a range)
           const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
+          const hasSMC = signal.checks?.some((c) => c.name === 'FVG / Order Block Confluentie' && c.passed);
+          const hasAsianSweep = signal.checks?.some((c) => c.name === 'Asian Range' && c.passed);
+          const isRangeBounce = signal.regime === 'RANGE' && (hasSMC || hasAsianSweep);
           const allowBreakoutBypass =
             this.risk.breakoutBypassEnabled !== false &&
-            hasVolumeSpurt &&
-            signal.confidence >= (this.risk.highConvictionConfidence ?? 0.70);
+            (hasVolumeSpurt || isRangeBounce) &&
+            signal.confidence >= (this.risk.minConfidence ?? 0.54);
 
           if (allowBreakoutBypass) {
-            const volDetail = signal.checks?.find((c) => c.name === 'Volume Spurt')?.detail || 'Volume Spurt';
+            const bypassReason = hasVolumeSpurt ? 'Volume Spurt' : 'Range/SMC Confluentie';
             await this.log(
               'info',
-              `🚀 Breakout Momentum Bypass geactiveerd voor ${signal.symbol} (${volDetail}, Conviction: ${Math.round(
+              `🚀 Instap Bypass geactiveerd voor ${signal.symbol} (${bypassReason}, Conviction: ${Math.round(
                 signal.confidence * 100
-              )}%) — directe instap zonder pullback`
+              )}%) — directe instap zonder klassieke EMA pullback`
             );
           } else {
             await this.logSkip(signal.symbol, pullbackCheck.detail);
