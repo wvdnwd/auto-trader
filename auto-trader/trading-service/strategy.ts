@@ -17,7 +17,7 @@ import { analyzeMarketStructure } from './market-structure.js';
 import { computeAsianRange, getMarketSession } from './sessions.js';
 import type { Candle, FactorStat, LearningState, Regime, Side, Signal, SignalCheck, Ticker } from './types.js';
 
-const PULLBACK_MAX_EMA_DISTANCE_ATR = 1.3;
+const PULLBACK_MAX_EMA_DISTANCE_ATR = 1.8;
 const ENTRY_CANDLE_SECONDS = 60 * 60;
 const MICRO_CANDLE_SECONDS = 15 * 60;
 const MAX_MICRO_CANDLE_LAG_SECONDS = 2 * MICRO_CANDLE_SECONDS;
@@ -370,7 +370,7 @@ export function buildSignal(
   // reject" continuation entry. Checking close price alone misses that,
   // since a fast reclaim can close the candle right back outside the band.
   const closeInZone = !!fib && inGoldenZone(fib, price);
-  const wickInZone = !!fib && goldenZoneWickTouch(fib, candles);
+  const wickInZone = !!fib && goldenZoneWickTouch(fib, candles, 8);
   const fibConfluence = !!fib && fibDirectionAgrees && (closeInZone || wickInZone);
   checks.push({
     name: 'Fibonacci confluentie',
@@ -413,12 +413,16 @@ export function buildSignal(
   // 9. Sniper Pullback Entry — in a trending regime, entering on a pullback to value
   //    (near EMA21 or inside the Fibonacci Golden Zone) avoids chasing extended moves,
   //    secures a tighter stop-loss, and maximizes Risk/Reward.
+  //    A recent wick into the golden zone (tag & reject bounce) also counts as a valid
+  //    pullback entry even if the current price has bounced slightly above EMA21 distance.
   const isTrending = regime === 'TREND_UP' || regime === 'TREND_DOWN';
   const fastEma = ema(closes, 21);
   const emaDistanceAtr = Number.isFinite(fastEma) && atr > 0 ? Math.abs(price - fastEma) / atr : 0;
+  const recentGoldenZoneBounce = wickInZone && fibDirectionAgrees;
   const inPullback =
     !isTrending ||
     fibConfluence ||
+    recentGoldenZoneBounce ||
     emaDistanceAtr <= PULLBACK_MAX_EMA_DISTANCE_ATR;
   checks.push({
     name: 'Sniper Pullback',
@@ -427,7 +431,9 @@ export function buildSignal(
       ? inPullback
         ? fibConfluence
           ? 'Instap in Fibonacci Golden Zone pullback'
-          : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
+          : recentGoldenZoneBounce
+            ? 'Recente golden zone bounce (tag & reject) — instap op de bounce'
+            : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
         : `Koers te ver uitgelopen van EMA21 (${emaDistanceAtr.toFixed(1)} ATR) — wacht op dip`
       : 'Geen trendregime — pullback-toets neutraal',
   });
