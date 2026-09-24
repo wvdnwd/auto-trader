@@ -1,23 +1,11 @@
 import { type MarketHistory } from './backtest.js';
 import { CORE_UNIVERSE } from './engine.js';
 import { isCryptoPerp, MarketData } from './market-data.js';
+import { loadReplayTimingHistory, replayWarmupStarts, REPLAY_WARMUP_BARS } from './replay-warmup.js';
 import { DEFAULT_RISK } from './risk.js';
 import { Store } from './store.js';
 import { runWorkerJob } from './worker-runner.js';
 import type { BacktestConfig, BacktestResult, ScoutResult, ScoutStatus } from './types.js';
-
-/** Bars of history loaded before the window so indicators are warmed up. */
-const WARMUP_BARS = 80;
-
-/** Interval lengths in seconds, mirroring the ones the backtest runner uses. */
-const INTERVAL_SECONDS: Record<string, number> = {
-  Min1: 60,
-  Min5: 300,
-  Min15: 900,
-  Min30: 1800,
-  Min60: 3600,
-  Hour4: 14400,
-};
 
 /** How often the scout looks for new markets to admit. */
 export const SCOUT_INTERVAL_MS = 2 * 24 * 60 * 60 * 1000;
@@ -192,10 +180,17 @@ export class MarketScout {
       .filter(
         (t) =>
           isCryptoPerp(t.symbol) &&
+          Number.isFinite(t.quoteVolume24h) &&
           t.quoteVolume24h >= minVol &&
           !active.has(t.symbol) &&
-          !onCooldown.has(t.symbol)
+          !onCooldown.has(t.symbol) &&
+          !this.pending.has(t.symbol)
       )
+      .sort((a, b) => {
+        const byVolume = b.quoteVolume24h - a.quoteVolume24h;
+        if (byVolume !== 0) return byVolume;
+        return a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0;
+      })
       .slice(0, SCOUT_BATCH_SIZE)
       .map((t) => t.symbol);
   }
@@ -255,6 +250,7 @@ export class MarketScout {
       this.pending.set(symbol, entry);
       await this.log('info', `Marktscan: ${symbol} wacht op goedkeuring - ${entry.reason}`);
     } else {
+      this.pending.delete(symbol);
       await this.store.setScoutCooldown(symbol, Date.now() + COOLDOWN_MS);
       await this.log('info', `Marktscan: ${symbol} niet toegelaten - ${entry.reason}`);
     }
@@ -262,6 +258,7 @@ export class MarketScout {
 
   /** Record a hard failure (no data, backtest error) as a rejection with cooldown. */
   private async reject(symbol: string, reason: string): Promise<void> {
+    this.pending.delete(symbol);
     const entry: ScoutResult = {
       symbol,
       testedAt: Date.now(),
@@ -284,18 +281,33 @@ export class MarketScout {
 
   /** Download entry and higher-timeframe history for one candidate. */
   private async loadHistory(config: BacktestConfig): Promise<MarketHistory[]> {
-    const entrySeconds = INTERVAL_SECONDS[config.interval] ?? 3600;
-    const higherSeconds = INTERVAL_SECONDS[config.higherInterval] ?? 14400;
-    const warmupFrom = config.from - WARMUP_BARS * higherSeconds;
+    const { entryFrom, higherFrom } = replayWarmupStarts(
+      config.from,
+      config.interval,
+      config.higherInterval
+    );
 
     const markets: MarketHistory[] = [];
     for (const symbol of config.symbols) {
       const [candles, higher] = await Promise.all([
-        this.market.history(symbol, config.interval, config.from - WARMUP_BARS * entrySeconds, config.to),
-        this.market.history(symbol, config.higherInterval, warmupFrom, config.to),
+        this.market.history(symbol, config.interval, entryFrom, config.to),
+        this.market.history(symbol, config.higherInterval, higherFrom, config.to),
       ]);
-      if (candles.length < WARMUP_BARS || higher.length < WARMUP_BARS) continue;
-      markets.push({ symbol, candles, higher });
+      if (candles.length < REPLAY_WARMUP_BARS || higher.length < REPLAY_WARMUP_BARS) continue;
+      const timing = await loadReplayTimingHistory(
+        this.market.history.bind(this.market),
+        symbol,
+        config.from,
+        config.to,
+        [
+          { interval: config.interval, from: entryFrom, to: config.to, candles },
+          { interval: config.higherInterval, from: higherFrom, to: config.to, candles: higher },
+        ]
+      );
+      if (!timing.timing15m || !timing.timing5m) {
+        throw new Error('geen bruikbare Min15/Min5 timinghistorie beschikbaar');
+      }
+      markets.push({ symbol, candles, higher, ...timing });
     }
     return markets;
   }

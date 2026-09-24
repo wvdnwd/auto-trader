@@ -1,27 +1,7 @@
 import type { Candle, Ticker } from './types.js';
+export { isCryptoPerp } from './market-filter.js';
 
 const BASE = process.env.FUTURES_API_BASE || 'https://contract.mexc.com/api/v1/contract';
-
-/**
- * Non-crypto underlyings the venue also lists as perpetuals.
- *
- * Metals, energy, equity indices and tokenised stocks trade on session hours and
- * macro news, so a crypto momentum strategy has no edge in them and the gaps
- * between sessions break the candle-based indicators.
- */
-const NON_CRYPTO =
-  /^(XAU|XAG|XAUT|XPT|XPD|SILVER|GOLD|USOIL|UKOIL|WTI|BRENT|NGAS|SPX|SPX500|SPY|NDX|NAS100|DJI|DAX|FTSE|NIKKEI|HSI|US30|US500|VIX)_|STOCK|_INDEX|PREMARKET|SOXL|TSLA|TESLA|AAPL|NVDA|NVIDIA|MSTR|AMZN|MSFT|GOOGL/i;
-
-/**
- * Whether a contract is a crypto perpetual worth trading.
- *
- * @param symbol contract symbol, e.g. `BTC_USDT`.
- * @returns true when the symbol is a USDT-quoted crypto perpetual.
- */
-export function isCryptoPerp(symbol: string): boolean {
-  if (!symbol.endsWith('_USDT')) return false;
-  return !NON_CRYPTO.test(symbol);
-}
 
 type RawTicker = {
   symbol: string;

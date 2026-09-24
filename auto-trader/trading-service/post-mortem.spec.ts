@@ -80,7 +80,7 @@ describe('analyzeClosedTrade (Post-Mortem Engine)', () => {
 
     const report = analyzeClosedTrade(pos, 0.2, 'BREAK_EVEN', 0.0);
     expect(report.verdict).toBe('BREAK_EVEN');
-    expect(report.lesson).toContain('saldo bleef 100% beschermd');
+    expect(report.lesson).toContain('break-even na kosten');
   });
 
   it('correctly diagnoses a stagnation (dead money) exit', () => {
@@ -88,9 +88,94 @@ describe('analyzeClosedTrade (Post-Mortem Engine)', () => {
       openedAt: Date.now() - 150 * 60_000, // 2.5 hours ago
     });
 
-    const report = analyzeClosedTrade(pos, 0.2001, 'STAGNATION', 0.1);
+    const report = analyzeClosedTrade(pos, 0.2001, 'STAGNATION', 0.01);
     expect(report.verdict).toBe('BREAK_EVEN');
     expect(report.whatWentWrong.some((w) => w.includes('dead money'))).toBe(true);
     expect(report.lesson).toContain('stagnatie (dead money)');
+  });
+
+  it('bases verdict on net PnL even for break-even and stagnation exit reasons', () => {
+    expect(analyzeClosedTrade(fakePosition(), 0.2, 'BREAK_EVEN', -2).verdict).toBe('LOSS');
+    expect(analyzeClosedTrade(fakePosition(), 0.21, 'STAGNATION', 2).verdict).toBe('WIN');
+    const stagnationLoss = analyzeClosedTrade(fakePosition(), 0.19, 'STAGNATION', -2);
+    expect(stagnationLoss.verdict).toBe('LOSS');
+    expect(stagnationLoss.lesson).toContain('Stop-loss');
+  });
+
+  it('keeps R anchored to initial risk instead of mutable margin or stop fields', () => {
+    const original = fakePosition({ margin: 40, stopLoss: 0.19 });
+    const afterPartials = fakePosition({ margin: 10, stopLoss: 0.205, remainingQuantity: 250 });
+
+    expect(analyzeClosedTrade(original, 0.2, 'MANUAL', 5).rMultiple).toBe(
+      analyzeClosedTrade(afterPartials, 0.2, 'MANUAL', 5).rMultiple
+    );
+  });
+
+  it('does not fabricate R when scale-in tranches have no persisted initial-risk basis', () => {
+    const report = analyzeClosedTrade(fakePosition({ scaleInCount: 1 }), 0.22, 'TAKE_PROFIT', 20);
+    expect(report.rMultiple).toBe(0);
+  });
+
+  it('does not attribute failed or N/A checks as active entry factors', () => {
+    const report = analyzeClosedTrade(
+      fakePosition({
+        reasons: ['Volume Spurt: N/A', 'Fibonacci filter not active'],
+        entryChecks: [
+          { name: 'Volume Spurt', passed: false, detail: 'N/A' },
+          { name: 'Fibonacci Golden Zone', passed: false, detail: 'disabled' },
+        ],
+      }),
+      0.2,
+      'MANUAL',
+      0
+    );
+
+    expect(report.entryFactors).toEqual([]);
+  });
+
+  it('does not label a generic reversal as 15m confirmation without explicit timeframe evidence', () => {
+    const generic = analyzeClosedTrade(
+      fakePosition({
+        reasons: ['Reversal pattern confirmed'],
+        entryChecks: [{ name: 'Reversal', passed: true, detail: 'Pattern confirmed' }],
+      }),
+      0.2,
+      'MANUAL',
+      0
+    );
+    expect(generic.entryFactors).not.toContain('15m Ommekeer-bevestiging');
+
+    const unconfirmed = analyzeClosedTrade(
+      fakePosition({ reasons: ['15m reversal not confirmed'], entryChecks: [] }),
+      0.2,
+      'MANUAL',
+      0
+    );
+    expect(unconfirmed.entryFactors).not.toContain('15m Ommekeer-bevestiging');
+
+    const explicit = analyzeClosedTrade(
+      fakePosition({
+        reasons: ['15m pullback-ommekeer bevestigd'],
+        entryChecks: [{ name: '15m Reversal', passed: true, detail: 'Hammer confirmed' }],
+      }),
+      0.2,
+      'MANUAL',
+      0
+    );
+    expect(explicit.entryFactors).toContain('15m Ommekeer-bevestiging');
+  });
+
+  it('does not infer 15m attribution from a failed explicit check', () => {
+    const report = analyzeClosedTrade(
+      fakePosition({
+        reasons: ['15m reversal confirmed'],
+        entryChecks: [{ name: '15m Reversal', passed: false, detail: 'N/A' }],
+      }),
+      0.2,
+      'MANUAL',
+      0
+    );
+
+    expect(report.entryFactors).not.toContain('15m Ommekeer-bevestiging');
   });
 });

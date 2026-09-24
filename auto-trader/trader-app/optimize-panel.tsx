@@ -123,49 +123,78 @@ export function OptimizePanel() {
   });
   const [error, setError] = useState<string | null>(null);
   const [applied, setApplied] = useState(false);
+  const [applying, setApplying] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mounted = useRef(false);
+  const generation = useRef(0);
+  const requestId = useRef(0);
 
   const busy = status.state === 'loading' || status.state === 'running';
 
-  const poll = useCallback(async () => {
+  const poll = useCallback(async (runId = generation.current) => {
+    const currentRequest = ++requestId.current;
     try {
       const next = await fetchOptimize();
+      if (!mounted.current || runId !== generation.current || currentRequest !== requestId.current) return;
       setStatus(next);
       if (next.state === 'loading' || next.state === 'running') {
-        timer.current = setTimeout(() => void poll(), POLL_MS);
+        timer.current = setTimeout(() => void poll(runId), POLL_MS);
       }
     } catch (err) {
-      setError((err as Error).message);
+      if (!mounted.current || runId !== generation.current || currentRequest !== requestId.current) return;
+      const message = (err as Error).message;
+      setError(message);
+      setStatus({ state: 'error', message, progress: 0, trials: [], best: null });
     }
   }, []);
 
   useEffect(() => {
-    void poll();
+    mounted.current = true;
+    void poll(generation.current);
     return () => {
+      mounted.current = false;
+      generation.current++;
+      requestId.current++;
       if (timer.current) clearTimeout(timer.current);
     };
   }, [poll]);
 
   const run = useCallback(
     async (config: Partial<BacktestConfig>) => {
+      const runId = ++generation.current;
+      requestId.current++;
+      if (timer.current) clearTimeout(timer.current);
       setError(null);
       setApplied(false);
+      setApplying(false);
+      setStatus({ state: 'loading', message: 'Optimalisatie starten…', progress: 0, trials: [], best: null });
       try {
-        setStatus(await startOptimize(config));
-        timer.current = setTimeout(() => void poll(), POLL_MS);
+        const initial = await startOptimize(config);
+        if (!mounted.current || runId !== generation.current) return;
+        setStatus(initial);
+        if (initial.state === 'loading' || initial.state === 'running') {
+          timer.current = setTimeout(() => void poll(runId), POLL_MS);
+        }
       } catch (err) {
-        setError((err as Error).message);
+        if (!mounted.current || runId !== generation.current) return;
+        const message = (err as Error).message;
+        setError(message);
+        setStatus({ state: 'error', message, progress: 0, trials: [], best: null });
       }
     },
     [poll]
   );
 
   const apply = useCallback(async () => {
+    const runId = generation.current;
+    setApplying(true);
     try {
       await applyBestParams();
-      setApplied(true);
+      if (mounted.current && runId === generation.current) setApplied(true);
     } catch (err) {
-      setError((err as Error).message);
+      if (mounted.current && runId === generation.current) setError((err as Error).message);
+    } finally {
+      if (mounted.current && runId === generation.current) setApplying(false);
     }
   }, []);
 
@@ -220,8 +249,8 @@ export function OptimizePanel() {
           </div>
 
           <div className={styles.applyRow}>
-            <button type="button" className={styles.runBtn} onClick={apply} disabled={applied}>
-              {applied ? 'Toegepast op de engine' : 'Pas beste instellingen toe'}
+            <button type="button" className={styles.runBtn} onClick={apply} disabled={applied || applying || busy}>
+              {applying ? 'Toepassen…' : applied ? 'Toegepast op de engine' : 'Pas beste instellingen toe'}
             </button>
             {best.testResult.expectancyR <= 0 && (
               <span className={styles.warnText}>

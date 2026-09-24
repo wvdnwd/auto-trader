@@ -1,5 +1,5 @@
 import { Backtest, type MarketHistory } from './backtest.js';
-import type { BacktestConfig, RiskConfig, WalkForwardReport, WalkForwardWindow } from './types.js';
+import type { BacktestConfig, Candle, RiskConfig, WalkForwardReport, WalkForwardWindow } from './types.js';
 
 /** Default length of one evaluation window, in days. */
 export const WINDOW_DAYS = 300;
@@ -26,6 +26,13 @@ const INTERVAL_SECONDS: Record<string, number> = {
 /** Seconds in one bar of the given interval. */
 function intervalSeconds(interval: string): number {
   return INTERVAL_SECONDS[interval] || 3600;
+}
+
+function timingSlice(candles: MarketHistory['timing15m'], from: number, to: number, seconds: number) {
+  return candles?.filter((candle) => {
+    const closedAt = candle.time + seconds;
+    return closedAt >= from - seconds * WARMUP_BARS && closedAt <= to;
+  });
 }
 
 /**
@@ -66,7 +73,12 @@ export class WalkForward {
       // being obviously absent, so it is skipped entirely.
       if (!slice.length) return;
 
-      const config: BacktestConfig = { ...this.base, from, to, risk };
+      const config: BacktestConfig = {
+        ...this.base,
+        from,
+        to,
+        risk: { ...this.base.risk, ...risk },
+      };
       try {
         const result = new Backtest(slice, config, true).run();
         windows.push({
@@ -95,10 +107,17 @@ export class WalkForward {
     for (const market of this.markets) {
       const candles = market.candles;
       if (!candles.length) continue;
-      first = Math.min(first, candles[0].time);
-      last = Math.max(last, candles[candles.length - 1].time);
+      first = Math.min(first, this.closeTime(candles[0]));
+      last = Math.max(last, this.closeTime(candles[candles.length - 1]));
     }
-    return { first, last };
+    return {
+      first: Math.max(first, this.base.from),
+      last: Math.min(last, this.base.to),
+    };
+  }
+
+  private closeTime(candle: Candle): number {
+    return candle.time + intervalSeconds(this.base.interval);
   }
 
   /** Window start times, spaced by the stride, that fit entirely in the data. */
@@ -132,10 +151,18 @@ export class WalkForward {
     return this.markets
       .map((market) => ({
         symbol: market.symbol,
-        candles: market.candles.filter((c) => c.time >= warmupFrom && c.time <= to),
-        higher: market.higher.filter((c) => c.time >= higherWarmupFrom && c.time <= to),
+        candles: market.candles.filter((c) => {
+          const closedAt = c.time + intervalSeconds(this.base.interval);
+          return closedAt >= warmupFrom && closedAt <= to;
+        }),
+        higher: market.higher.filter((c) => {
+          const closedAt = c.time + intervalSeconds(this.base.higherInterval);
+          return closedAt >= higherWarmupFrom && closedAt <= to;
+        }),
+        timing15m: timingSlice(market.timing15m, from, to, 900),
+        timing5m: timingSlice(market.timing5m, from, to, 300),
       }))
-      .filter((market) => market.candles.filter((c) => c.time >= from).length > 200);
+      .filter((market) => market.candles.filter((c) => this.closeTime(c) >= from).length > 200);
   }
 }
 

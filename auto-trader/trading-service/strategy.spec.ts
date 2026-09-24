@@ -1,7 +1,12 @@
-import { detectRsiDivergence, rsi, rsiSeries } from './indicators.js';
-import { isCryptoPerp } from './market-data.js';
+import * as fibonacciModule from './fibonacci.js';
+import * as indicatorsModule from './indicators.js';
+import { atrPct, detectRsiDivergence, ema, rsi, rsiSeries } from './indicators.js';
+import * as marketStructureModule from './market-structure.js';
+import { isCryptoPerp } from './market-filter.js';
+import * as sessionsModule from './sessions.js';
 import { btcTrendConflict, buildSignal, checkLtfReversal, detectRegime } from './strategy.js';
 import type { Candle, Ticker } from './types.js';
+import { vi } from 'vitest';
 
 describe('market filter', () => {
   it('accepts crypto perpetuals and rejects everything else', () => {
@@ -44,6 +49,14 @@ function tickerFor(candles: Candle[], fundingRate = 0): Ticker {
     changeRate24h: 0.05,
     fundingRate,
   };
+}
+
+function alignMicroCandles(candles: Candle[], entryCandles: Candle[]): Candle[] {
+  const latest = entryCandles[entryCandles.length - 1].time + 45 * 60;
+  return candles.map((candle, index) => ({
+    ...candle,
+    time: latest - (candles.length - 1 - index) * 15 * 60,
+  }));
 }
 
 describe('entry discipline', () => {
@@ -119,6 +132,13 @@ describe('signal generation', () => {
     expect(buildSignal(tickerFor(broken), broken)).toBeNull();
   });
 
+  it('rejects non-finite or non-positive ticker prices', () => {
+    const candles = series((i) => 100 + i * 0.8);
+    for (const lastPrice of [0, -1, NaN, Infinity, -Infinity]) {
+      expect(buildSignal({ ...tickerFor(candles), lastPrice }, candles)).toBeNull();
+    }
+  });
+
   it('keeps confidence within bounds even with extreme funding', () => {
     const up = series((i) => 100 + i * 0.8);
     const result = buildSignal(tickerFor(up, 0.01), up);
@@ -176,25 +196,22 @@ describe('rsiSeries and detectRsiDivergence', () => {
   });
 
   it('detects a bullish RSI divergence when price lower-low has higher-low RSI', () => {
-    const candles: Candle[] = [];
-    for (let i = 0; i < 35; i += 1) {
-      let close = 100;
-      if (i === 15) close = 85;
-      else if (i > 15 && i < 22) close = 95;
-      else if (i === 22) close = 80;
-      else if (i > 22) close = 88;
-      candles.push({
-        time: i * 900,
-        open: close,
-        high: close + 2,
-        low: close - 2,
-        close,
-        volume: 1000,
-      });
-    }
-    const closes = candles.map((c) => c.close);
-    const result = detectRsiDivergence(closes, candles, 14);
-    expect(result === 'BULLISH' || result === 'BEARISH' || result === null).toBe(true);
+    const closes = Array.from({ length: 50 }, (_, i) => {
+      if (i <= 26) return 100;
+      if (i <= 29) return 100 - (i - 26) * 10;
+      if (i <= 40) return 70 + (i - 29) * 2;
+      if (i <= 45) return 92 - (i - 40) * 5;
+      return 67 + (i - 45) * 4;
+    });
+    const candles: Candle[] = closes.map((close, i) => ({
+      time: i * 900,
+      open: close,
+      high: close + 1,
+      low: close,
+      close,
+      volume: 1000,
+    }));
+    expect(detectRsiDivergence(closes, candles, 14)).toBe('BULLISH');
   });
 });
 
@@ -243,7 +260,7 @@ describe('trade discovery enhancements', () => {
       volume: 1000,
     }));
 
-    const sig = buildSignal(tickerFor(up), up, [], overboughtLower)!;
+    const sig = buildSignal(tickerFor(up), up, [], alignMicroCandles(overboughtLower, up))!;
     expect(sig).not.toBeNull();
     expect(sig.timingReady).toBe(false);
 
@@ -256,7 +273,7 @@ describe('trade discovery enhancements', () => {
       close: 100 + (i % 2 === 0 ? 0.2 : -0.2),
       volume: 1000,
     }));
-    const sigReady = buildSignal(tickerFor(up), up, [], normalLower)!;
+    const sigReady = buildSignal(tickerFor(up), up, [], alignMicroCandles(normalLower, up))!;
     expect(sigReady.timingReady).toBe(true);
     expect(sigReady.reversalConfirmed).toBe(true);
   });
@@ -272,15 +289,16 @@ describe('trade discovery enhancements', () => {
       close: 150 - i * 0.5 - 0.9,
       volume: 1000,
     }));
-    const sig = buildSignal(tickerFor(up), up, [], fallingKnifeLower)!;
+    const alignedFallingKnife = alignMicroCandles(fallingKnifeLower, up);
+    const sig = buildSignal(tickerFor(up), up, [], alignedFallingKnife)!;
     expect(sig).not.toBeNull();
     expect(sig.timingReady).toBe(false);
     expect(sig.reversalConfirmed).toBe(false);
 
     // When the last candle reverses with a hammer wick
-    const hammerLower = [...fallingKnifeLower];
+    const hammerLower = [...alignedFallingKnife];
     hammerLower[29] = {
-      time: 29 * 900,
+      time: alignedFallingKnife[29].time,
       open: 135.5,
       high: 135.6,
       low: 133.0,
@@ -289,6 +307,127 @@ describe('trade discovery enhancements', () => {
     };
     const sigHammer = buildSignal(tickerFor(up), up, [], hammerLower)!;
     expect(sigHammer.reversalConfirmed).toBe(true);
+  });
+
+  it('fails closed when 15m timing or reversal data is missing, short, invalid, or stale', () => {
+    const up = series((i) => 100 + i * 0.8);
+    const missing = buildSignal(tickerFor(up), up, [], [])!;
+    expect(missing.timingReady).toBe(false);
+    expect(missing.reversalConfirmed).toBe(false);
+
+    const short = alignMicroCandles(up.slice(0, 10), up);
+    const shortSignal = buildSignal(tickerFor(up), up, [], short)!;
+    expect(shortSignal.timingReady).toBe(false);
+    expect(shortSignal.reversalConfirmed).toBe(true);
+
+    const invalid = alignMicroCandles(up.slice(-20), up);
+    invalid[invalid.length - 1] = { ...invalid[invalid.length - 1], close: NaN };
+    const invalidSignal = buildSignal(tickerFor(up), up, [], invalid)!;
+    expect(invalidSignal.timingReady).toBe(false);
+    expect(invalidSignal.reversalConfirmed).toBe(false);
+
+    const stale = alignMicroCandles(up.slice(-20), up);
+    const staleBy = stale[stale.length - 1].time - up[up.length - 1].time + 2 * 15 * 60 + 1;
+    for (const candle of stale) candle.time -= staleBy;
+    const staleSignal = buildSignal(tickerFor(up), up, [], stale)!;
+    expect(staleSignal.timingReady).toBe(false);
+    expect(staleSignal.reversalConfirmed).toBe(false);
+  });
+
+  it('accepts a valid Fib pullback bonus without stacking the correlated sniper bonus', () => {
+    const up = series((i) => 100 + i * 0.8);
+    const closes = up.map((candle) => candle.close);
+    const price = ema(closes, 21);
+    const atr = price * atrPct(up, 14);
+    const structure = marketStructureModule.analyzeMarketStructure(up, price, null);
+    const structureSpy = vi.spyOn(marketStructureModule, 'analyzeMarketStructure').mockReturnValue(structure);
+    const fibSpy = vi.spyOn(fibonacciModule, 'computeFibLevels').mockReturnValue(null);
+    try {
+      const withoutFib = buildSignal({ ...tickerFor(up), lastPrice: price }, up)!;
+      const fib = {
+        swingHigh: price + atr * 2,
+        swingLow: price - atr * 2,
+        direction: 'UP' as const,
+        retracements: [
+          { ratio: 0.236, price: price + atr * 1.5 },
+          { ratio: 0.382, price: price + atr * 0.5 },
+          { ratio: 0.5, price },
+          { ratio: 0.618, price: price - atr * 0.5 },
+          { ratio: 0.786, price: price - atr },
+        ],
+        extensions: [],
+        nearest: { ratio: 0.5, price },
+        distanceToNearest: 0,
+      };
+      fibSpy.mockReturnValue(fib);
+      const withFib = buildSignal({ ...tickerFor(up), lastPrice: price }, up)!;
+
+      expect(withoutFib.checks.find((check) => check.name === 'Sniper Pullback')?.passed).toBe(true);
+      expect(withFib.checks.find((check) => check.name === 'Sniper Pullback')?.passed).toBe(true);
+      expect(withFib.checks.find((check) => check.name === 'Fibonacci confluentie')?.passed).toBe(true);
+      expect(withFib.confidence).toBeCloseTo(withoutFib.confidence, 12);
+    } finally {
+      fibSpy.mockRestore();
+      structureSpy.mockRestore();
+    }
+  });
+
+  it('rejects deep EMA21 extensions on either side but accepts near-EMA pullbacks', () => {
+    const fibSpy = vi.spyOn(fibonacciModule, 'computeFibLevels').mockReturnValue(null);
+    try {
+      for (const [candles, side] of [
+        [series((i) => 100 + i * 0.8), 'LONG'],
+        [series((i) => 220 - i * 0.8), 'SHORT'],
+      ] as const) {
+        const closes = candles.map((candle) => candle.close);
+        const fastEma = ema(closes, 21);
+        const atr = fastEma * atrPct(candles, 14);
+        const direction = side === 'LONG' ? -1 : 1;
+        const checkAt = (distanceAtr: number) => {
+          const signal = buildSignal(
+            { ...tickerFor(candles), lastPrice: fastEma + direction * atr * distanceAtr },
+            candles
+          )!;
+          expect(signal.side).toBe(side);
+          return signal.checks.find((check) => check.name === 'Sniper Pullback')!.passed;
+        };
+
+        expect(checkAt(0.5)).toBe(true);
+        expect(checkAt(2)).toBe(false);
+      }
+    } finally {
+      fibSpy.mockRestore();
+    }
+  });
+
+  it('caps overlapping swing-sweep and Asian-session-sweep evidence to one bonus', () => {
+    const up = series((i) => 100 + i * 0.8);
+    const last = up[up.length - 1];
+    const asianRange = {
+      high: last.close + 2,
+      low: last.close - 2,
+      mid: last.close,
+      rangePct: 0.02,
+      swept: 'LOW' as const,
+    };
+    const rangeSpy = vi.spyOn(sessionsModule, 'computeAsianRange');
+    const lowSpy = vi.spyOn(indicatorsModule, 'significantLow');
+    try {
+      const signalWith = (sweepLevel: number, range: typeof asianRange | null) => {
+        rangeSpy.mockReturnValue(range);
+        lowSpy.mockReturnValue(sweepLevel);
+        return buildSignal(tickerFor(up), up)!;
+      };
+
+      const asianOnly = signalWith(last.low - 100, asianRange);
+      const both = signalWith(last.low + 0.1, asianRange);
+      expect(asianOnly.checks.find((check) => check.name === 'Liquidity sweep')?.passed).toBe(false);
+      expect(both.checks.find((check) => check.name === 'Liquidity sweep')?.passed).toBe(true);
+      expect(both.confidence).toBeCloseTo(asianOnly.confidence, 12);
+    } finally {
+      rangeSpy.mockRestore();
+      lowSpy.mockRestore();
+    }
   });
 
   it('gives confidence bonus when funding rate is negative during uptrend', () => {
@@ -310,9 +449,40 @@ describe('trade discovery enhancements', () => {
     const sig = buildSignal(tickerFor(up), up)!;
     expect(sig).not.toBeNull();
   });
+
+  it('counts an order block only when direction and distance fit the signal', () => {
+    const up = series((i) => 100 + i * 0.8);
+    const price = up[up.length - 1].close;
+    const structure = marketStructureModule.analyzeMarketStructure(up, price);
+    const spy = vi.spyOn(marketStructureModule, 'analyzeMarketStructure');
+    try {
+      const evaluate = (direction: 'BULLISH' | 'BEARISH', bottom: number, top: number) => {
+        spy.mockReturnValue({
+          ...structure,
+          activeFVGs: [],
+          nearestOrderBlock: {
+            direction,
+            bottom,
+            top,
+            candleIndex: 10,
+            time: up[10].time,
+            mitigated: false,
+          },
+        });
+        return buildSignal(tickerFor(up), up)!.checks.find((c) => c.name === 'FVG / Order Block Confluentie')!.passed;
+      };
+
+      expect(evaluate('BEARISH', price - 0.1, price + 0.1)).toBe(false);
+      expect(evaluate('BULLISH', price - 5, price - 4)).toBe(false);
+      expect(evaluate('BULLISH', price - 0.5, price + 0.2)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('checkLtfReversal', () => {
+  const recentBase = Math.floor(Date.now() / 1000) - 5 * 60;
   const makeCandle = (o: number, h: number, l: number, c: number, t: number): Candle => ({
     open: o,
     high: h,
@@ -324,8 +494,8 @@ describe('checkLtfReversal', () => {
 
   it('rejects LONG when 5m is in a falling knife without hammer wick', () => {
     const candles: Candle[] = [
-      makeCandle(100, 101, 98, 98.5, 1000), // red
-      makeCandle(98.5, 99, 96, 96.5, 2000), // red, lower close, tiny wick
+      makeCandle(100, 101, 98, 98.5, recentBase), // red
+      makeCandle(98.5, 99, 96, 96.5, recentBase + 300), // red, lower close, tiny wick
     ];
 
     const res = checkLtfReversal(candles, 'LONG');
@@ -335,8 +505,8 @@ describe('checkLtfReversal', () => {
 
   it('approves LONG when 5m shows a green candle', () => {
     const candles: Candle[] = [
-      makeCandle(100, 101, 98, 98.5, 1000), // red
-      makeCandle(98.5, 100, 98, 99.5, 2000), // green: close 99.5 > open 98.5
+      makeCandle(100, 101, 98, 98.5, recentBase), // red
+      makeCandle(98.5, 100, 98, 99.5, recentBase + 300), // green: close 99.5 > open 98.5
     ];
 
     const res = checkLtfReversal(candles, 'LONG');
@@ -345,8 +515,8 @@ describe('checkLtfReversal', () => {
 
   it('approves LONG when 5m shows a red candle with a strong hammer wick', () => {
     const candles: Candle[] = [
-      makeCandle(100, 101, 98, 98.5, 1000),
-      makeCandle(98.5, 98.6, 95.0, 98.2, 2000), // range 3.6, lower wick 98.2 - 95 = 3.2 (88% of range)
+      makeCandle(100, 101, 98, 98.5, recentBase),
+      makeCandle(98.5, 98.6, 95.0, 98.2, recentBase + 300), // range 3.6, lower wick 98.2 - 95 = 3.2 (88% of range)
     ];
 
     const res = checkLtfReversal(candles, 'LONG');
@@ -355,8 +525,8 @@ describe('checkLtfReversal', () => {
 
   it('rejects SHORT when 5m is in a climbing knife without star wick', () => {
     const candles: Candle[] = [
-      makeCandle(100, 102, 99, 101.5, 1000), // green
-      makeCandle(101.5, 104, 101, 103.5, 2000), // green, higher close, tiny wick
+      makeCandle(100, 102, 99, 101.5, recentBase), // green
+      makeCandle(101.5, 104, 101, 103.5, recentBase + 300), // green, higher close, tiny wick
     ];
 
     const res = checkLtfReversal(candles, 'SHORT');
@@ -366,12 +536,29 @@ describe('checkLtfReversal', () => {
 
   it('approves SHORT when 5m shows a red candle or star wick', () => {
     const candles: Candle[] = [
-      makeCandle(100, 102, 99, 101.5, 1000),
-      makeCandle(101.5, 102, 99.5, 100.2, 2000), // red: close 100.2 < open 101.5
+      makeCandle(100, 102, 99, 101.5, recentBase),
+      makeCandle(101.5, 102, 99.5, 100.2, recentBase + 300), // red: close 100.2 < open 101.5
     ];
 
     const res = checkLtfReversal(candles, 'SHORT');
     expect(res.ready).toBe(true);
+  });
+
+  it('fails closed on missing, malformed, or stale 5m candles', () => {
+    expect(checkLtfReversal([], 'LONG').ready).toBe(false);
+    expect(checkLtfReversal([makeCandle(100, 101, 99, 100, recentBase)], 'LONG').ready).toBe(false);
+    expect(
+      checkLtfReversal(
+        [makeCandle(100, 101, 99, 100, recentBase), makeCandle(100, 101, 99, NaN, recentBase + 300)],
+        'LONG'
+      ).ready
+    ).toBe(false);
+    expect(
+      checkLtfReversal(
+        [makeCandle(100, 101, 99, 100, recentBase - 3600), makeCandle(100, 101, 99, 100, recentBase - 3300)],
+        'LONG'
+      ).ready
+    ).toBe(false);
   });
 });
 

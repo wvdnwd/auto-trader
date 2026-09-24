@@ -91,7 +91,7 @@ export async function notify(event: NotificationEvent): Promise<void> {
   for (const result of results) {
     if (result.status === 'rejected') {
       // eslint-disable-next-line no-console
-      console.warn('[notifier] versturen mislukt:', result.reason);
+      console.warn('[notifier] delivery failed');
     }
   }
 }

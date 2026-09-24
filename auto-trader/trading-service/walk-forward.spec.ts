@@ -39,11 +39,45 @@ function config(over: Partial<BacktestConfig> = {}): BacktestConfig {
     from: START,
     to: START + 12_000 * HOUR,
     startingBalance: 10_000,
+    risk: {
+      microTiming15mEnabled: false,
+      reversal15mRequired: false,
+      ltfSniper5mEnabled: false,
+    },
     ...over,
   };
 }
 
 describe('walk-forward analysis', () => {
+  it('preserves timing warmup and excludes rows closing after the window', () => {
+    const from = START + 20 * DAY;
+    const to = from + WINDOW_DAYS * DAY;
+    const history = market();
+    const timingSeries = (seconds: number): Candle[] => [
+      ...Array.from({ length: 85 }, (_, i) => ({
+        time: from - 84 * seconds + i * seconds,
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100,
+        volume: 1,
+      })),
+      { time: to - seconds, open: 100, high: 101, low: 99, close: 100, volume: 1 },
+      { time: to, open: 100, high: 101, low: 99, close: 100, volume: 1 },
+    ];
+    history.timing15m = timingSeries(900);
+    history.timing5m = timingSeries(300);
+    const walkForward = new WalkForward([history], config());
+    const slice = (walkForward as unknown as { slice(from: number, to: number): MarketHistory[] }).slice(from, to)[0];
+
+    for (const [series, seconds] of [[slice.timing15m!, 900], [slice.timing5m!, 300]] as const) {
+      const closedAt = series.map((candle) => candle.time + seconds);
+      expect(Math.min(...closedAt)).toBeGreaterThanOrEqual(from - 80 * seconds);
+      expect(closedAt.some((time) => time < from)).toBe(true);
+      expect(Math.max(...closedAt)).toBe(to);
+    }
+  });
+
   it('rolls the window instead of growing it', () => {
     const report = new WalkForward([market()], config()).run();
 
@@ -68,6 +102,19 @@ describe('walk-forward analysis', () => {
     // should plan around, so it cannot be an average in disguise.
     expect(report.worstReturnPct).toBe(Math.min(...report.windows.map((w) => w.returnPct)));
     expect(report.worstDrawdownPct).toBe(Math.max(...report.windows.map((w) => w.maxDrawdownPct)));
+  });
+
+  it('keeps rolling windows inside the requested bounds while retaining warmup history', () => {
+    const from = START + 100 * HOUR;
+    const to = START + 9_000 * HOUR;
+    const report = new WalkForward([market()], config({ from, to })).run();
+
+    expect(report.windowCount).toBeGreaterThan(0);
+    for (const window of report.windows) {
+      expect(window.from).toBeGreaterThanOrEqual(from);
+      expect(window.to).toBeLessThanOrEqual(to);
+      expect(window.to - window.from).toBe(WINDOW_DAYS * DAY);
+    }
   });
 
   it('returns an empty report rather than a fake pass when history is too short', () => {

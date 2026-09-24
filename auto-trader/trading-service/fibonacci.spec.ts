@@ -1,4 +1,4 @@
-import { computeFibLevels, inGoldenZone } from './fibonacci.js';
+import { computeFibLevels, goldenZoneWickTouch, inGoldenZone } from './fibonacci.js';
 import type { Candle } from './types.js';
 
 /** Build a simple synthetic swing: price rises from `low` to `high` then pulls back. */
@@ -33,6 +33,25 @@ describe('computeFibLevels', () => {
       volume: 1,
     }));
     expect(computeFibLevels(flat)).toBeNull();
+  });
+
+  it('rejects invalid lookbacks and uses the latest equal extreme to choose the leg', () => {
+    const candles = [
+      { time: 0, open: 15, high: 20, low: 10, close: 15, volume: 1 },
+      { time: 1, open: 13, high: 16, low: 8, close: 13, volume: 1 },
+      { time: 2, open: 15, high: 20, low: 9, close: 15, volume: 1 },
+      { time: 3, open: 12, high: 18, low: 5, close: 12, volume: 1 },
+      { time: 4, open: 16, high: 20, low: 7, close: 16, volume: 1 },
+    ];
+
+    for (const lookback of [0, -1, 1.5, NaN, Infinity]) {
+      expect(computeFibLevels(candles, undefined, lookback)).toBeNull();
+    }
+    expect(computeFibLevels(candles, undefined, 4)).toBeNull();
+    expect(computeFibLevels(candles)?.direction).toBe('UP');
+
+    const sameLegExtreme = candles.map((c, i) => (i === 4 ? { ...c, low: 5 } : c));
+    expect(computeFibLevels(sameLegExtreme)).toBeNull();
   });
 
   it('derives an UP direction when the low precedes the high, retracing down from it', () => {
@@ -77,5 +96,53 @@ describe('inGoldenZone', () => {
     const fib = computeFibLevels(candles, 200)!;
     expect(inGoldenZone(fib, 195)).toBe(false);
     expect(inGoldenZone(fib, 105)).toBe(false);
+  });
+});
+
+describe('goldenZoneWickTouch', () => {
+  const makeCandle = (time: number, high: number, low: number, close: number): Candle => ({
+    time,
+    open: close,
+    high,
+    low,
+    close,
+    volume: 100,
+  });
+
+  it('requires a directional rejection close after a zone touch', () => {
+    const fib = computeFibLevels(swingCandles(100, 200, 30), 150)!;
+    const upperBand = fib.retracements.find((level) => level.ratio === 0.382)!.price;
+
+    expect(goldenZoneWickTouch(fib, [makeCandle(1, upperBand + 1, 150, upperBand + 0.1)])).toBe(true);
+    expect(goldenZoneWickTouch(fib, [makeCandle(1, upperBand + 1, 150, 150)])).toBe(false);
+  });
+
+  it('rejects a recent close beyond the 0.786 invalidation and ambiguous timestamps', () => {
+    const fib = computeFibLevels(swingCandles(100, 200, 30), 150)!;
+    const upperBand = fib.retracements.find((level) => level.ratio === 0.382)!.price;
+    const invalidation = fib.retracements.find((level) => level.ratio === 0.786)!.price;
+    const rejection = makeCandle(1, upperBand + 1, 150, upperBand + 0.1);
+
+    expect(
+      goldenZoneWickTouch(fib, [rejection, makeCandle(2, 130, invalidation - 1, invalidation)])
+    ).toBe(false);
+    expect(goldenZoneWickTouch(fib, [rejection, { ...rejection, time: 1 }])).toBe(false);
+  });
+
+  it('rejects a down-swing wick that does not close back below the zone', () => {
+    const candles = swingCandles(100, 200, 30);
+    const fib = computeFibLevels(candles, 150)!;
+    const downFib = {
+      ...fib,
+      direction: 'DOWN' as const,
+      retracements: fib.retracements.map((level) => ({
+        ...level,
+        price: fib.swingLow + (fib.swingHigh - fib.swingLow) * level.ratio,
+      })),
+    };
+    const lowerBand = downFib.retracements.find((level) => level.ratio === 0.382)!.price;
+
+    expect(goldenZoneWickTouch(downFib, [makeCandle(1, 150, lowerBand - 1, lowerBand - 0.1)])).toBe(true);
+    expect(goldenZoneWickTouch(downFib, [makeCandle(1, 150, lowerBand - 1, 150)])).toBe(false);
   });
 });

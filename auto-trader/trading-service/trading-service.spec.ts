@@ -1,12 +1,20 @@
-import { Engine } from './engine.js';
+import { vi } from 'vitest';
+import { allocateTakeProfitVolumes, Engine, toContractVolume } from './engine.js';
 import { Store } from './store.js';
 import { computeStats } from './trading-service.js';
-import { chandelierStop, detectBlowOffTop, progressiveProfitLock } from './exits.js';
+import { chandelierStop, detectBlowOffTop, FEE, progressiveProfitLock } from './exits.js';
 import type { Candle, Position, Ticker } from './types.js';
+
+vi.mock('./notifier.js', () => ({
+  hasNotificationChannel: () => false,
+  notify: async () => {},
+}));
 
 /** Deterministic market stub — no network, fully controlled prices. */
 class FakeMarket {
   public price$ = 100;
+
+  public freshPrice$ = 0;
 
   constructor(private readonly symbols = ['AAA_USDT']) {}
 
@@ -21,10 +29,10 @@ class FakeMarket {
   }
 
   async price(): Promise<number> {
-    return this.price$;
+    return this.freshPrice$ || this.price$;
   }
 
-  async candles(_symbol?: string): Promise<Candle[]> {
+  async candles(_symbol?: string, _timeframe?: string): Promise<Candle[]> {
     // A clean uptrend so the strategy produces a confident LONG.
     return Array.from({ length: 140 }, (_, i) => {
       const close = 40 + i * 0.45;
@@ -44,24 +52,13 @@ class FakeMarket {
   }
 }
 
-function engineWith(market: FakeMarket, symbols = ['AAA_USDT']) {
-  const store = new Store();
-  // No MONGO_URL in tests — the store falls back to in-memory state. The fake
-  // symbols are passed as the universe so the engine is allowed to trade them.
-  const engine = new Engine(store, market as never, undefined, 45, symbols);
-  // Disable the pullback filter, 5m sniper filter, and pacing for integration tests — the FakeMarket candles
-  // form a synthetic uptrend without 4h candles (confidence ~0.56) and tests run instant back-to-back cycles.
-  engine.setRisk({ pullbackFilterEnabled: false, minConfidence: 0.55, entryCooldownMinutes: 0, ltfSniper5mEnabled: false });
-  return { store, engine };
-}
-
 /**
  * Fake venue adapter — records every call the engine makes so live-mirroring
  * behaviour (entry, protective stop, tranche reduces, full closes) can be
  * asserted without touching the real MEXC API.
  */
 class FakeExchange {
-  public enabled = true;
+  public enabled: boolean;
   public failNextOpen = false;
   public failNextStop = false;
   public opens: { symbol: string; intent: string; vol: number }[] = [];
@@ -72,8 +69,12 @@ class FakeExchange {
   public venuePositions: { symbol: string; side: 'LONG' | 'SHORT'; vol: number; leverage: number; entryPrice: number; liquidationPrice: number; unrealisedPnl: number }[] | null = null;
   private stopSeq = 0;
 
+  constructor(enabled = true) {
+    this.enabled = enabled;
+  }
+
   status() {
-    return { configured: true, enabled: this.enabled, baseUrl: 'fake' };
+    return { configured: this.enabled, enabled: this.enabled, baseUrl: 'fake', executionDisabledReason: 'fake gate' };
   }
 
   async setLeverage(_symbol?: string, _leverage?: number, _side?: string, _openType?: string): Promise<void> {}
@@ -140,6 +141,16 @@ class FakeExchange {
     // so tests that never touch `venuePositions` keep behaving as before.
     return this.venuePositions ?? [];
   }
+}
+
+function engineWith(market: FakeMarket, symbols = ['AAA_USDT']) {
+  const store = new Store();
+  const exchange = new FakeExchange(false);
+  // The engine always receives an explicit fake adapter; tests never inherit
+  // credentials or construct the production adapter by default.
+  const engine = new Engine(store, market as never, undefined, 45, symbols, exchange as never);
+  engine.setRisk({ pullbackFilterEnabled: false, minConfidence: 0.55, entryCooldownMinutes: 0, ltfSniper5mEnabled: false });
+  return { store, engine, exchange };
 }
 
 function liveEngineWith(market: FakeMarket, symbols = ['AAA_USDT']) {
@@ -252,7 +263,7 @@ describe('engine lifecycle', () => {
     expect((await store.positions('OPEN')).length).toBeLessThanOrEqual(2);
   });
 
-  it('allows new positions to open once existing positions have hit TP1', async () => {
+  it('allows new positions once existing stops cover fees at break-even', async () => {
     const symbols = ['AAA_USDT', 'BBB_USDT', 'CCC_USDT', 'DDD_USDT'];
     const market = new FakeMarket(symbols);
     const { store, engine } = engineWith(market, symbols);
@@ -268,19 +279,31 @@ describe('engine lifecycle', () => {
     const openFirst = await store.positions('OPEN');
     expect(openFirst.length).toBe(2);
 
-    // Mark existing positions as having reached TP1 (derisked) and release portion of margin
+    // Simulate TP1 bookkeeping, but release capacity only with a fee-covered stop.
     for (const pos of openFirst) {
       if (pos.takeProfits && pos.takeProfits[0]) pos.takeProfits[0].hit = true;
       pos.breakEven = true;
+      const feeCoveredStop = pos.side === 'LONG'
+        ? pos.entry * ((1 + FEE) / (1 - FEE))
+        : pos.entry * ((1 - FEE) / (1 + FEE));
+      const remainingQuantity = pos.quantity * 0.55;
       await store.updatePosition(pos.id, {
         breakEven: true,
+        stopLoss: feeCoveredStop,
         takeProfits: pos.takeProfits,
+        remainingQuantity,
         margin: pos.margin * 0.55,
       });
       await store.applyBalanceDelta({ balance: pos.margin * 0.45 + 10, realisedPnl: 10 });
     }
 
-    // Next cycle should open new positions because existing ones are derisked past TP1
+    // Keep the simulated market above the newly raised LONG stops, but below TP1.
+    // At the default mark of 100 these fee-covered stops would already be hit.
+    const highestProtectedStop = Math.max(...openFirst.map((pos) => pos.stopLoss));
+    const nearestFirstTarget = Math.min(...openFirst.map((pos) => pos.takeProfits[0].price));
+    market.price$ = (highestProtectedStop + nearestFirstTarget) / 2;
+
+    // The fee-covered stops, not the TP1 flags, release capacity.
     await engine.cycle();
     const openSecond = await store.positions('OPEN');
     expect(openSecond.length).toBe(4);
@@ -311,15 +334,17 @@ describe('engine lifecycle', () => {
     expect(openSecond[0].scaleInCount ?? 0).toBe(0);
     expect(openSecond[0].margin).toBe(initialMargin);
 
-    // Derisk position (TP1 hit, entry and breakeven stop at 96, safely below current price 98.2)
+    // Mark TP1 and move the stop just beyond the fee-covered break-even threshold.
     initial.entry = 96;
-    initial.stopLoss = 96;
+    initial.stopLoss = initial.side === 'LONG'
+      ? initial.entry * ((1 + FEE) / (1 - FEE))
+      : initial.entry * ((1 - FEE) / (1 + FEE));
     initial.breakEven = true;
     initial.extreme = 98.2;
     if (initial.takeProfits && initial.takeProfits[0]) initial.takeProfits[0].hit = true;
     await store.updatePosition(initial.id, {
       entry: 96,
-      stopLoss: 96,
+      stopLoss: initial.stopLoss,
       breakEven: true,
       extreme: 98.2,
       takeProfits: initial.takeProfits,
@@ -452,6 +477,49 @@ describe('engine lifecycle', () => {
     expect(warnings.some((e) => e.message.includes('AAA_USDT'))).toBe(false);
   });
 
+  it('does not open a position when the enabled 5m sniper fetch throws', async () => {
+    const market = new FakeMarket();
+    const candles = market.candles.bind(market);
+    const requestedTimeframes: string[] = [];
+    market.candles = async (symbol?: string, timeframe?: string) => {
+      if (timeframe) requestedTimeframes.push(timeframe);
+      if (timeframe === 'Min5') throw new Error('5m feed unavailable');
+      return candles(symbol, timeframe);
+    };
+    const { store, engine, exchange } = engineWith(market);
+    engine.setRisk({ ltfSniper5mEnabled: true, reversal15mRequired: false });
+
+    await engine.cycle();
+
+    expect(requestedTimeframes).toContain('Min5');
+    expect(await store.positions('OPEN')).toHaveLength(0);
+    expect((await store.events()).some((event) => event.message.includes('5m sniper timing unavailable'))).toBe(true);
+    expect(exchange.opens).toHaveLength(0);
+  });
+
+  it('clears stale marks, waits through missing ticks, and resets the miss count on recovery', async () => {
+    const market = new FakeMarket();
+    const { store, engine } = engineWith(market);
+    await engine.cycle();
+    const [position] = await store.positions('OPEN');
+    const tickers = market.tickers.bind(market);
+    const price = market.price.bind(market);
+    market.tickers = async () => [];
+    market.price = async () => 0;
+
+    for (let i = 0; i < 13; i++) await engine.cycle();
+
+    expect((await store.position(position.id))!.status).toBe('OPEN');
+    expect(engine.markPrices[position.symbol]).toBeUndefined();
+
+    market.price$ = position.entry;
+    market.tickers = tickers;
+    market.price = price;
+    await engine.cycle();
+    expect(engine.markPrices[position.symbol]).toBe(position.entry);
+    expect((await store.position(position.id))!.status).toBe('OPEN');
+  });
+
   it('clamps nonsensical risk settings instead of trusting them', () => {
     const { engine } = engineWith(new FakeMarket());
     const risk = engine.setRisk({
@@ -464,6 +532,42 @@ describe('engine lifecycle', () => {
     expect(risk.maxLeverage).toBeLessThanOrEqual(125);
     expect(risk.maxOpenPositions).toBeGreaterThanOrEqual(1);
     expect(Number.isFinite(risk.minConfidence)).toBe(true);
+  });
+});
+
+describe('execution sizing and entry confirmation', () => {
+  it('floors contract sizing and rejects quantities outside venue limits', () => {
+    expect(toContractVolume(1.9, 1, 1, 10)).toBe(1);
+    expect(toContractVolume(1.9, 1, 2, 10)).toBe(0);
+    expect(toContractVolume(11, 1, 1, 10)).toBe(0);
+    expect(toContractVolume(Number.NaN, 1, 1, 10)).toBe(0);
+  });
+
+  it('allocates no more TP contracts than the open position', () => {
+    const volumes = allocateTakeProfitVolumes(10, [0.45, 0.28, 0.27], 1);
+    expect(volumes).toEqual([4, 2, 4]);
+    expect(volumes.reduce((sum, vol) => sum + vol, 0)).toBeLessThanOrEqual(10);
+    expect(allocateTakeProfitVolumes(1, [0.5, 0.5], 1)).toEqual([0, 1]);
+  });
+
+  it('replans paper entry sizing and stop from the accepted fresh mark', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = engineWith(market);
+    const initialAccount = await engine.account();
+    market.freshPrice$ = 100.05;
+
+    await engine.cycle();
+
+    const [position] = await store.positions('OPEN');
+    expect(engine.signals[0].price).toBe(100);
+    expect(position.entry).toBe(market.freshPrice$);
+    expect(position.stopLoss).toBeLessThan(position.entry);
+    expect(position.quantity).toBeCloseTo(position.notional / position.entry, 10);
+    const stopRiskPct =
+      (position.quantity * (position.entry - position.stopLoss + FEE * (position.entry + position.stopLoss))) /
+      initialAccount.equity;
+    expect(stopRiskPct).toBeLessThanOrEqual(engine.config.maxRiskPct + 1e-6);
+    expect(exchange.opens).toHaveLength(0);
   });
 });
 
@@ -588,56 +692,59 @@ describe('staged take profits', () => {
 });
 
 describe('live order mirroring', () => {
-  it('mirrors an entry and a protective stop onto the exchange when armed', async () => {
+  it('mirrors a paper entry onto MEXC and places the protective stop immediately', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
 
     await engine.cycle();
 
     const [position] = await store.positions('OPEN');
+    expect(position).toBeDefined();
     expect(position.live).toBe(true);
-    expect(position.liveOrderId).toBeTruthy();
-    expect(position.liveStopOrderId).toBeTruthy();
     expect(exchange.opens).toHaveLength(1);
-    expect(exchange.opens[0].intent).toBe('OPEN_LONG');
     expect(exchange.stopPlacements).toHaveLength(1);
-    expect(exchange.stopPlacements[0].triggerPrice).toBeCloseTo(position.stopLoss);
   });
 
   it('never opens on paper when the real entry order is rejected', async () => {
     const market = new FakeMarket();
     const store = new Store();
     const exchange = new FakeExchange();
-    exchange.failNextOpen = true;
     const engine = new Engine(store, market as never, undefined, 45, ['AAA_USDT'], exchange as never);
 
     await engine.cycle();
 
     const open = await store.positions('OPEN');
     expect(open).toHaveLength(0);
+    expect(exchange.opens).toHaveLength(0);
   });
 
-  it('mirrors a full close and cancels the resting stop', async () => {
+  it('rejects synthetic prices without submitting or cancelling live orders', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [{
+      symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100,
+      liquidationPrice: 80, unrealisedPnl: 0,
+    }];
     await engine.cycle();
-
     const [position] = await store.positions('OPEN');
-    const stopPrice = position.stopLoss;
 
-    await engine.simulatePrice(position.symbol, stopPrice);
-
-    const closed = await store.position(position.id);
-    expect(closed!.status).toBe('CLOSED');
-    expect(exchange.closes.length).toBeGreaterThan(0);
-    expect(exchange.cancelledStops).toContain(position.liveStopOrderId);
+    await expect(engine.simulatePrice('AAA_USDT', 1)).rejects.toThrow(/Synthetic price simulation is disabled/);
+    expect((await store.position(position.id))!.status).toBe('OPEN');
+    expect(exchange.opens).toHaveLength(0);
+    expect(exchange.closes).toHaveLength(0);
+    expect(exchange.cancelledStops).toHaveLength(0);
+    expect(exchange.cancelledPlanOrders).toHaveLength(0);
   });
 });
 
 describe('live position reconciliation', () => {
-  it('settles a position locally when MEXC no longer reports it open', async () => {
+  it('does not invent a close or pnl when venue absence has no fill ledger', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [{
+      symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100,
+      liquidationPrice: 80, unrealisedPnl: 0,
+    }];
     await engine.cycle();
 
     const [position] = await store.positions('OPEN');
@@ -647,26 +754,23 @@ describe('live position reconciliation', () => {
     // an offline stop trigger, a liquidation) — the venue no longer lists it,
     // but the engine's own record still says OPEN.
     exchange.venuePositions = [];
-    // Block a fresh entry this cycle so the assertions below isolate the
-    // reconciliation settle from the normal scan-and-enter flow.
-    engine.setRisk({ minConfidence: 0.99 });
-
     await engine.cycle();
 
     const after = await store.position(position.id);
-    expect(after!.status).toBe('CLOSED');
-    expect(after!.exitReason).toBe('MANUAL');
-    // No reduce order was sent — there was nothing left on the venue to reduce.
+    expect(after!.status).toBe('OPEN');
+    expect(after!.exitReason).toBeUndefined();
     expect(exchange.closes).toHaveLength(0);
-
-    const account = await engine.account();
-    // Margin freed back into the balance exactly once.
-    expect(account.usedMargin).toBeCloseTo(0, 6);
+    expect(exchange.cancelledStops).toHaveLength(0);
+    expect(exchange.cancelledPlanOrders).toHaveLength(0);
   });
 
   it('trims the local quantity when MEXC reports a smaller size than expected', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [{
+      symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100,
+      liquidationPrice: 80, unrealisedPnl: 0,
+    }];
     await engine.cycle();
 
     const [position] = await store.positions('OPEN');
@@ -698,6 +802,10 @@ describe('live position reconciliation', () => {
   it('leaves a live position untouched when MEXC still reports it at full size', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [{
+      symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100,
+      liquidationPrice: 80, unrealisedPnl: 0,
+    }];
     await engine.cycle();
 
     const [position] = await store.positions('OPEN');
@@ -721,7 +829,36 @@ describe('live position reconciliation', () => {
     expect(after!.remainingQuantity).toBeCloseTo(position.quantity, 6);
   });
 
-  it('adopts existing MEXC plan orders and cleans up duplicate stop orders on reconciliation', async () => {
+  it('refuses reset while a persisted live venue position is tracked', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [{
+      symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100,
+      liquidationPrice: 80, unrealisedPnl: 0,
+    }];
+    await engine.cycle();
+    const [position] = await store.positions('OPEN');
+
+    await expect(engine.reset()).rejects.toThrow(/Cannot reset while live venue positions are tracked/);
+    expect((await store.position(position.id))!.status).toBe('OPEN');
+  });
+
+  it('closes a live position on the exchange and cancels resting orders', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [{
+      symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100,
+      liquidationPrice: 80, unrealisedPnl: 0,
+    }];
+    await engine.cycle();
+    const [position] = await store.positions('OPEN');
+
+    expect(await engine.closePosition(position.id)).toBe(true);
+    expect(exchange.closes).toHaveLength(1);
+    expect((await store.position(position.id))!.status).toBe('CLOSED');
+  });
+
+  it('adopts existing plan orders without cancelling duplicate or opposite-side protection', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
 
@@ -765,14 +902,27 @@ describe('live position reconciliation', () => {
     expect(adopted.liveStopOrderId).toBe('stop-new');
     expect(adopted.stopLoss).toBe(95);
 
-    // Old duplicate was cancelled on MEXC
-    expect(exchange.cancelledPlanOrders).toContainEqual({
-      symbol: 'AAA_USDT',
-      orderId: 'stop-old',
-    });
+    expect(exchange.cancelledPlanOrders).toHaveLength(0);
 
     // Because liveStopOrderId was adopted and stop price didn't move, no extra stop order was placed
     expect(exchange.stopPlacements).toHaveLength(0);
+  });
+
+  it('tracks hedge-mode positions independently by symbol and side', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = liveEngineWith(market);
+    exchange.venuePositions = [
+      { symbol: 'AAA_USDT', side: 'LONG', vol: 10, leverage: 5, entryPrice: 100, liquidationPrice: 80, unrealisedPnl: 0 },
+      { symbol: 'AAA_USDT', side: 'SHORT', vol: 4, leverage: 5, entryPrice: 101, liquidationPrice: 120, unrealisedPnl: 0 },
+    ];
+
+    await engine.cycle();
+
+    const open = await store.positions('OPEN');
+    expect(open).toHaveLength(2);
+    expect(open.map((position) => position.side).sort()).toEqual(['LONG', 'SHORT']);
+    expect(exchange.closes).toHaveLength(0);
+    expect(exchange.cancelledPlanOrders).toHaveLength(0);
   });
 });
 

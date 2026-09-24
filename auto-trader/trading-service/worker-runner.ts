@@ -1,9 +1,10 @@
 import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
-import { executeJob } from './job-executor.js';
 import type { MarketHistory } from './backtest.js';
 import type { Candidate, Trial } from './optimizer.js';
 import type { BacktestConfig, BacktestResult, RiskConfig, WalkForwardReport } from './types.js';
+
+const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Replay a full historical backtest once and return its statistics. */
 export type BacktestJob = { kind: 'backtest'; markets: MarketHistory[]; config: BacktestConfig };
@@ -55,11 +56,8 @@ export type WorkerMessage = WorkerProgress | WorkerDone | WorkerError;
  * the absolute path Node was launched with — is a stable anchor for that
  * lookup in both formats.
  *
- * Some hosting environments run the production bundle from a sandbox that
- * does not install component packages as real `node_modules` entries at all
- * (everything needed gets folded into the single entry bundle instead). In
- * that case this resolution can never succeed, no matter the anchor — so the
- * caller must be ready to fall back to running the job in-process.
+ * If the worker cannot be resolved, the caller fails closed instead of
+ * blocking the live service's event loop with an inline replay.
  *
  * @returns absolute path to the compiled `backtest-worker.js`, or null when
  * it cannot be located on disk.
@@ -91,34 +89,61 @@ function resolveWorkerScript(): string | null {
  * @param job the job to run, with all data it needs already loaded.
  * @param onProgress called for every progress update the job reports.
  * @returns the job's `done` message.
- * @throws when the job reports an error or the worker exits abnormally.
+ * @throws when the worker is unavailable, times out, reports an error, or exits
+ *   without returning a result.
  */
 export async function runWorkerJob(
   job: WorkerJob,
   onProgress: (done: number, total: number) => void
 ): Promise<WorkerDone> {
   const scriptPath = resolveWorkerScript();
-  if (!scriptPath) {
-    // No dedicated worker thread available in this deployment — run the job
-    // in-process instead of failing outright. This trades away thread
-    // isolation for that single call, but keeps the scout and backtest
-    // features working everywhere the service runs.
-    return executeJob(job, onProgress);
-  }
+  if (!scriptPath) throw new Error('backtest-worker niet beschikbaar; CPU-job niet inline uitgevoerd');
 
+  const worker = new Worker(scriptPath, {
+    workerData: job,
+    resourceLimits: { maxOldGenerationSizeMb: 384, maxYoungGenerationSizeMb: 64, stackSizeMb: 8 },
+  });
+  return waitForWorkerResult(worker, onProgress);
+}
+
+/** Wait for one worker result, rejecting every exit path that has no result. */
+export function waitForWorkerResult(
+  worker: Worker,
+  onProgress: (done: number, total: number) => void,
+  timeoutMs = WORKER_TIMEOUT_MS
+): Promise<WorkerDone> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(scriptPath, { workerData: job });
     let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void worker.terminate();
+      reject(new Error(`backtest-worker timeout na ${timeoutMs}ms`));
+    }, timeoutMs);
 
     worker.on('message', (message: WorkerMessage) => {
+      if (settled) return;
       if (message.type === 'progress') {
-        onProgress(message.done, message.total);
+        try {
+          onProgress(message.done, message.total);
+        } catch (err) {
+          settled = true;
+          clearTimeout(timeout);
+          void worker.terminate();
+          reject(err);
+        }
         return;
       }
       settled = true;
+      clearTimeout(timeout);
       if (message.type === 'error') {
         void worker.terminate();
         reject(new Error(message.message));
+        return;
+      }
+      if (message.type !== 'done') {
+        void worker.terminate();
+        reject(new Error('ongeldig worker-resultaat'));
         return;
       }
       void worker.terminate();
@@ -128,13 +153,17 @@ export async function runWorkerJob(
     worker.on('error', (err) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timeout);
       reject(err);
     });
 
     worker.on('exit', (code) => {
       if (settled) return;
       settled = true;
-      if (code !== 0) reject(new Error(`worker gestopt met code ${code}`));
+      clearTimeout(timeout);
+      reject(new Error(code === 0
+        ? 'worker stopte zonder resultaat'
+        : `worker gestopt met code ${code}`));
     });
   });
 }

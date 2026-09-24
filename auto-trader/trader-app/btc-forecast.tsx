@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styles from './btc-forecast.module.css';
 import { fetchChart } from './api.js';
 import { dateTime, price as fmtPrice, shortDate, usd } from './format.js';
@@ -56,27 +56,29 @@ export function BtcForecast({ snap }: BtcForecastProps) {
   const [timeframe, setTimeframe] = useState<TimeframeKey>('Min60');
   const [expanded, setExpanded] = useState(true);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const mounted = useRef(true);
 
   // Find BTC signal from snapshot if available
   const btcSignal = snap.signals?.find((s) => s.symbol === 'BTC_USDT') || null;
   const btcMark = snap.marks?.['BTC_USDT'] || btcSignal?.price || 0;
 
   useEffect(() => {
-    mounted.current = true;
-    const loadBtc = () => {
-      fetchChart('BTC_USDT', timeframe)
-        .then((data) => mounted.current && setChartData(data))
-        .catch(() => {});
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const intervalMs = timeframe === 'Min5' ? 15_000 : timeframe === 'Min15' ? 30_000 : 60_000;
+    const loadBtc = async () => {
+      try {
+        const data = await fetchChart('BTC_USDT', timeframe);
+        if (active) setChartData(data);
+      } catch {
+        // Keep the latest successful chart while the service is temporarily unavailable.
+      }
+      if (active) timer = setTimeout(() => void loadBtc(), intervalMs);
     };
 
-    loadBtc();
-    const intervalMs =
-      timeframe === 'Min5' ? 15_000 : timeframe === 'Min15' ? 30_000 : 60_000;
-    const interval = setInterval(loadBtc, intervalMs);
+    void loadBtc();
     return () => {
-      mounted.current = false;
-      clearInterval(interval);
+      active = false;
+      clearTimeout(timer);
     };
   }, [timeframe]);
 

@@ -2,7 +2,8 @@ import { BacktestRunner } from './backtest-runner.js';
 import { OptimizerRunner } from './optimizer-runner.js';
 import { WalkForwardRunner, type WalkForwardStatus } from './walk-forward-runner.js';
 import { CONFIRM_INTERVAL, ENTRY_INTERVAL, Engine } from './engine.js';
-import { MexcExchangeAdapter, hasExchangeCredentials, type LiveTradingStatus } from './exchange-adapter.js';
+import { MexcExchangeAdapter, type IExchangeAdapter, type LiveTradingStatus } from './exchange-adapter.js';
+import { HyperliquidExchangeAdapter } from './hyperliquid-adapter.js';
 import { MarketScout } from './market-scout.js';
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { hasNotificationChannel, notify } from './notifier.js';
@@ -108,6 +109,8 @@ export type Stats = {
  * Facade over the trading engine — the single entry point used by the HTTP layer.
  */
 export class TradingService {
+  private hasUnresolvedLivePositions = false;
+
   constructor(
     private readonly store: Store,
     private readonly engine: Engine,
@@ -116,34 +119,39 @@ export class TradingService {
     private readonly optimizer: OptimizerRunner,
     private readonly walkForward: WalkForwardRunner,
     private readonly scout: MarketScout,
-    private readonly exchange: MexcExchangeAdapter = new MexcExchangeAdapter()
-  ) {}
+    private readonly exchange: IExchangeAdapter = new MexcExchangeAdapter()
+  ) {
+    this.store.onFailure?.(() => {
+      this.engine.stop();
+      this.scout.stop();
+    });
+  }
 
   /**
-   * Connect storage and start the autonomous engine.
+   * Connect storage and initialize the service.
    *
    * @param autoStart whether to start the trading loop immediately.
    */
-  async init(autoStart = true): Promise<void> {
+  async init(autoStart = false): Promise<void> {
+    process.env.LIVE_TRADING_ENABLED = 'false';
     const connected = await this.store.connect();
+    if (!connected && process.env.ALLOW_IN_MEMORY_STORE !== 'true') {
+      throw new Error('Persistent storage is required; in-memory mode must be explicitly enabled for local development');
+    }
     await this.store.addEvent({
       at: Date.now(),
       level: connected ? 'info' : 'warn',
       message: connected
         ? 'Verbonden met database — posities worden bewaard'
-        : 'Geen database bereikbaar — draait op in-memory state',
+        : 'Explicit non-live local development: using in-memory state',
     });
-    // Credentials saved from the dashboard on a previous run take priority over
-    // any MEXC_API_KEY/MEXC_API_SECRET environment variables, so a restart
-    // reconnects to whichever MEXC account was pasted in last.
     const stored = await this.store.exchangeCredentials();
-    if (stored.apiKey && stored.apiSecret) {
-      this.exchange.setCredentials(stored.apiKey, stored.apiSecret);
-      process.env.MEXC_API_KEY = stored.apiKey;
-      process.env.MEXC_API_SECRET = stored.apiSecret;
+    if (stored.apiKey && stored.apiSecret && 'setCredentials' in this.exchange) {
+      (this.exchange as MexcExchangeAdapter).setCredentials(stored.apiKey, stored.apiSecret);
     }
-    if (autoStart) this.engine.start();
+    this.hasUnresolvedLivePositions = (await this.store.positions('OPEN', 0)).some((position) => position.live);
     await this.scout.init();
+    if (autoStart && (!this.hasUnresolvedLivePositions || this.exchange.status?.()?.enabled)) this.engine.start();
   }
 
   /**
@@ -209,7 +217,7 @@ export class TradingService {
         this.exchange.getAccountAssets(),
         this.exchange.getOpenPositions(),
       ]);
-      const usdt = assets.find((a) => a.currency === 'USDT');
+      const usdt = assets.find((a) => a.currency === 'USDT' || a.currency === 'USDC');
       const marks = this.engine.markPrices;
 
       // MEXC's `unrealised` field on this endpoint is not reliably populated, and
@@ -262,6 +270,7 @@ export class TradingService {
 
   /** Start the autonomous loop. */
   start(): void {
+    this.assertNoUnresolvedLivePositions();
     this.engine.start();
   }
 
@@ -270,8 +279,14 @@ export class TradingService {
     this.engine.stop();
   }
 
+  shutdown(): void {
+    this.stop();
+    this.scout.stop();
+  }
+
   /** Run a single cycle immediately, regardless of the loop schedule. */
   async runOnce(): Promise<void> {
+    this.assertNoUnresolvedLivePositions();
     await this.engine.cycle();
   }
 
@@ -292,11 +307,31 @@ export class TradingService {
    * @returns true when the position existed and was closed.
    */
   async closePosition(id: string): Promise<boolean> {
+    const position = await this.store.position(id);
+    if (position?.live && !this.exchange.status().enabled) {
+      throw new Error('Live positions cannot be closed through the local engine while execution is disarmed');
+    }
     return this.engine.closePosition(id);
+  }
+
+  /**
+   * Partially close an open position (e.g. 50% profit take).
+   *
+   * @param id position id.
+   * @param fraction fraction to close (0 < fraction < 1, defaults to 0.5).
+   * @returns true when the position existed and was reduced.
+   */
+  async reducePosition(id: string, fraction = 0.5): Promise<boolean> {
+    const position = await this.store.position(id);
+    if (position?.live && !this.exchange.status().enabled) {
+      throw new Error('Live positions cannot be reduced through the local engine while execution is disarmed');
+    }
+    return this.engine.reducePosition(id, fraction);
   }
 
   /** Reset the paper account and clear all history. */
   async reset(): Promise<void> {
+    this.assertNoUnresolvedLivePositions();
     await this.engine.reset();
   }
 
@@ -350,7 +385,7 @@ export class TradingService {
       ticker && candles.length >= 30
         ? buildSignal(ticker, candles, higherCandles, [], undefined, btcCandles, 'BTC_USDT')
         : null;
-    const open = await this.store.positions('OPEN').catch(() => []);
+    const open = await this.store.positions('OPEN');
     const position = open.find((p) => p.symbol === symbol) || null;
     let plannedTrade: TradePlan | null = null;
     if (signal) {
@@ -451,30 +486,7 @@ export class TradingService {
     return this.scout.dismiss(symbol);
   }
 
-  /**
-   * Place a tiny real market order directly on MEXC, bypassing the strategy
-   * and paper engine entirely — a one-off connectivity check so a freshly
-   * pasted API key/secret can be proven to actually place and fill an order
-   * before trusting it to the autonomous engine.
-   *
-   * Refuses to run unless credentials are configured; does NOT require
-   * `LIVE_TRADING_ENABLED` — that flag gates the autonomous engine's own
-   * order flow, not this manual, explicitly-triggered probe. The order is
-   * opened and, unless `keepOpen` is set, immediately closed again at market
-   * so it does not linger as a real position after the check.
-   *
-   * @param symbol contract symbol, e.g. `BTC_USDT`.
-   * @param side direction to test, defaults to `LONG`.
-   * @param usdtAmount notional size in USDT to risk on the test order, e.g. 1 for $1.
-   * @param leverage leverage to open the test order with, defaults to 5x.
-   * @param keepOpen when true, leaves the resulting position open instead of
-   *   immediately closing it again.
-   * @returns the opened order id, the computed order size, and — unless kept
-   *   open — the closing order id.
-   * @throws when no exchange credentials are configured, when the notional is
-   *   too small to satisfy the venue's minimum order size, or when either
-   *   order is rejected by MEXC.
-   */
+  /** Disabled: order probes bypass the adapter's live-execution gate. */
   async placeTestOrder(
     symbol: string,
     side: 'LONG' | 'SHORT' = 'LONG',
@@ -484,101 +496,20 @@ export class TradingService {
     tpPct = 3,
     slPct = 2
   ): Promise<{ orderId: string; vol: number; price: number; tpPrice: number; slPrice: number; closeOrderId: string | null }> {
-    if (!this.exchange.isConfigured()) {
-      throw new Error(
-        'MEXC API-sleutel ontbreekt — koppel eerst je eigen sleutel voordat je een testorder plaatst.'
-      );
-    }
-    if (!(usdtAmount > 0)) throw new Error('bedrag (USDT) moet groter dan 0 zijn');
-
-    const [price, detail] = await Promise.all([
-      this.market.price(symbol),
-      this.market.contractDetail(symbol),
-    ]);
-    if (!price) throw new Error(`geen live prijs beschikbaar voor ${symbol}`);
-
-    // notional = vol * contractSize * price  =>  vol = notional / (contractSize * price)
-    const rawVol = (usdtAmount * leverage) / (detail.contractSize * price);
-    const vol = Math.max(detail.minVol, Math.round(rawVol));
-    if (vol > detail.maxVol) {
-      throw new Error(`bedrag te groot — max ordergrootte voor ${symbol} is ${detail.maxVol} contracten`);
-    }
-
-    await this.exchange.setLeverage(symbol, leverage, side, 'isolated');
-
-    const scale = detail.priceScale ?? 4;
-    const tpPrice = side === 'LONG'
-      ? +(price * (1 + tpPct / 100)).toFixed(scale)
-      : +(price * (1 - tpPct / 100)).toFixed(scale);
-    const slPrice = side === 'LONG'
-      ? +(price * (1 - slPct / 100)).toFixed(scale)
-      : +(price * (1 + slPct / 100)).toFixed(scale);
-
-    const opened = await this.exchange.placeMarketOrder({
-      symbol,
-      intent: side === 'LONG' ? 'OPEN_LONG' : 'OPEN_SHORT',
-      vol,
-      leverage,
-      openType: 'isolated',
-      externalOid: `test-${Date.now()}`,
-      takeProfitPrice: tpPrice,
-      stopLossPrice: slPrice,
-    });
-
-    await this.store.addEvent({
-      at: Date.now(),
-      level: 'warn',
-      message: `🧪 Testorder geplaatst: ${side} ${vol} contracten ${symbol} @ ~${price} (TP: ${tpPrice}, SL: ${slPrice}, order ${opened.orderId})${keepOpen ? '' : ' — wordt direct weer gesloten'}.`,
-    });
-    void notify({
-      kind: 'trade-open',
-      message: `Testorder geplaatst op MEXC: ${side} ${symbol}, ${usdtAmount} USDT notional, TP: ${tpPrice}, SL: ${slPrice}, order ${opened.orderId}.`,
-    });
-
-    if (keepOpen) {
-      return { orderId: opened.orderId, vol, price, tpPrice, slPrice, closeOrderId: null };
-    }
-
-    const closed = await this.exchange.closePosition({ symbol, side, vol, externalOid: `test-close-${Date.now()}` });
-    await this.exchange.cancelAllPlanOrders(symbol);
-    await this.store.addEvent({
-      at: Date.now(),
-      level: 'info',
-      message: `🧪 Testorder direct weer gesloten: ${symbol} (sluitorder ${closed.orderId}). Verbinding met MEXC werkt.`,
-    });
-
-    return { orderId: opened.orderId, vol, price, tpPrice, slPrice, closeOrderId: closed.orderId };
+    void symbol;
+    void side;
+    void usdtAmount;
+    void leverage;
+    void keepOpen;
+    void tpPct;
+    void slPct;
+    throw new Error('Exchange order probes are disabled until safe fill reconciliation is implemented');
   }
 
-  /**
-   * Fully close a real position on the exchange, using the venue's own
-   * reported open volume rather than any locally-estimated size.
-   *
-   * This is the safety-net counterpart to {@link placeTestOrder}: a test
-   * order (or any live entry) can end up larger than expected — the venue may
-   * merge repeated same-side opens into one position — so closing must always
-   * read the real `getOpenPositions()` volume for the symbol and close exactly
-   * that, not a recomputed test amount that could leave a remainder exposed.
-   *
-   * @param symbol contract symbol to flatten, e.g. `DOGE_USDT`.
-   * @returns the closing order id, or null if there was nothing open.
-   */
+  /** Disabled: venue order IDs are not reconciled to confirmed fills. */
   async flattenExchangePosition(symbol: string): Promise<{ orderId: string; vol: number } | null> {
-    const positions = await this.exchange.getOpenPositions();
-    const position = positions.find((p) => p.symbol === symbol);
-    if (!position || position.vol <= 0) return null;
-    const closed = await this.exchange.closePosition({
-      symbol,
-      side: position.side,
-      vol: position.vol,
-      externalOid: `flatten-${Date.now()}`,
-    });
-    await this.store.addEvent({
-      at: Date.now(),
-      level: 'warn',
-      message: `🔴 Live positie handmatig volledig gesloten: ${symbol} ${position.side} ${position.vol} contracten (sluitorder ${closed.orderId}).`,
-    });
-    return { orderId: closed.orderId, vol: position.vol };
+    void symbol;
+    throw new Error('Exchange position mutations are disabled until safe fill reconciliation is implemented');
   }
 
   /**
@@ -593,18 +524,11 @@ export class TradingService {
     return this.engine.setRisk(best.params);
   }
 
-  /**
-   * Simulate a price for one market and run exit management against it.
-   *
-   * Used to verify take-profit, break-even and stop behaviour without waiting for
-   * the live market to reach those levels.
-   *
-   * @param symbol the market to move.
-   * @param price the price to simulate.
-   * @returns positions in that symbol still open afterwards.
-   */
+  /** Disabled because synthetic prices can reach real-position management. */
   async simulatePrice(symbol: string, price: number): Promise<Position[]> {
-    return this.engine.simulatePrice(symbol, price);
+    void symbol;
+    void price;
+    throw new Error('Price simulation is disabled on the trading service');
   }
 
   /**
@@ -620,114 +544,88 @@ export class TradingService {
     return this.exchange.status();
   }
 
+  isStorageHealthy(): boolean {
+    return this.store.isHealthy();
+  }
+
   /**
-   * Save a MEXC API key/secret pasted in from the dashboard and switch the
-   * running exchange adapter to use them immediately.
+   * Save credentials for this single service.
    *
-   * This is what makes the deployment shareable: whoever runs it pastes in
-   * their own MEXC credentials from the UI, and from that point on the engine
-   * talks to their account — no access to `MEXC_API_KEY`/`MEXC_API_SECRET` in
-   * the hosting environment is required. Saving empty strings disconnects the
-   * exchange and drops the deployment back to paper trading.
-   *
-   * @param apiKey the MEXC API key, or '' to disconnect.
-   * @param apiSecret the MEXC API secret, or '' to disconnect.
+   * @param apiKey the API key, or '' to disconnect.
+   * @param apiSecret the API secret, or '' to disconnect.
    * @returns the resulting live-trading status.
    */
   async saveExchangeCredentials(apiKey: string, apiSecret: string): Promise<LiveTradingStatus> {
     await this.store.saveExchangeCredentials({ apiKey, apiSecret });
-    this.exchange.setCredentials(apiKey, apiSecret);
-    process.env.MEXC_API_KEY = apiKey;
-    process.env.MEXC_API_SECRET = apiSecret;
-    if (!apiKey || !apiSecret) process.env.LIVE_TRADING_ENABLED = 'false';
-    try {
-      const fs = await import('node:fs');
-      const path = await import('node:path');
-      const envPath = path.resolve(process.cwd(), '.env');
-      let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
-      content = content.replace(/^MEXC_API_KEY=.*$/m, '').replace(/^MEXC_API_SECRET=.*$/m, '').trim();
-      if (apiKey && apiSecret) {
-        content = `${content}\nMEXC_API_KEY=${apiKey}\nMEXC_API_SECRET=${apiSecret}\n`.trim() + '\n';
-      }
-      fs.writeFileSync(envPath, content, 'utf8');
-    } catch {
-      // ignore
+    if ('setCredentials' in this.exchange) {
+      (this.exchange as MexcExchangeAdapter).setCredentials(apiKey, apiSecret);
     }
     await this.store.addEvent({
       at: Date.now(),
       level: 'info',
       message:
         apiKey && apiSecret
-          ? 'MEXC API-sleutel opgeslagen — koppeling klaar, live uitvoering nog uitgeschakeld.'
-          : 'MEXC API-sleutel verwijderd — engine terug naar paper trading.',
+          ? 'Exchange credentials opgeslagen.'
+          : 'Exchange credentials verwijderd.',
     });
     return this.exchange.status();
   }
 
   /**
-   * Arm or disarm live MEXC order execution at runtime.
+   * Toggle live order execution.
    *
-   * This flips the same `LIVE_TRADING_ENABLED` gate {@link isLiveTradingEnabled}
-   * checks, so the dashboard toggle and the environment variable are always in
-   * sync — whichever set it last wins, and every exchange call keeps re-reading
-   * it fresh rather than caching a stale value. Arming is refused outright when
-   * no credentials are configured on the running exchange adapter — checked via
-   * `this.exchange.isConfigured()`, which is true for keys pasted into the
-   * dashboard (see `saveExchangeCredentials`) as well as `MEXC_API_KEY`/
-   * `MEXC_API_SECRET` env vars. Previously this checked the env vars only, so a
-   * key saved from the UI was silently ignored and arming always failed with a
-   * "not configured" error even right after a successful save. Disarming
-   * always succeeds — dropping back to paper trading is never blocked.
-   *
-   * @param armed true to enable live order execution, false to return to paper trading.
+   * @param armed true to arm live execution, false for paper-only.
    * @returns the resulting live-trading status.
-   * @throws when arming is requested but no exchange credentials are configured.
    */
   async setLiveTrading(armed: boolean): Promise<LiveTradingStatus> {
-    if (armed && !this.exchange.isConfigured()) {
-      throw new Error(
-        'MEXC API-sleutel en secret zijn nog niet ingesteld \u2014 live uitvoering kan niet worden ingeschakeld zonder API-sleutels.'
-      );
+    if (armed) {
+      const configured = this.exchange.isConfigured();
+      if (!configured) {
+        throw new Error('Kan live trading niet inschakelen: exchange credentials ontbreken');
+      }
+      process.env.LIVE_TRADING_ENABLED = 'true';
+      const status = this.exchange.status();
+      await this.store.addEvent({
+        at: Date.now(),
+        level: 'warn',
+        message: `🔴 LIVE TRADING INGESCHAKELD (${status.venue?.toUpperCase() || 'exchange'}) — orders worden direct live geplaatst!`,
+      });
+      void notify({
+        kind: 'trade-open',
+        message: `🔴 LIVE TRADING INGESCHAKELD op ${status.venue?.toUpperCase() || 'exchange'}!`,
+      });
+      return status;
     }
-    process.env.LIVE_TRADING_ENABLED = armed ? 'true' : 'false';
-    const creds = await this.store.exchangeCredentials();
-    if (creds.apiKey && creds.apiSecret) {
-      await this.store.saveExchangeCredentials(creds);
-    }
+    process.env.LIVE_TRADING_ENABLED = 'false';
     const status = this.exchange.status();
     await this.store.addEvent({
       at: Date.now(),
-      level: armed ? 'warn' : 'info',
-      message: armed
-        ? '\uD83D\uDD34 Live order-uitvoering INGESCHAKELD \u2014 de engine plaatst vanaf nu echte orders op MEXC.'
-        : '\uD83D\uDFE2 Live order-uitvoering uitgeschakeld \u2014 engine handelt weer volledig op papier.',
+      level: 'info',
+      message: 'Live trading uitgeschakeld; de engine draait veilig in paper trading modus.',
     });
     void notify({
-      kind: armed ? 'risk-halt' : 'trade-close',
-      message: armed
-        ? 'Live order-uitvoering ingeschakeld op de trading engine.'
-        : 'Live order-uitvoering uitgeschakeld \u2014 terug naar paper trading.',
+      kind: 'trade-close',
+      message: 'Live trading uitgeschakeld.',
     });
     return status;
   }
 
   /**
-   * Create a wired trading service with live market data and paper execution.
+   * Create the single wired trading service with configured venue.
    *
-   * @param tenantId owner of this instance's paper account, MEXC connection and
-   *   history — `'main'` for the deployment owner, or a per-browser client id
-   *   for anyone else using a shared link. Each tenant gets a fully isolated
-   *   {@link Store} and {@link Engine}; only the public market-data cache
-   *   ({@link MarketData}) is shared, since it carries no user-specific state.
-   * @param market shared market-data client, reused across tenants.
+   * @param market shared market-data client.
    * @returns a ready-to-init service instance.
    */
-  static from(tenantId = 'main', market: MarketData = new MarketData()): TradingService {
-    const store = new Store(tenantId);
-    // Shared with the engine so a credential save from the dashboard (via
-    // `saveExchangeCredentials` below) is visible to the same instance the
-    // engine mirrors live orders through — no separate sync path needed.
-    const exchange = new MexcExchangeAdapter();
+  static from(market: MarketData = new MarketData()): TradingService {
+    const store = new Store();
+    const venue = (process.env.EXCHANGE_VENUE?.toLowerCase() === 'hyperliquid') ? 'hyperliquid' : 'mexc';
+    const exchange: IExchangeAdapter = venue === 'hyperliquid'
+      ? new HyperliquidExchangeAdapter(
+          process.env.HYPERLIQUID_WALLET,
+          process.env.HYPERLIQUID_PRIVATE_KEY,
+          process.env.HYPERLIQUID_TESTNET === 'true'
+        )
+      : new MexcExchangeAdapter();
     const engine = new Engine(store, market, undefined, undefined, undefined, exchange);
     const scout = new MarketScout(
       market,
@@ -745,6 +643,12 @@ export class TradingService {
       scout,
       exchange
     );
+  }
+
+  private assertNoUnresolvedLivePositions(): void {
+    if (this.hasUnresolvedLivePositions && !this.exchange.status?.()?.enabled) {
+      throw new Error('Service actions are disabled while unresolved live positions exist and live trading is disarmed');
+    }
   }
 }
 

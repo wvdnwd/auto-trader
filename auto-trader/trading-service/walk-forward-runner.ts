@@ -1,22 +1,9 @@
 import { type MarketHistory } from './backtest.js';
 import { normaliseConfig } from './backtest-runner.js';
 import { MarketData } from './market-data.js';
+import { loadReplayTimingHistory, replayWarmupStarts, REPLAY_WARMUP_BARS } from './replay-warmup.js';
 import { runWorkerJob } from './worker-runner.js';
 import type { BacktestConfig, RiskConfig, WalkForwardReport } from './types.js';
-
-/** Bars of history loaded before the window so indicators are warmed up. */
-const WARMUP_BARS = 80;
-
-/** Interval lengths in seconds. */
-const INTERVAL_SECONDS: Record<string, number> = {
-  Min1: 60,
-  Min5: 300,
-  Min15: 900,
-  Min30: 1800,
-  Min60: 3600,
-  Hour4: 14_400,
-  Day1: 86_400,
-};
 
 /** Progress and result of a walk-forward analysis. */
 export type WalkForwardStatus = {
@@ -71,8 +58,11 @@ export class WalkForwardRunner {
 
   private async execute(config: BacktestConfig, risk?: Partial<RiskConfig>): Promise<void> {
     try {
-      const step = INTERVAL_SECONDS[config.interval] || 3600;
-      const warmupFrom = config.from - step * WARMUP_BARS;
+      const { entryFrom, higherFrom } = replayWarmupStarts(
+        config.from,
+        config.interval,
+        config.higherInterval
+      );
       const markets: MarketHistory[] = [];
 
       for (let i = 0; i < config.symbols.length; i += 1) {
@@ -83,11 +73,21 @@ export class WalkForwardRunner {
           progress: (i / config.symbols.length) * 0.5,
         };
         const [candles, higher] = await Promise.all([
-          this.market.history(symbol, config.interval, warmupFrom, config.to),
-          this.market.history(symbol, config.higherInterval, warmupFrom, config.to).catch(() => []),
+          this.market.history(symbol, config.interval, entryFrom, config.to),
+          this.market.history(symbol, config.higherInterval, higherFrom, config.to).catch(() => []),
         ]);
-        if (candles.length < WARMUP_BARS + 10) continue;
-        markets.push({ symbol, candles, higher });
+        if (candles.length < REPLAY_WARMUP_BARS + 10) continue;
+        const timing = await loadReplayTimingHistory(
+          this.market.history.bind(this.market),
+          symbol,
+          config.from,
+          config.to,
+          [
+            { interval: config.interval, from: entryFrom, to: config.to, candles },
+            { interval: config.higherInterval, from: higherFrom, to: config.to, candles: higher },
+          ]
+        );
+        markets.push({ symbol, candles, higher, ...timing });
       }
 
       if (!markets.length) {

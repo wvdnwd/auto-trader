@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import styles from './trader-app.module.css';
 import { fetchChart } from './api.js';
 import { coinInfo, splitSymbol } from './coin-info.js';
@@ -26,6 +26,39 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
   const [inlineLoading, setInlineLoading] = useState<Record<string, boolean>>({});
   const [inlineError, setInlineError] = useState<Record<string, string | null>>({});
   const [showAllChecks, setShowAllChecks] = useState<Record<string, boolean>>({});
+  const mounted = useRef(false);
+  const requestIds = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const symbol of Object.keys(requestIds.current)) requestIds.current[symbol]++;
+    };
+  }, []);
+
+  const loadInlineChart = (symbol: string) => {
+    const requestId = (requestIds.current[symbol] || 0) + 1;
+    requestIds.current[symbol] = requestId;
+    setInlineLoading((prev) => ({ ...prev, [symbol]: true }));
+    setInlineError((prev) => ({ ...prev, [symbol]: null }));
+    void fetchChart(symbol, 'Min60')
+      .then((data) => {
+        if (mounted.current && requestIds.current[symbol] === requestId) {
+          setInlineChart((prev) => ({ ...prev, [symbol]: data }));
+        }
+      })
+      .catch((err) => {
+        if (mounted.current && requestIds.current[symbol] === requestId) {
+          setInlineError((prev) => ({ ...prev, [symbol]: (err as Error).message }));
+        }
+      })
+      .finally(() => {
+        if (mounted.current && requestIds.current[symbol] === requestId) {
+          setInlineLoading((prev) => ({ ...prev, [symbol]: false }));
+        }
+      });
+  };
 
   const toggleExpand = (symbol: string) => {
     if (expandedSymbol === symbol) {
@@ -34,12 +67,7 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
     }
     setExpandedSymbol(symbol);
     if (!inlineChart[symbol]) {
-      setInlineLoading((prev) => ({ ...prev, [symbol]: true }));
-      setInlineError((prev) => ({ ...prev, [symbol]: null }));
-      fetchChart(symbol, 'Min60')
-        .then((data) => setInlineChart((prev) => ({ ...prev, [symbol]: data })))
-        .catch((err) => setInlineError((prev) => ({ ...prev, [symbol]: (err as Error).message })))
-        .finally(() => setInlineLoading((prev) => ({ ...prev, [symbol]: false })));
+      loadInlineChart(symbol);
     }
   };
 
@@ -231,14 +259,7 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
                     <button
                       type="button"
                       className={styles.miniBtn}
-                      onClick={() => {
-                        setInlineLoading((prev) => ({ ...prev, [s.symbol]: true }));
-                        setInlineError((prev) => ({ ...prev, [s.symbol]: null }));
-                        fetchChart(s.symbol, 'Min60')
-                          .then((data) => setInlineChart((prev) => ({ ...prev, [s.symbol]: data })))
-                          .catch((e) => setInlineError((prev) => ({ ...prev, [s.symbol]: (e as Error).message })))
-                          .finally(() => setInlineLoading((prev) => ({ ...prev, [s.symbol]: false })));
-                      }}
+                      onClick={() => loadInlineChart(s.symbol)}
                     >
                       🔄 Opnieuw
                     </button>

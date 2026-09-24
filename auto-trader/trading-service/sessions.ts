@@ -106,10 +106,45 @@ export function getMarketSession(date: Date = new Date()): SessionInfo {
  *
  * @param candles recent candle history (must contain today's 00:00 - 08:00 UTC candles).
  * @param now current timestamp (defaults to Date.now()).
+ * @param candleDurationSec candle interval in seconds. When omitted, the last
+ *   observed candle is excluded because Candle has no explicit close status.
  * @returns Asian range levels and sweep detection, or null if insufficient Asian session data.
  */
-export function computeAsianRange(candles: Candle[], now: Date = new Date()): AsianRange | null {
-  if (!candles || candles.length < 4) return null;
+export function computeAsianRange(
+  candles: Candle[],
+  now: Date = new Date(),
+  candleDurationSec?: number
+): AsianRange | null {
+  if (
+    !candles ||
+    candles.length < 4 ||
+    !Number.isFinite(now.getTime()) ||
+    (candleDurationSec !== undefined &&
+      (!Number.isFinite(candleDurationSec) || candleDurationSec <= 0))
+  ) {
+    return null;
+  }
+
+  const nowSec = Math.floor(now.getTime() / 1000);
+  const timestamped = candles
+    .filter((c) => Number.isFinite(c.time) && c.time <= nowSec)
+    .slice()
+    .sort((a, b) => a.time - b.time);
+  if (
+    timestamped.length < 4 ||
+    timestamped.some((c, index) => index > 0 && timestamped[index - 1].time === c.time)
+  ) {
+    return null;
+  }
+  const observed =
+    candleDurationSec === undefined
+      ? timestamped.slice(0, -1)
+      : timestamped.filter((c) => c.time + candleDurationSec <= nowSec);
+  if (observed.length < 4) return null;
+  if (candleDurationSec !== undefined) {
+    const newestClosed = observed[observed.length - 1];
+    if (nowSec - (newestClosed.time + candleDurationSec) > candleDurationSec) return null;
+  }
 
   // Find start of today's UTC day in seconds
   const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -117,19 +152,19 @@ export function computeAsianRange(candles: Candle[], now: Date = new Date()): As
   const asiaEndSec = todayStartSec + 8 * 3600; // 08:00:00 UTC
 
   // Extract candles falling within 00:00 - 08:00 UTC
-  const asiaCandles = candles.filter((c) => c.time >= todayStartSec && c.time < asiaEndSec);
+  const asiaCandles = observed.filter((c) => c.time >= todayStartSec && c.time < asiaEndSec);
 
   // If we are still in Asia and have at least 4 candles, or if Asia has concluded:
   if (asiaCandles.length < 4) {
     // If today's Asia hasn't formed enough bars yet, check yesterday's Asia as the previous benchmark
     const yesterdayStartSec = todayStartSec - 86400;
     const yesterdayAsiaEndSec = yesterdayStartSec + 8 * 3600;
-    const prevAsia = candles.filter((c) => c.time >= yesterdayStartSec && c.time < yesterdayAsiaEndSec);
+    const prevAsia = observed.filter((c) => c.time >= yesterdayStartSec && c.time < yesterdayAsiaEndSec);
     if (prevAsia.length < 4) return null;
-    return evaluateRangeAndSweeps(prevAsia, candles, yesterdayAsiaEndSec);
+    return evaluateRangeAndSweeps(prevAsia, observed, yesterdayAsiaEndSec);
   }
 
-  return evaluateRangeAndSweeps(asiaCandles, candles, asiaEndSec);
+  return evaluateRangeAndSweeps(asiaCandles, observed, asiaEndSec);
 }
 
 function evaluateRangeAndSweeps(
@@ -149,12 +184,15 @@ function evaluateRangeAndSweeps(
   // Inspect recent post-Asia candles (last 8 bars) for sweep-and-reclaim
   const recentPostAsia = postAsia.slice(-8);
   for (const c of recentPostAsia) {
-    // High sweep: pierced above Asian High, but closed back below it (reclaim)
-    if (c.high > high && c.close < high) {
+    const sweptHigh = c.high > high && c.close < high;
+    const sweptLow = c.low < low && c.close > low;
+    // A single candle can sweep both edges and close inside the range. Its
+    // direction is ambiguous, so do not let the check order pick a side.
+    if (sweptHigh && sweptLow) {
+      swept = null;
+    } else if (sweptHigh) {
       swept = 'HIGH';
-    }
-    // Low sweep: pierced below Asian Low, but closed back above it (reclaim)
-    if (c.low < low && c.close > low) {
+    } else if (sweptLow) {
       swept = 'LOW';
     }
   }

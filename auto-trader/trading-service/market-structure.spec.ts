@@ -139,6 +139,43 @@ describe('market-structure: detectMarketStructureBreaks', () => {
     expect(lastBreak!.type).toBe('CHoCH');
     expect(trend).toBe('BEARISH');
   });
+
+  it('requires a close crossing and reports a break only once', () => {
+    const pivots = [
+      { type: 'HH' as const, price: 120, index: 1, time: 2000 },
+      { type: 'HL' as const, price: 110, index: 1, time: 2000 },
+    ];
+    const candles: Candle[] = [
+      makeCandle(110, 115, 109, 112, 1000),
+      makeCandle(112, 119, 108, 111, 2000), // Wick/open cross below 110; close holds above.
+      makeCandle(111, 114, 107, 109, 3000), // Close crosses below 110.
+      makeCandle(109, 112, 106, 108, 4000), // Remains below; not a second event.
+    ];
+
+    const { lastBreak } = detectMarketStructureBreaks(candles, pivots);
+    expect(lastBreak?.direction).toBe('BEARISH');
+    expect(lastBreak?.candleIndex).toBe(2);
+    expect(lastBreak?.time).toBe(3000);
+  });
+
+  it('confirms a bullish CHoCH only when the candle closes above the pivot', () => {
+    const pivots = [
+      { type: 'LH' as const, price: 100, index: 1, time: 2000 },
+      { type: 'LL' as const, price: 90, index: 1, time: 2000 },
+    ];
+    const candles: Candle[] = [
+      makeCandle(94, 98, 92, 95, 1000),
+      makeCandle(95, 99, 91, 98, 2000),
+      makeCandle(99, 101, 97, 100, 3000), // High crosses, close only touches pivot.
+      makeCandle(99, 103, 98, 102, 4000), // Close crosses above pivot.
+    ];
+
+    const { trend, lastBreak } = detectMarketStructureBreaks(candles, pivots);
+    expect(lastBreak?.direction).toBe('BULLISH');
+    expect(lastBreak?.type).toBe('CHoCH');
+    expect(lastBreak?.candleIndex).toBe(3);
+    expect(trend).toBe('BULLISH');
+  });
 });
 
 describe('market-structure: planImbalanceScalp', () => {
@@ -172,6 +209,69 @@ describe('market-structure: planImbalanceScalp', () => {
     expect(scalp!.stopLoss).toBeGreaterThan(131);
     expect(scalp!.rrEstimate).toBeGreaterThanOrEqual(1.8);
   });
+
+  it('prefers the 0.618 fib target over the 0.5 fallback when both are valid', () => {
+    const candles = [
+      makeCandle(100, 102, 99, 101, 1000),
+      makeCandle(101, 104, 100, 103, 2000),
+      makeCandle(103, 108, 102, 106, 3000),
+      makeCandle(106, 115, 105, 113, 4000),
+      makeCandle(113, 125, 112, 120, 5000),
+    ];
+    const fib = {
+      swingHigh: 130,
+      swingLow: 90,
+      direction: 'UP' as const,
+      retracements: [
+        { ratio: 0.5, price: 110 },
+        { ratio: 0.618, price: 105 },
+      ],
+      extensions: [],
+      nearest: { ratio: 0.5, price: 110 },
+      distanceToNearest: 0,
+    };
+    const scalp = planImbalanceScalp(candles, 120, fib, [], {
+      type: 'BSL',
+      level: 124,
+      time: 5000,
+    });
+
+    expect(scalp?.side).toBe('SHORT');
+    expect(scalp?.targetPrice).toBe(105);
+    expect(scalp?.targetReason).toContain('61.8%');
+  });
+
+  it('plans a LONG SSL scalp and prefers the 0.618 target over the 0.5 fallback', () => {
+    const candles = [
+      makeCandle(100, 102, 99, 101, 1000),
+      makeCandle(101, 103, 98, 100, 2000),
+      makeCandle(100, 102, 97, 99, 3000),
+      makeCandle(99, 101, 96, 98, 4000),
+      makeCandle(98, 103, 95, 100, 5000),
+    ];
+    const fib = {
+      swingHigh: 130,
+      swingLow: 90,
+      direction: 'DOWN' as const,
+      retracements: [
+        { ratio: 0.5, price: 110 },
+        { ratio: 0.618, price: 115 },
+      ],
+      extensions: [],
+      nearest: { ratio: 0.5, price: 110 },
+      distanceToNearest: 0,
+    };
+    const scalp = planImbalanceScalp(candles, 100, fib, [], {
+      type: 'SSL',
+      level: 96,
+      time: 5000,
+    });
+
+    expect(scalp?.side).toBe('LONG');
+    expect(scalp?.targetPrice).toBe(115);
+    expect(scalp?.targetReason).toContain('61.8%');
+    expect(scalp?.rrEstimate).toBeGreaterThanOrEqual(1.8);
+  });
 });
 
 describe('market-structure: computeVolumeProfile', () => {
@@ -204,6 +304,33 @@ describe('market-structure: computeVolumeProfile', () => {
       { open: 100, high: 105, low: 95, close: 102, volume: 1000, time: 1000 },
     ];
     expect(computeVolumeProfile(candles)).toBeNull();
+  });
+
+  it('throws for invalid volume profile window and bin counts', () => {
+    const candles = Array.from({ length: 10 }, (_, i) => makeCandle(10, 12, 9, 11, i));
+    for (const lookback of [0, -1, 1.5, NaN, Infinity]) {
+      expect(() => computeVolumeProfile(candles, lookback, 20)).toThrow(RangeError);
+    }
+    for (const bins of [0, -1, 1.5, NaN, Infinity]) {
+      expect(() => computeVolumeProfile(candles, 10, bins)).toThrow(RangeError);
+    }
+  });
+
+  it('preserves price precision for instruments below six decimal places', () => {
+    const candles = Array.from({ length: 10 }, (_, i) => ({
+      open: 0.000000015,
+      high: 0.00000002 + i * 0.00000000001,
+      low: 0.00000001,
+      close: 0.000000015,
+      volume: 100,
+      time: 1000 + i,
+    }));
+    const profile = computeVolumeProfile(candles, 10, 20);
+
+    expect(profile).not.toBeNull();
+    expect(profile!.poc).toBeGreaterThan(0);
+    expect(profile!.val).toBeGreaterThan(0);
+    expect(profile!.vah).toBeGreaterThan(0);
   });
 });
 
@@ -247,6 +374,34 @@ describe('market-structure: detectSmtDivergence', () => {
     expect(smt).not.toBeNull();
     expect(smt!.type).toBe('BULLISH');
     expect(smt!.benchmarkSymbol).toBe('BTC_USDT');
+
+    expect(detectSmtDivergence(assetCandles, benchmarkCandles.slice(0, -1), 50, 'BTC_USDT')?.type).toBe(
+      'BULLISH'
+    );
+    expect(detectSmtDivergence(assetCandles, benchmarkCandles.slice(0, -2), 50, 'BTC_USDT')).toBeNull();
+
+    const shiftedBenchmark = benchmarkCandles.map((c) => ({ ...c, time: c.time + 1 }));
+    expect(detectSmtDivergence(assetCandles, shiftedBenchmark, 50, 'BTC_USDT')).toBeNull();
+
+    const gappedAsset = assetCandles.map((c, i) =>
+      i === assetCandles.length - 1 ? { ...c, time: c.time + 100_000 } : c
+    );
+    const gappedBenchmark = benchmarkCandles.map((c, i) =>
+      i === benchmarkCandles.length - 1 ? { ...c, time: c.time + 100_000 } : c
+    );
+    expect(detectSmtDivergence(gappedAsset, gappedBenchmark, 50, 'BTC_USDT')).toBeNull();
+
+    const stalePadding = Array.from({ length: 25 }, (_, i) =>
+      makeCandle(130 + i, 132 + i, 129 + i, 131 + i, 40_000 + i * 1000)
+    );
+    expect(
+      detectSmtDivergence(
+        [...assetCandles, ...stalePadding],
+        [...benchmarkCandles, ...stalePadding],
+        50,
+        'BTC_USDT'
+      )
+    ).toBeNull();
   });
 
   it('detects Bearish SMT when Benchmark makes Higher High and Asset makes Lower High', () => {
@@ -285,6 +440,17 @@ describe('market-structure: detectSmtDivergence', () => {
     const smt = detectSmtDivergence(assetCandles, benchmarkCandles, 50, 'BTC_USDT');
     expect(smt).not.toBeNull();
     expect(smt!.type).toBe('BEARISH');
+  });
+
+  it('rejects conflicting bullish-low and bearish-high divergences', () => {
+    const benchmark = Array.from({ length: 21 }, (_, i) =>
+      makeCandle(75, i === 7 ? 110 : i === 13 ? 120 : 100, i === 4 ? 40 : i === 10 ? 30 : 50, 75, i * 900)
+    );
+    const asset = Array.from({ length: 21 }, (_, i) =>
+      makeCandle(75, i === 7 ? 110 : i === 13 ? 105 : 100, i === 4 ? 40 : i === 10 ? 45 : 50, 75, i * 900)
+    );
+
+    expect(detectSmtDivergence(asset, benchmark, 50, 'BTC_USDT')).toBeNull();
   });
 });
 

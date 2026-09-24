@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import styles from './signal-chart.module.css';
 import { fetchChart } from './api.js';
 import { pct, price as fmtPrice, shortDate } from './format.js';
@@ -32,6 +32,58 @@ export type SignalChartProps = {
 const W = 760;
 const H = 430;
 const PAD = { top: 25, right: 125, bottom: 25, left: 60 };
+const ROUTE_WIDTH = 120;
+const BADGE_GAP = 20;
+
+type RightBadge = {
+  id: string;
+  rawY: number;
+  y: number;
+  kind: 'tp' | 'sl' | 'entry' | 'price' | 'overflow';
+  label: string;
+  price: number;
+  pct?: number;
+  hit?: boolean;
+};
+
+/** Lay out 18px badges with 2px clearance and a visible overflow count. */
+export function layoutRightBadges(badges: RightBadge[]): RightBadge[] {
+  const minY = PAD.top + 10;
+  const maxY = H - PAD.bottom - 10;
+  const capacity = Math.floor((maxY - minY) / BADGE_GAP) + 1;
+  let visible = badges;
+
+  if (badges.length > capacity) {
+    const priority = (badge: RightBadge) =>
+      badge.kind === 'sl' ? 0 : badge.kind === 'entry' ? 1 : badge.kind === 'price' ? 2 : 3;
+    const ranked = [...badges].sort(
+      (a, b) => priority(a) - priority(b) || Number(a.label.replace('TP', '')) - Number(b.label.replace('TP', ''))
+    );
+    const shown = ranked.slice(0, capacity - 1);
+    const omitted = ranked.slice(capacity - 1);
+    visible = [
+      ...shown,
+      {
+        id: 'overflow',
+        rawY: omitted.reduce((sum, badge) => sum + badge.rawY, 0) / omitted.length,
+        y: 0,
+        kind: 'overflow',
+        label: `+${omitted.length} levels`,
+        price: 0,
+      },
+    ];
+  }
+
+  const laidOut = [...visible]
+    .sort((a, b) => a.rawY - b.rawY)
+    .map((badge) => ({ ...badge, y: Math.max(minY, badge.rawY) }));
+  for (let i = 1; i < laidOut.length; i++) {
+    laidOut[i].y = Math.max(laidOut[i].y, laidOut[i - 1].y + BADGE_GAP);
+  }
+  const overflow = Math.max(0, laidOut[laidOut.length - 1]?.y - maxY);
+  if (overflow) laidOut.forEach((badge) => (badge.y -= overflow));
+  return laidOut;
+}
 
 /**
  * Build a plain-language explanation of what the engine is waiting for on
@@ -74,23 +126,38 @@ export function SignalChart({
   const [interval, setIntervalState] = useState<TimeframeKey>(initialInterval);
   const [loadedData, setLoadedData] = useState<ChartData | null>(null);
   const [loadingTf, setLoadingTf] = useState(false);
+  const mounted = useRef(false);
+  const chartRequestId = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      chartRequestId.current++;
+    };
+  }, []);
 
   // Sync state when symbol or initialInterval changes
   useEffect(() => {
+    chartRequestId.current++;
     setLoadedData(null);
     setIntervalState(initialInterval);
+    setLoadingTf(false);
   }, [symbol, initialInterval]);
 
   const handleTimeframeChange = (tf: TimeframeKey) => {
     if (tf === interval) return;
+    const requestId = ++chartRequestId.current;
     setIntervalState(tf);
     setLoadingTf(true);
     fetchChart(symbol, tf)
       .then((data) => {
+        if (!mounted.current || requestId !== chartRequestId.current) return;
         setLoadedData(data);
         setLoadingTf(false);
       })
       .catch((err) => {
+        if (!mounted.current || requestId !== chartRequestId.current) return;
         console.warn('Failed to switch timeframe:', err);
         setLoadingTf(false);
       });
@@ -144,8 +211,10 @@ export function SignalChart({
 
     // Determine Take Profit targets
     let tps: Array<{ price: number; portion?: number; rMultiple?: number; hit?: boolean; label: string }> = [];
-    if (effectivePosition?.takeProfits?.length) {
-      tps = effectivePosition.takeProfits
+    const positionTakeProfits =
+      effectivePosition && 'takeProfits' in effectivePosition ? effectivePosition.takeProfits : undefined;
+    if (positionTakeProfits?.length) {
+      tps = positionTakeProfits
         .filter((t) => Number.isFinite(t.price) && t.price > 0)
         .map((t, idx) => ({
           price: t.price,
@@ -204,7 +273,9 @@ export function SignalChart({
 
     const innerW = W - PAD.left - PAD.right;
     const innerH = H - PAD.top - PAD.bottom;
-    const slot = innerW / recent.length;
+    const routeWidth = showRoute && tps.length ? Math.min(ROUTE_WIDTH, innerW * 0.3) : 0;
+    const candleW = innerW - routeWidth;
+    const slot = candleW / recent.length;
     const bodyW = Math.max(3, Math.min(16, slot * 0.72));
     const x = (i: number) => PAD.left + i * slot + slot / 2;
     const y = (v: number) => {
@@ -319,17 +390,6 @@ export function SignalChart({
     const entryLine = effectivePosition && entryY !== undefined ? { price: entryPrice, y: entryY } : undefined;
     const lastCloseY = lastClose !== undefined && inRange(y(lastClose)) ? y(lastClose) : undefined;
 
-    type RightBadge = {
-      id: string;
-      rawY: number;
-      y: number;
-      kind: 'tp' | 'sl' | 'entry' | 'price';
-      label: string;
-      price: number;
-      pct?: number;
-      hit?: boolean;
-    };
-
     const rightBadges: RightBadge[] = [];
     tpLines.forEach((tp) => {
       if (inRange(tp.y)) {
@@ -380,21 +440,7 @@ export function SignalChart({
       });
     }
 
-    rightBadges.sort((a, b) => a.rawY - b.rawY);
-
-    for (let i = 1; i < rightBadges.length; i++) {
-      if (rightBadges[i].y < rightBadges[i - 1].y + 19) {
-        rightBadges[i].y = rightBadges[i - 1].y + 19;
-      }
-    }
-    for (let i = rightBadges.length - 1; i >= 1; i--) {
-      if (rightBadges[i].y > H - PAD.bottom) {
-        rightBadges[i].y = H - PAD.bottom;
-        if (rightBadges[i - 1].y > rightBadges[i].y - 19) {
-          rightBadges[i - 1].y = rightBadges[i].y - 19;
-        }
-      }
-    }
+    const laidOutRightBadges = layoutRightBadges(rightBadges);
 
     // Generate expected price trajectory curve
     let trajectoryPath = '';
@@ -455,6 +501,7 @@ export function SignalChart({
 
     return {
       candlesXY,
+      lastCandleX: candlesXY[candlesXY.length - 1]?.x ?? W - PAD.right,
       bodyW,
       ticks,
       firstLabel,
@@ -477,7 +524,7 @@ export function SignalChart({
       pocY,
       entryLine,
       lastCloseY,
-      rightBadges,
+      rightBadges: laidOutRightBadges,
       hasActivePosition: Boolean(effectivePosition),
       fibAnchorLines,
       fibDirection: effectiveSignal?.fib?.direction,
@@ -490,7 +537,7 @@ export function SignalChart({
       trajectoryPath,
       trajectoryPoints,
     };
-  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade, candleCount]);
+  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade, candleCount, showRoute]);
 
   const notes = waitingOn(effectiveSignal);
 
@@ -501,8 +548,8 @@ export function SignalChart({
   const isLong = chart.side === 'LONG';
 
   // Left-side label collision resolution: structure lines vs fib anchors
-  const topAnchor = chart.fibAnchorLines.find((a) => a.ratio === 0 || a.label.includes('Top'));
-  const botAnchor = chart.fibAnchorLines.find((a) => a.ratio === 1 || a.label.includes('Bodem'));
+  const topAnchor = chart.fibAnchorLines.find((a) => a.label.includes('Top'));
+  const botAnchor = chart.fibAnchorLines.find((a) => a.label.includes('Bodem'));
 
   let swingHighLabelY = chart.swingHighY !== undefined ? chart.swingHighY - 4 : undefined;
   let fibTopLabelY = topAnchor ? topAnchor.y - 4 : undefined;
@@ -793,7 +840,7 @@ export function SignalChart({
         {/* Fibonacci Anchor Lines (0.000 Top & 1.000 Bodem) */}
         {showFib &&
           chart.fibAnchorLines.map((a) => {
-            const isTop = a.ratio === 0 || a.label.includes('Top');
+            const isTop = a.label.includes('Top');
             const labelY = isTop ? (fibTopLabelY ?? a.y - 3) : (fibBotLabelY ?? a.y - 3);
             return (
               <g key={a.label}>
@@ -1003,6 +1050,8 @@ export function SignalChart({
                     cx={pt.x}
                     cy={pt.y}
                     r={4}
+                    data-testid="trajectory-point"
+                    data-x={pt.x}
                     className={`${styles.trajectoryDot} ${isLong ? styles.trajectoryDotLong : styles.trajectoryDotShort}`}
                   />
                   <rect
@@ -1030,12 +1079,15 @@ export function SignalChart({
 
         {/* Right-Side Badges (Zero Collision) */}
         {chart.rightBadges
-          .filter((b) => (b.kind === 'tp' || b.kind === 'sl' ? showTargets : true))
+          .filter((b) => (b.kind === 'tp' || b.kind === 'sl' || b.kind === 'overflow' ? showTargets : true))
           .map((b) => {
             const isEntry = b.kind === 'entry';
             const isPrice = b.kind === 'price';
             const isSl = b.kind === 'sl';
-            const badgeBg = isEntry
+            const isOverflow = b.kind === 'overflow';
+            const badgeBg = isOverflow
+              ? styles.overflowBadgeBg
+              : isEntry
               ? styles.entryBadgeBg
               : isPrice
               ? styles.priceBadgeBg
@@ -1044,7 +1096,9 @@ export function SignalChart({
               : b.hit
               ? styles.tpBadgeBgHit
               : styles.tpBadgeBg;
-            const badgeText = isEntry
+            const badgeText = isOverflow
+              ? styles.overflowBadgeText
+              : isEntry
               ? styles.entryBadgeText
               : isPrice
               ? styles.priceBadgeText
@@ -1057,16 +1111,18 @@ export function SignalChart({
               ? `NU: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`
               : isSl
               ? `SL: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`
-              : `${b.label}: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`;
+              : isOverflow
+                ? b.label
+                : `${b.label}: ${fmtPrice(b.price)}${b.pct !== undefined ? ` (${b.pct >= 0 ? '+' : ''}${b.pct.toFixed(1)}%)` : ''}`;
             return (
-              <g key={b.id}>
+              <g key={b.id} data-testid="right-badge" data-kind={b.kind} data-center-y={b.y}>
                 {Math.abs(b.y - b.rawY) > 2 && (
                   <line
                     x1={W - PAD.right}
                     y1={b.rawY}
                     x2={W - PAD.right + 4}
                     y2={b.y}
-                    stroke={isEntry ? '#38bdf8' : isPrice ? '#fbbf24' : isSl ? '#ef4444' : '#22c55e'}
+                    stroke={isOverflow ? '#a1a1aa' : isEntry ? '#38bdf8' : isPrice ? '#fbbf24' : isSl ? '#ef4444' : '#22c55e'}
                     strokeWidth={1}
                     opacity={0.6}
                   />
@@ -1089,7 +1145,7 @@ export function SignalChart({
         <text x={PAD.left} y={H - 6} className={styles.axisLabel}>
           {chart.firstLabel}
         </text>
-        <text x={W - PAD.right} y={H - 6} textAnchor="end" className={styles.axisLabel}>
+        <text x={chart.lastCandleX} y={H - 6} textAnchor="end" className={styles.axisLabel}>
           {chart.lastLabel}
         </text>
       </svg>
@@ -1161,7 +1217,7 @@ export function SignalChart({
                 : '5x';
 
             if (effectivePosition) {
-              const pnlVal = effectivePosition.unrealisedPnl;
+              const pnlVal = 'unrealisedPnl' in effectivePosition ? effectivePosition.unrealisedPnl : undefined;
               const pnlStr =
                 pnlVal !== undefined
                   ? ` (Ongerealiseerde winst/verlies: ${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)})`

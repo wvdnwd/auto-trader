@@ -24,37 +24,60 @@ export function BacktestPage() {
   });
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mounted = useRef(false);
+  const generation = useRef(0);
+  const requestId = useRef(0);
 
   const busy = status.state === 'loading' || status.state === 'running';
 
-  const poll = useCallback(async () => {
+  const poll = useCallback(async (runId = generation.current) => {
+    const currentRequest = ++requestId.current;
     try {
       const next = await fetchBacktest();
+      if (!mounted.current || runId !== generation.current || currentRequest !== requestId.current) return;
       setStatus(next);
       if (next.state === 'loading' || next.state === 'running') {
-        timer.current = setTimeout(() => void poll(), POLL_MS);
+        timer.current = setTimeout(() => void poll(runId), POLL_MS);
       }
     } catch (err) {
-      setError((err as Error).message);
+      if (!mounted.current || runId !== generation.current || currentRequest !== requestId.current) return;
+      const message = (err as Error).message;
+      setError(message);
+      setStatus({ state: 'error', message, progress: 0, result: null });
     }
   }, []);
 
   // Pick up a run that was already going when the page mounted.
   useEffect(() => {
-    void poll();
+    mounted.current = true;
+    void poll(generation.current);
     return () => {
+      mounted.current = false;
+      generation.current++;
+      requestId.current++;
       if (timer.current) clearTimeout(timer.current);
     };
   }, [poll]);
 
   const run = useCallback(
     async (config: Partial<BacktestConfig>) => {
+      const runId = ++generation.current;
+      requestId.current++;
+      if (timer.current) clearTimeout(timer.current);
       setError(null);
+      setStatus({ state: 'loading', message: 'Backtest starten…', progress: 0, result: null });
       try {
-        setStatus(await startBacktest(config));
-        timer.current = setTimeout(() => void poll(), POLL_MS);
+        const initial = await startBacktest(config);
+        if (!mounted.current || runId !== generation.current) return;
+        setStatus(initial);
+        if (initial.state === 'loading' || initial.state === 'running') {
+          timer.current = setTimeout(() => void poll(runId), POLL_MS);
+        }
       } catch (err) {
-        setError((err as Error).message);
+        if (!mounted.current || runId !== generation.current) return;
+        const message = (err as Error).message;
+        setError(message);
+        setStatus({ state: 'error', message, progress: 0, result: null });
       }
     },
     [poll]

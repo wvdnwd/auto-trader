@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import styles from './trader-app.module.css';
 import { useLanguage } from './i18n.js';
 import type { TranslationKey } from './i18n.js';
@@ -235,6 +235,23 @@ const FIELD_DEFS: Record<string, FieldDef> = {
 
 const SLIDERS = Object.values(SLIDER_DEFS);
 const FIELDS = Object.values(FIELD_DEFS);
+const SWITCH_RISK_KEYS: Record<string, keyof RiskConfig> = {
+  pauseNewEntries: 'pauseNewEntries',
+  ltfSniper5m: 'ltfSniper5mEnabled',
+  reversal15m: 'reversal15mRequired',
+  pullbackFilter: 'pullbackFilterEnabled',
+  imbalanceScalp: 'imbalanceScalpEnabled',
+  premiumDiscountFilter: 'premiumDiscountFilterEnabled',
+  breakoutBypass: 'breakoutBypassEnabled',
+  mssProtection: 'mssProtectionEnabled',
+  smtFilter: 'smtFilterEnabled',
+  volumeProfile: 'volumeProfileEnabled',
+  btcChopFilter: 'btcChopFilterEnabled',
+  rsFilter: 'rsFilterEnabled',
+  turboMode: 'turboMode',
+  dynamicRunners: 'dynamicRunnersEnabled',
+  trendFlipProtection: 'trendFlipProtection',
+};
 
 /**
  * Editable risk settings — the guardrails the engine sizes every trade against.
@@ -261,7 +278,19 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
   const [saving, setSaving] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [openHelp, setOpenHelp] = useState<string | null>(null);
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof RiskConfig>>(() => new Set());
+  const successTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => () => clearTimeout(successTimer.current), []);
+
+  const markDirty = (key: keyof RiskConfig) => {
+    setDirtyFields((current) => new Set(current).add(key));
+    setIsDirty(true);
+    setSaveError(null);
+    setSavedSuccess(false);
+  };
 
   useEffect(() => {
     // Prevent background snapshot polling from overwriting user's active changes
@@ -298,35 +327,47 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
     setSaving(true);
     const patch: Partial<RiskConfig> = {};
     for (const f of FIELDS) {
+      if (!dirtyFields.has(f.key)) continue;
       const value = draft[f.key];
       if (!Number.isFinite(value)) continue;
       (patch as Record<string, number>)[f.key] = f.percent ? value / 100 : value;
     }
     for (const s of SLIDERS) {
+      if (!dirtyFields.has(s.key)) continue;
       const value = draft[s.key];
       if (!Number.isFinite(value)) continue;
       (patch as Record<string, number>)[s.key] = s.percent ? value / 100 : value;
     }
-    (patch as Record<string, boolean>).turboMode = turbo;
-    (patch as Record<string, boolean>).trendFlipProtection = trendFlipProtection;
-    (patch as Record<string, boolean>).rsFilterEnabled = rsFilter;
-    (patch as Record<string, boolean>).reversal15mRequired = reversal15m;
-    (patch as Record<string, boolean>).pullbackFilterEnabled = pullbackFilter;
-    (patch as Record<string, boolean>).breakoutBypassEnabled = breakoutBypass;
-    (patch as Record<string, boolean>).dynamicRunnersEnabled = dynamicRunners;
-    (patch as Record<string, boolean>).btcChopFilterEnabled = btcChopFilter;
-    (patch as Record<string, boolean>).pauseNewEntries = pauseNewEntries;
-    (patch as Record<string, boolean>).mssProtectionEnabled = mssProtection;
-    (patch as Record<string, boolean>).premiumDiscountFilterEnabled = premiumDiscountFilter;
-    (patch as Record<string, boolean>).imbalanceScalpEnabled = imbalanceScalp;
-    (patch as Record<string, boolean>).ltfSniper5mEnabled = ltfSniper5m;
-    (patch as Record<string, boolean>).smtFilterEnabled = smtFilter;
-    (patch as Record<string, boolean>).volumeProfileEnabled = volumeProfile;
+    const booleans: Partial<Record<keyof RiskConfig, boolean>> = {
+      turboMode: turbo,
+      trendFlipProtection,
+      rsFilterEnabled: rsFilter,
+      reversal15mRequired: reversal15m,
+      pullbackFilterEnabled: pullbackFilter,
+      breakoutBypassEnabled: breakoutBypass,
+      dynamicRunnersEnabled: dynamicRunners,
+      btcChopFilterEnabled: btcChopFilter,
+      pauseNewEntries,
+      mssProtectionEnabled: mssProtection,
+      premiumDiscountFilterEnabled: premiumDiscountFilter,
+      imbalanceScalpEnabled: imbalanceScalp,
+      ltfSniper5mEnabled: ltfSniper5m,
+      smtFilterEnabled: smtFilter,
+      volumeProfileEnabled: volumeProfile,
+    };
+    for (const [key, value] of Object.entries(booleans) as [keyof RiskConfig, boolean][]) {
+      if (dirtyFields.has(key)) (patch as Record<string, boolean>)[key] = value;
+    }
     try {
       await onSave(patch);
       setIsDirty(false);
+      setDirtyFields(new Set());
+      setSaveError(null);
       setSavedSuccess(true);
-      setTimeout(() => setSavedSuccess(false), 3500);
+      clearTimeout(successTimer.current);
+      successTimer.current = setTimeout(() => setSavedSuccess(false), 3500);
+    } catch (err) {
+      setSaveError((err as Error).message || 'Opslaan mislukt');
     } finally {
       setSaving(false);
     }
@@ -358,7 +399,9 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
     setLtfSniper5m(risk.ltfSniper5mEnabled !== false);
     setSmtFilter(risk.smtFilterEnabled !== false);
     setVolumeProfile(risk.volumeProfileEnabled !== false);
+    setDirtyFields(new Set());
     setIsDirty(false);
+    setSaveError(null);
   };
 
   const format = (s: SliderDef, raw: number) => {
@@ -393,7 +436,8 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
             checked={checked}
             onChange={(e) => {
               onChange(e.target.checked);
-              setIsDirty(true);
+              const key = SWITCH_RISK_KEYS[id];
+              if (key) markDirty(key);
             }}
           />
           <label htmlFor={id} className={styles.switchCardText} style={{ cursor: 'pointer', flex: 1 }}>
@@ -472,7 +516,7 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
           value={draft[s.key] ?? s.min}
           onChange={(e) => {
             setDraft((d) => ({ ...d, [s.key]: Number(e.target.value) }));
-            setIsDirty(true);
+            markDirty(s.key);
           }}
         />
         <div className={styles.sliderScale}>
@@ -519,7 +563,7 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
           value={draft[f.key] ?? ''}
           onChange={(e) => {
             setDraft((d) => ({ ...d, [f.key]: Number(e.target.value) }));
-            setIsDirty(true);
+            markDirty(f.key);
           }}
         />
       </div>
@@ -779,6 +823,7 @@ export function RiskPanel({ risk, onSave }: RiskPanelProps) {
             ✓ Instellingen succesvol opgeslagen!
           </span>
         )}
+        {saveError && <span className={styles.down} role="alert">Opslaan mislukt: {saveError}</span>}
       </div>
     </div>
   );

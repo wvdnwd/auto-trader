@@ -3,17 +3,20 @@ import styles from './trader-app.module.css';
 import {
   closeExchangePosition,
   closePosition,
+  reducePosition,
   fetchChart,
   fetchSnapshot,
   placeTestOrder,
   resetAccount,
   runCycle,
   saveExchangeCredentials,
+  setApiToken,
   setEngineRunning,
   setLiveTrading,
   updateRisk,
 } from './api.js';
 import type { TestOrderResult } from './api.js';
+import { ApiError } from './api.js';
 import { BacktestPage } from './backtest-page.js';
 import { HistoryPanel } from './history-panel.js';
 import { useLanguage } from './i18n.js';
@@ -62,6 +65,42 @@ class ChartErrorBoundary extends Component<ChartErrorBoundaryProps, ChartErrorBo
   }
 }
 
+function playDoubleChime() {
+  try {
+    const AudioContextClass =
+      window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+    const now = ctx.currentTime;
+    const osc1 = ctx.createOscillator();
+    const gain1 = ctx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(659.25, now);
+    gain1.gain.setValueAtTime(0.12, now);
+    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    osc1.connect(gain1);
+    gain1.connect(ctx.destination);
+    osc1.start(now);
+    osc1.stop(now + 0.18);
+
+    const osc2 = ctx.createOscillator();
+    const gain2 = ctx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(987.77, now + 0.12);
+    gain2.gain.setValueAtTime(0.14, now + 0.12);
+    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+    osc2.connect(gain2);
+    gain2.connect(ctx.destination);
+    osc2.start(now + 0.12);
+    osc2.stop(now + 0.35);
+  } catch {
+    // Audio unavailable or blocked
+  }
+}
+
 /**
  * The autonomous trading dashboard — account health, open positions, the live
  * scanner ranking, engine log and the risk controls, polled in real time.
@@ -70,6 +109,16 @@ export function Dashboard() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(() => {
+    try {
+      return localStorage.getItem('trader_sound_enabled') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const soundEnabledRef = useRef(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+  const prevSnapRef = useRef<Snapshot | null>(null);
   const [tab, setTab] = useState<'live' | 'history' | 'backtest' | 'walkforward' | 'optimize' | 'options'>('live');
   const [chartSymbol, setChartSymbol] = useState<string | null>(null);
   const [chart, setChart] = useState<ChartData | null>(null);
@@ -87,52 +136,108 @@ export function Dashboard() {
   const [testSlPct, setTestSlPct] = useState(2);
   const [testBusy, setTestBusy] = useState(false);
   const [testResult, setTestResult] = useState<TestOrderResult | null>(null);
+  const [testedSymbol, setTestedSymbol] = useState<string | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+  const [apiTokenInput, setApiTokenInput] = useState('');
+  const [authRequired, setAuthRequired] = useState(false);
   const [showHowTo, setShowHowTo] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const mounted = useRef(true);
+  const loadRequestId = useRef(0);
+  const chartRequestId = useRef(0);
+  const busyOperations = useRef(0);
+  const linkCopiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const { t, lang, setLang } = useLanguage();
 
+  const beginBusy = () => {
+    busyOperations.current++;
+    setBusy(true);
+  };
+
+  const endBusy = () => {
+    busyOperations.current = Math.max(0, busyOperations.current - 1);
+    if (mounted.current) setBusy(busyOperations.current > 0);
+  };
+
   const load = useCallback(async () => {
+    const requestId = ++loadRequestId.current;
     try {
       const next = await fetchSnapshot();
-      // Ignore a late response that arrives after the component unmounted.
-      if (!mounted.current) return;
+      if (!mounted.current || requestId !== loadRequestId.current) return;
+      if (soundEnabledRef.current && prevSnapRef.current) {
+        const prevOpenIds = new Set(prevSnapRef.current.open.map((p) => p.id));
+        const newOpens = next.open.filter((p) => !prevOpenIds.has(p.id));
+        const newClosedWithProfit = next.closed.slice(0, 3).some((c) => {
+          const wasInPrev = prevSnapRef.current!.closed.some((pc) => pc.id === c.id);
+          return !wasInPrev && (c.pnl || 0) > 0;
+        });
+        const hasHighConvictionSignal = (next.signals || []).some(
+          (s) => s.confidence >= 0.88 && !(prevSnapRef.current!.signals || []).some((ps) => ps.symbol === s.symbol && ps.confidence >= 0.88)
+        );
+        if (newOpens.length > 0 || newClosedWithProfit || hasHighConvictionSignal) {
+          playDoubleChime();
+        }
+      }
+      prevSnapRef.current = next;
       setSnap(next);
       setError(null);
+      setAuthRequired(false);
     } catch (err) {
-      if (mounted.current) setError((err as Error).message);
+      if (!mounted.current || requestId !== loadRequestId.current) return;
+      setError((err as Error).message);
+      setAuthRequired(err instanceof ApiError && err.status === 401);
     }
   }, []);
 
   useEffect(() => {
     mounted.current = true;
-    void load();
-    const id = setInterval(() => void load(), POLL_MS);
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await load();
+      if (mounted.current) timer = setTimeout(() => void poll(), POLL_MS);
+    };
+    void poll();
     return () => {
       mounted.current = false;
-      clearInterval(id);
+      loadRequestId.current++;
+      chartRequestId.current++;
+      clearTimeout(timer);
+      clearTimeout(linkCopiedTimer.current);
     };
   }, [load]);
 
-  useEffect(() => {
-    if (!chartSymbol) return;
+  const loadChart = useCallback(async (symbol: string) => {
+    const requestId = ++chartRequestId.current;
     setChart(null);
     setChartError(null);
-    fetchChart(chartSymbol)
-      .then((data) => mounted.current && setChart(data))
-      .catch((err) => mounted.current && setChartError((err as Error).message));
-  }, [chartSymbol]);
+    try {
+      const data = await fetchChart(symbol);
+      if (mounted.current && requestId === chartRequestId.current) setChart(data);
+    } catch (err) {
+      if (mounted.current && requestId === chartRequestId.current) setChartError((err as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (chartSymbol) void loadChart(chartSymbol);
+    else chartRequestId.current++;
+    return () => {
+      chartRequestId.current++;
+    };
+  }, [chartSymbol, loadChart]);
 
   const act = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
+    beginBusy();
     try {
       await fn();
       await load();
     } catch (err) {
-      setError((err as Error).message);
+      if (mounted.current) {
+        setError((err as Error).message);
+        setAuthRequired(err instanceof ApiError && err.status === 401);
+      }
     } finally {
-      setBusy(false);
+      endBusy();
     }
   };
 
@@ -141,6 +246,34 @@ export function Dashboard() {
       <div className={styles.app}>
         <div className={styles.shell}>
           <p className={styles.empty}>{error ? t('connectFailed', { err: error }) : t('connecting')}</p>
+          {authRequired && (
+            <form
+              className={styles.notice}
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!apiTokenInput.trim()) return;
+                if (!setApiToken(apiTokenInput)) {
+                  setError('This browser tab cannot store the API token. Allow session storage and retry.');
+                  return;
+                }
+                setApiTokenInput('');
+                setAuthRequired(false);
+                void load();
+              }}
+            >
+              <label htmlFor="trader-api-token">{t('apiAuthRequired')}</label>
+              <input
+                id="trader-api-token"
+                type="password"
+                autoComplete="current-password"
+                value={apiTokenInput}
+                onChange={(event) => setApiTokenInput(event.target.value)}
+              />
+              <button type="submit" className={`${styles.btn} ${styles.btnPrimary}`} disabled={!apiTokenInput.trim()}>
+                {t('apiTokenSubmit')}
+              </button>
+            </form>
+          )}
         </div>
       </div>
     );
@@ -157,7 +290,8 @@ export function Dashboard() {
   // question of which number is the real one.
   const isLive = snap.exchange.enabled;
   const liveAccount = snap.exchangeAccount;
-  const openCount = isLive && liveAccount && !liveAccount.error ? liveAccount.open.length : snap.open.length;
+  const liveAccountOk = isLive && liveAccount && !liveAccount.error;
+  const openCount = isLive ? (liveAccountOk ? liveAccount.open.length : undefined) : snap.open.length;
   const maxOpen = risk.maxOpenPositions || 10;
 
   return (
@@ -192,10 +326,48 @@ export function Dashboard() {
                 EN
               </button>
             </span>
+            {snap.exchange.enabled && (
+              <span
+                style={{
+                  fontSize: '0.78rem',
+                  fontWeight: 800,
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  background: snap.exchange.venue === 'hyperliquid' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  color: snap.exchange.venue === 'hyperliquid' ? '#38bdf8' : '#ef4444',
+                  border: `1px solid ${snap.exchange.venue === 'hyperliquid' ? '#38bdf8' : '#ef4444'}`,
+                  letterSpacing: '0.05em',
+                  textTransform: 'uppercase',
+                }}
+                title={snap.exchange.venue === 'hyperliquid' ? 'Live gekoppeld met Hyperliquid DEX' : 'Live gekoppeld met MEXC Futures'}
+              >
+                🔴 {snap.exchange.venue?.toUpperCase() || 'MEXC'} LIVE
+              </span>
+            )}
             <span className={styles.status}>
               <span className={`${styles.dot} ${snap.running ? styles.dotLive : ''}`} />
               {snap.running ? (snap.watching ? t('statusLiveWatching') : t('statusLive')) : t('statusPaused')}
             </span>
+            <button
+              type="button"
+              className={styles.btn}
+              onClick={() => {
+                const next = !soundEnabled;
+                setSoundEnabled(next);
+                try {
+                  localStorage.setItem('trader_sound_enabled', String(next));
+                } catch {}
+                if (next) playDoubleChime();
+              }}
+              title={soundEnabled ? 'Geluid uitschakelen' : 'Geluid inschakelen bij signalen en winst'}
+              style={{
+                background: soundEnabled ? 'rgba(16, 185, 129, 0.15)' : undefined,
+                borderColor: soundEnabled ? '#10b981' : undefined,
+                color: soundEnabled ? '#10b981' : undefined,
+              }}
+            >
+              {soundEnabled ? '🔔 Geluid: Aan' : '🔕 Geluid: Uit'}
+            </button>
             <button
               type="button"
               className={`${styles.btn} ${snap.running ? '' : styles.btnPrimary}`}
@@ -225,8 +397,12 @@ export function Dashboard() {
               className={styles.btn}
               onClick={() => {
                 void navigator.clipboard.writeText(window.location.href).then(() => {
+                  if (!mounted.current) return;
                   setLinkCopied(true);
-                  setTimeout(() => setLinkCopied(false), 2000);
+                  clearTimeout(linkCopiedTimer.current);
+                  linkCopiedTimer.current = setTimeout(() => {
+                    if (mounted.current) setLinkCopied(false);
+                  }, 2000);
                 });
               }}
               title={t('shareBody')}
@@ -306,6 +482,34 @@ export function Dashboard() {
             <span>⚠️</span>
             <span>{t('connectionProblem', { err: error })}</span>
           </div>
+        )}
+        {authRequired && (
+          <form
+            className={`${styles.notice} ${styles.blocked}`}
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!apiTokenInput.trim()) return;
+              if (!setApiToken(apiTokenInput)) {
+                setError('This browser tab cannot store the API token. Allow session storage and retry.');
+                return;
+              }
+              setApiTokenInput('');
+              setAuthRequired(false);
+              void load();
+            }}
+          >
+            <label htmlFor="trader-api-token">{t('apiAuthRequired')}</label>
+            <input
+              id="trader-api-token"
+              type="password"
+              autoComplete="current-password"
+              value={apiTokenInput}
+              onChange={(event) => setApiTokenInput(event.target.value)}
+            />
+            <button type="submit" className={`${styles.btn} ${styles.btnPrimary}`} disabled={!apiTokenInput.trim()}>
+              {t('apiTokenSubmit')}
+            </button>
+          </form>
         )}
 
 
@@ -543,6 +747,7 @@ export function Dashboard() {
                       spellCheck={false}
                       placeholder="BTC_USDT"
                       value={testSymbol}
+                      disabled={testBusy}
                       onChange={(e) => setTestSymbol(e.target.value.toUpperCase())}
                     />
                   </div>
@@ -662,13 +867,22 @@ export function Dashboard() {
                         setTestBusy(true);
                         setTestError(null);
                         setTestResult(null);
-                        placeTestOrder(testSymbol.trim(), testSide, testAmount, testLeverage, testKeepOpen, testTpPct, testSlPct)
+                        const symbol = testSymbol.trim().toUpperCase();
+                        setTestedSymbol(symbol);
+                        placeTestOrder(symbol, testSide, testAmount, testLeverage, testKeepOpen, testTpPct, testSlPct)
                           .then((res) => {
+                            if (!mounted.current) return;
                             setTestResult(res);
                             void load();
                           })
-                          .catch((err) => setTestError((err as Error).message))
-                          .finally(() => setTestBusy(false));
+                          .catch((err) => {
+                            if (!mounted.current) return;
+                            setTestedSymbol(null);
+                            setTestError((err as Error).message);
+                          })
+                          .finally(() => {
+                            if (mounted.current) setTestBusy(false);
+                          });
                       }}
                     >
                       {testBusy
@@ -677,21 +891,27 @@ export function Dashboard() {
                           ? '🚀 Plaats testorder & laat open (met TP/SL)'
                           : t('placeTestOrderAndClose')}
                     </button>
-                    {testResult && !testResult.closeOrderId && (
+                    {testResult && !testResult.closeOrderId && testedSymbol && (
                       <button
                         type="button"
                         className={`${styles.btn} ${styles.btnDanger}`}
                         disabled={testBusy}
                         onClick={() => {
-                          if (!window.confirm(`Positie op ${testSymbol} nu sluiten op MEXC?`)) return;
+                          if (!window.confirm(`Positie op ${testedSymbol} nu sluiten op MEXC?`)) return;
                           setTestBusy(true);
-                          closeExchangePosition(testSymbol.trim())
+                          closeExchangePosition(testedSymbol)
                             .then(() => {
+                              if (!mounted.current) return;
                               setTestResult(null);
+                              setTestedSymbol(null);
                               void load();
                             })
-                            .catch((err) => setTestError((err as Error).message))
-                            .finally(() => setTestBusy(false));
+                            .catch((err) => {
+                              if (mounted.current) setTestError((err as Error).message);
+                            })
+                            .finally(() => {
+                              if (mounted.current) setTestBusy(false);
+                            });
                         }}
                       >
                         Sluit open testpositie nu
@@ -793,7 +1013,24 @@ export function Dashboard() {
                 <h2>🛡️ {t('riskManagement')}</h2>
               </div>
               <div className={styles.panelBody}>
-                <RiskPanel risk={risk} onSave={(patch: Partial<RiskConfig>) => act(() => updateRisk(patch))} />
+          <RiskPanel
+            risk={risk}
+            onSave={async (patch: Partial<RiskConfig>) => {
+              beginBusy();
+              try {
+                await updateRisk(patch);
+                await load();
+              } catch (err) {
+                if (mounted.current) {
+                  setError((err as Error).message);
+                  setAuthRequired(err instanceof ApiError && err.status === 401);
+                }
+                throw err;
+              } finally {
+                endBusy();
+              }
+            }}
+          />
               </div>
             </section>
           </div>
@@ -815,10 +1052,10 @@ export function Dashboard() {
           <div className={styles.card}>
             <p className={styles.cardLabel}>{t('equity')}{isLive ? ' (MEXC)' : ''}</p>
             <p className={styles.cardValue}>
-              {isLive && liveAccount && !liveAccount.error ? usd(liveAccount.equity) : usd(account.equity)}
+              {isLive ? (liveAccountOk ? usd(liveAccount.equity) : '—') : usd(account.equity)}
             </p>
-            {isLive && liveAccount && !liveAccount.error ? (
-              <p className={styles.cardSub}>{t('fromMexc')}</p>
+            {isLive ? (
+              <p className={styles.cardSub}>{liveAccountOk ? t('fromMexc') : t('mexcUnavailable')}</p>
             ) : (
               <p className={`${styles.cardSub} ${totalPnl >= 0 ? styles.up : styles.down}`}>
                 {t('sinceStart', { v: signed(totalPnl, (v) => usd(v)) })}
@@ -828,33 +1065,35 @@ export function Dashboard() {
           <div className={styles.card}>
             <p className={styles.cardLabel}>{t('freeBalance')}{isLive ? ' (MEXC)' : ''}</p>
             <p className={styles.cardValue}>
-              {isLive && liveAccount && !liveAccount.error ? usd(liveAccount.available) : usd(account.balance)}
+              {isLive ? (liveAccountOk ? usd(liveAccount.available) : '—') : usd(account.balance)}
             </p>
             <p className={styles.cardSub}>
-              {t('inUse', {
-                v:
-                  isLive && liveAccount && !liveAccount.error ? usd(liveAccount.frozen) : usd(account.usedMargin),
-              })}
+              {isLive
+                ? liveAccountOk
+                  ? t('inUse', { v: usd(liveAccount.frozen) })
+                  : t('mexcUnavailable')
+                : t('inUse', { v: usd(account.usedMargin) })}
             </p>
           </div>
           <div className={styles.card}>
             <p className={styles.cardLabel}>{t('openPnl')}{isLive ? ' (MEXC)' : ''}</p>
             <p
               className={`${styles.cardValue} ${
-                (isLive && liveAccount && !liveAccount.error ? liveAccount.unrealisedPnl : account.unrealisedPnl) >= 0
-                  ? styles.up
-                  : styles.down
+                isLive && !liveAccountOk
+                  ? ''
+                  : (liveAccountOk ? liveAccount.unrealisedPnl : account.unrealisedPnl) >= 0
+                    ? styles.up
+                    : styles.down
               }`}
             >
-              {signed(
-                isLive && liveAccount && !liveAccount.error ? liveAccount.unrealisedPnl : account.unrealisedPnl,
-                (v) => usd(v)
-              )}
+              {isLive
+                ? liveAccountOk
+                  ? signed(liveAccount.unrealisedPnl, (v) => usd(v))
+                  : '—'
+                : signed(account.unrealisedPnl, (v) => usd(v))}
             </p>
             <p className={styles.cardSub}>
-              {t('positionsOpen', {
-                n: `${openCount} / ${maxOpen}`,
-              })}
+              {t('positionsOpen', { n: `${openCount ?? '—'} / ${maxOpen}` })}
             </p>
           </div>
           <div className={styles.card}>
@@ -886,17 +1125,17 @@ export function Dashboard() {
           <div className={styles.column}>
             <section className={styles.panel}>
               <div className={styles.panelHead}>
-                <h2>{t('openPositions')}{isLive ? ' (MEXC)' : ''}</h2>
+                <h2>{t('openPositions')}{isLive ? ` (${snap.exchange.venue?.toUpperCase() || 'MEXC'})` : ''}</h2>
                 <span
-                  className={`${styles.count} ${openCount > maxOpen ? styles.countOverflow : ''}`}
-                  title={`${openCount} open / max ${maxOpen} trades (TP1 bereikt of overflow)`}
+                  className={`${styles.count} ${openCount !== undefined && openCount > maxOpen ? styles.countOverflow : ''}`}
+                  title={openCount === undefined ? t('mexcUnavailable') : `${openCount} open / max ${maxOpen} trades`}
                 >
-                  {openCount} / {maxOpen}
+                  {openCount === undefined ? '—' : `${openCount} / ${maxOpen}`}
                 </span>
               </div>
               <div className={styles.panelBody}>
-                {isLive && liveAccount && !liveAccount.error ? (
-                  liveAccount.open.length ? (
+                {isLive ? (
+                  liveAccountOk ? liveAccount.open.length ? (
                     <div className={styles.rows}>
                       {[...liveAccount.open]
                         .sort((a, b) => {
@@ -920,6 +1159,7 @@ export function Dashboard() {
                               position={p}
                               plan={plan}
                               onClose={plan ? (id) => act(() => closePosition(id)) : undefined}
+                              onReduce={plan ? (id, frac) => act(() => reducePosition(id, frac)) : undefined}
                               onOpenChart={setChartSymbol}
                             />
                           );
@@ -928,6 +1168,7 @@ export function Dashboard() {
                   ) : (
                     <p className={styles.empty}>{t('noOpenPositionsMexc')}</p>
                   )
+                  : <p className={styles.empty}>{t('mexcPositionsUnavailable')}</p>
                 ) : snap.open.length ? (
                   <div className={styles.rows}>
                     {[...snap.open]
@@ -938,6 +1179,7 @@ export function Dashboard() {
                           position={p}
                           mark={marks[p.symbol]}
                           onClose={(id) => act(() => closePosition(id))}
+                          onReduce={(id, frac) => act(() => reducePosition(id, frac))}
                           onOpenChart={setChartSymbol}
                         />
                       ))}
@@ -1008,12 +1250,8 @@ export function Dashboard() {
                 <button
                   type="button"
                   className={`${styles.btn} ${styles.btnPrimary}`}
-                  onClick={() => {
-                    setChartError(null);
-                    setChart(null);
-                    fetchChart(chartSymbol)
-                      .then((data) => mounted.current && setChart(data))
-                      .catch((err) => mounted.current && setChartError((err as Error).message));
+                    onClick={() => {
+                      void loadChart(chartSymbol);
                   }}
                 >
                   🔄 {t('retry')}
@@ -1029,11 +1267,7 @@ export function Dashboard() {
                       type="button"
                       className={`${styles.btn} ${styles.btnPrimary}`}
                       onClick={() => {
-                        setChart(null);
-                        setChartError(null);
-                        fetchChart(chartSymbol)
-                          .then((data) => mounted.current && setChart(data))
-                          .catch((e) => mounted.current && setChartError((e as Error).message));
+                        void loadChart(chartSymbol);
                       }}
                     >
                       🔄 {t('retry')}

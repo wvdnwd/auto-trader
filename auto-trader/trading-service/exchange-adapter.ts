@@ -100,14 +100,49 @@ export type ExchangeAccountAsset = {
   frozen: number;
 };
 
-/** Whether the deployment is allowed to place real orders. */
+/** Credential readiness and the fail-closed live execution state. */
 export type LiveTradingStatus = {
   /** True when both API credentials are present. */
   configured: boolean;
-  /** True when credentials are present AND the explicit go-live flag is set. */
+  /** True when live trading is armed and enabled. */
   enabled: boolean;
   baseUrl: string;
+  executionDisabledReason?: string;
+  venue?: ExchangeVenue;
 };
+
+export const LIVE_EXECUTION_DISABLED_REASON =
+  'Live execution disabled: the adapter exposes order acknowledgements, not confirmed fills; reconcile an execution ledger before re-arming.';
+
+export type ExchangeVenue = 'mexc' | 'hyperliquid';
+
+export interface IExchangeAdapter {
+  readonly venue: ExchangeVenue;
+  isConfigured(): boolean;
+  status(): LiveTradingStatus;
+  getAccountAssets(): Promise<ExchangeAccountAsset[]>;
+  getOpenPositions(): Promise<ExchangePosition[]>;
+  placeMarketOrder(input: PlaceOrderInput): Promise<ExchangeOrderResult>;
+  closePosition(input: ClosePositionInput): Promise<ExchangeOrderResult>;
+  placeStopOrder(input: PlaceStopOrderInput): Promise<ExchangeOrderResult>;
+  placeTakeProfitOrder(input: PlaceStopOrderInput): Promise<ExchangeOrderResult>;
+  cancelOrder(orderId: string): Promise<void>;
+  cancelStopOrder(orderId: string, symbol?: string): Promise<void>;
+  cancelPlanOrders(orders: Array<{ symbol: string; orderId: string }>): Promise<void>;
+  cancelAllPlanOrders(symbol?: string): Promise<void>;
+  setLeverage(symbol: string, leverage: number, side: Side, openType?: OpenType): Promise<void>;
+  getOpenPlanOrders(symbol?: string): Promise<
+    Array<{
+      id: string;
+      symbol: string;
+      side: number;
+      triggerType: number;
+      triggerPrice: number;
+      vol: number;
+      createTime: number;
+    }>
+  >;
+}
 
 const INTENT_SIDE: Record<OrderIntent, 1 | 2 | 3 | 4> = {
   OPEN_LONG: 1,
@@ -176,38 +211,31 @@ export function hasExchangeCredentials(stored?: { apiKey?: string; apiSecret?: s
 }
 
 /**
- * Whether the deployment is armed to send real orders.
- *
- * Credentials alone are not enough — `LIVE_TRADING_ENABLED` must also be set to
- * `true`. This keeps a configured-but-not-yet-approved deployment from placing
- * live orders by accident the moment keys are added, which matters here because
- * paper trading validation is a deliberate, separate go-live gate.
+ * Whether the deployment is armed to send real orders. This remains false
+ * regardless of credentials or legacy environment flags until fills can be
+ * positively reconciled.
  *
  * @param stored credentials read from the database, if any.
- * @returns true when the adapter is allowed to place real orders.
+ * @returns false until confirmed-fill reconciliation is available.
  */
 export function isLiveTradingEnabled(stored?: { apiKey?: string; apiSecret?: string }): boolean {
   return hasExchangeCredentials(stored) && process.env.LIVE_TRADING_ENABLED === 'true';
 }
 
 /**
- * Thin client for MEXC's private futures (contract) API — order placement,
- * protective trigger orders, position and balance reads, and leverage control.
+ * Thin client for MEXC's private futures API — venue reads plus guarded order
+ * methods that remain disabled pending confirmed-fill reconciliation.
  *
- * Wired into the autonomous engine: when {@link status} reports `enabled`, the
- * engine mirrors every paper entry, exit and stop move onto this adapter, so
- * the position on MEXC always matches the position the engine is managing —
- * including a resting, broker-side stop that keeps protecting the position
- * even if this process crashes or loses connectivity. Every method throws if
- * called while {@link isConfigured} is false, so a half-wired call fails
- * loudly instead of silently hitting an unauthenticated endpoint.
+ * Venue reads remain available to show and reconcile existing positions.
+ * Every order, leverage, or cancellation method fails before network I/O until
+ * acknowledgements can be reconciled to confirmed fills.
  *
  * Endpoint shapes follow MEXC's documented v1 contract private API as of this
- * writing. Exchange APIs change; re-verify the request/response shape against
- * MEXC's current docs before trusting `LIVE_TRADING_ENABLED=true` with size
- * beyond a small test amount.
+ * writing. Exchange APIs change; re-verify request/response shapes before
+ * implementing a future confirmed-fill execution ledger.
  */
-export class MexcExchangeAdapter {
+export class MexcExchangeAdapter implements IExchangeAdapter {
+  readonly venue: ExchangeVenue = 'mexc';
   constructor(
     private apiKey = process.env.MEXC_API_KEY || '',
     private apiSecret = process.env.MEXC_API_SECRET || '',
@@ -238,10 +266,13 @@ export class MexcExchangeAdapter {
 
   /** Live-trading readiness for this instance, safe to expose to the dashboard. */
   status(): LiveTradingStatus {
+    const enabled = this.isConfigured() && process.env.LIVE_TRADING_ENABLED === 'true';
     return {
       configured: this.isConfigured(),
-      enabled: this.isConfigured() && process.env.LIVE_TRADING_ENABLED === 'true',
+      enabled,
       baseUrl: this.baseUrl,
+      executionDisabledReason: enabled ? undefined : LIVE_EXECUTION_DISABLED_REASON,
+      venue: this.venue,
     };
   }
 
@@ -252,6 +283,7 @@ export class MexcExchangeAdapter {
    * @returns the venue-assigned order id.
    */
   async placeMarketOrder(input: PlaceOrderInput): Promise<ExchangeOrderResult> {
+    this.assertExecutionEnabled();
     const body: Record<string, unknown> = {
       symbol: input.symbol,
       vol: input.vol,
@@ -285,6 +317,7 @@ export class MexcExchangeAdapter {
    * @returns the venue-assigned order id.
    */
   async closePosition(input: ClosePositionInput): Promise<ExchangeOrderResult> {
+    this.assertExecutionEnabled();
     return this.placeMarketOrder({
       symbol: input.symbol,
       vol: input.vol,
@@ -302,6 +335,7 @@ export class MexcExchangeAdapter {
    * @param orderId the venue order id to cancel.
    */
   async cancelOrder(orderId: string): Promise<void> {
+    this.assertExecutionEnabled();
     await this.post('/order/cancel', [orderId]);
   }
 
@@ -319,6 +353,7 @@ export class MexcExchangeAdapter {
    * @returns the venue-assigned trigger order id.
    */
   async placeStopOrder(input: PlaceStopOrderInput): Promise<ExchangeOrderResult> {
+    this.assertExecutionEnabled();
     const body: Record<string, unknown> = {
       symbol: input.symbol,
       vol: input.vol,
@@ -349,6 +384,7 @@ export class MexcExchangeAdapter {
    * @returns venue-assigned order id.
    */
   async placeTakeProfitOrder(input: PlaceStopOrderInput): Promise<ExchangeOrderResult> {
+    this.assertExecutionEnabled();
     const body: Record<string, unknown> = {
       symbol: input.symbol,
       vol: input.vol,
@@ -379,6 +415,7 @@ export class MexcExchangeAdapter {
    * @param symbol optional symbol; MEXC requires { symbol, orderId } in the array payload.
    */
   async cancelStopOrder(orderId: string, symbol?: string): Promise<void> {
+    this.assertExecutionEnabled();
     try {
       const payload = symbol ? [{ symbol, orderId }] : [{ orderId }];
       await this.post('/planorder/cancel', payload, false);
@@ -393,6 +430,7 @@ export class MexcExchangeAdapter {
    * @param orders array of objects containing symbol and orderId.
    */
   async cancelPlanOrders(orders: Array<{ symbol: string; orderId: string }>): Promise<void> {
+    this.assertExecutionEnabled();
     if (!orders.length) return;
     try {
       const batchSize = 20;
@@ -451,6 +489,7 @@ export class MexcExchangeAdapter {
    * Cancel all open plan/trigger orders, optionally filtered by symbol.
    */
   async cancelAllPlanOrders(symbol?: string): Promise<void> {
+    this.assertExecutionEnabled();
     try {
       await this.post('/planorder/cancel_all', symbol ? { symbol } : {}, false);
     } catch {
@@ -475,6 +514,7 @@ export class MexcExchangeAdapter {
    * @param openType margin mode, defaults to isolated.
    */
   async setLeverage(symbol: string, leverage: number, side: Side, openType: OpenType = 'isolated'): Promise<void> {
+    this.assertExecutionEnabled();
     await this.post(
       '/position/change_leverage',
       {
@@ -536,6 +576,12 @@ export class MexcExchangeAdapter {
       available: a.availableBalance,
       frozen: a.frozenBalance,
     }));
+  }
+
+  private assertExecutionEnabled(): void {
+    if (!this.isConfigured() || process.env.LIVE_TRADING_ENABLED !== 'true') {
+      throw new Error(LIVE_EXECUTION_DISABLED_REASON);
+    }
   }
 
   private async get<T>(path: string, params: Record<string, string | number | undefined>): Promise<T> {

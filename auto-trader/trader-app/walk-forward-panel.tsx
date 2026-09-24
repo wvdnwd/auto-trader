@@ -22,40 +22,57 @@ const TARGET_RATE = 0.8;
 export function WalkForwardPanel() {
   const [status, setStatus] = useState<WalkForwardStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const mounted = useRef(true);
+  const mounted = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const generation = useRef(0);
+  const requestId = useRef(0);
 
-  const poll = useCallback(async () => {
+  const poll = useCallback(async (runId = generation.current) => {
+    const currentRequest = ++requestId.current;
     try {
       const next = await fetchWalkForward();
-      if (!mounted.current) return;
+      if (!mounted.current || runId !== generation.current || currentRequest !== requestId.current) return;
       setStatus(next);
-      return next.state;
+      if (next.state === 'loading' || next.state === 'running') {
+        timer.current = setTimeout(() => void poll(runId), POLL_MS);
+      }
     } catch (err) {
-      if (mounted.current) setError((err as Error).message);
-      return 'error';
+      if (!mounted.current || runId !== generation.current || currentRequest !== requestId.current) return;
+      const message = (err as Error).message;
+      setError(message);
+      setStatus({ state: 'error', message, progress: 0, report: null });
     }
   }, []);
 
   useEffect(() => {
     mounted.current = true;
-    void poll();
+    void poll(generation.current);
     return () => {
       mounted.current = false;
+      generation.current++;
+      requestId.current++;
+      if (timer.current) clearTimeout(timer.current);
     };
   }, [poll]);
 
-  useEffect(() => {
-    if (status?.state !== 'loading' && status?.state !== 'running') return undefined;
-    const id = setInterval(() => void poll(), POLL_MS);
-    return () => clearInterval(id);
-  }, [status?.state, poll]);
-
   const run = async (config: Partial<BacktestConfig>) => {
+    const runId = ++generation.current;
+    requestId.current++;
+    if (timer.current) clearTimeout(timer.current);
     setError(null);
+    setStatus({ state: 'loading', message: 'Walk-forward starten…', progress: 0, report: null });
     try {
-      setStatus(await startWalkForward(config));
+      const initial = await startWalkForward(config);
+      if (!mounted.current || runId !== generation.current) return;
+      setStatus(initial);
+      if (initial.state === 'loading' || initial.state === 'running') {
+        timer.current = setTimeout(() => void poll(runId), POLL_MS);
+      }
     } catch (err) {
-      setError((err as Error).message);
+      if (!mounted.current || runId !== generation.current) return;
+      const message = (err as Error).message;
+      setError(message);
+      setStatus({ state: 'error', message, progress: 0, report: null });
     }
   };
 

@@ -7,6 +7,7 @@ import type {
   TakeProfitLevel,
   TradePlan,
 } from './types.js';
+import { FEE } from './exits.js';
 
 /**
  * Default risk profile.
@@ -151,14 +152,14 @@ export const DEFAULT_RISK: RiskConfig = {
   entryCooldownMinutes: 2,
   // Minimum 24h quote volume (USDT) to trade a coin — protects against illiquid tokens.
   minQuoteVolume24h: 5_000_000,
-  // Healthy buffer beyond entry+fees after TP1 so retests don't prematurely stop out runners.
+  // Lock this many R beyond exact round-trip fees after TP1; exits clamp monotonically.
   breakEvenBufferR: 0.35,
   // Only open trades during permitted market sessions (false = 24/7 trading enabled).
   sessionFilterEnabled: false,
   // Sessions permitted to open trades when sessionFilterEnabled is true.
   allowedSessions: ['ASIA', 'LONDON', 'NEW_YORK'],
-  // Adapt strategy weights according to active market session dynamics.
-  sessionAdaptiveWeights: true,
+  // Deprecated no-op: session score weights remain disabled until calibrated.
+  sessionAdaptiveWeights: false,
   // Exploit Asian range high/low liquidity sweeps during London and New York sessions.
   asianRangeSweepEnabled: true,
   // Smart Pyramiding: allow adding a 2nd tranche to winning, derisked positions on pullback.
@@ -282,26 +283,104 @@ function round(value: number, decimals: number): number {
   return Math.round(value * f) / f;
 }
 
-/**
- * Turn a signal into a fully sized trade plan: stop distance from volatility,
- * risk budget from conviction, leverage from the resulting notional.
- *
- * The core rule is that the STOP defines the risk, not the leverage. We first
- * decide how much equity may be lost, then derive size from the stop distance,
- * and only then compute the leverage that size implies — clamped so that the
- * stop always triggers before liquidation.
- *
- * @param signal the scored opportunity.
- * @param account current account snapshot.
- * @param config active risk configuration.
- * @returns a trade plan, or null when the signal fails a risk gate.
- */
+function floorTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.floor(value * factor) / factor;
+}
+
+type StopGeometry = {
+  stopLoss: number;
+  stopDistancePct: number;
+  stopBasis: string;
+  isImbalanceScalp: boolean;
+  scalpTargetPrice?: number;
+};
+
+function priceDecimalsFor(price: number): number {
+  return Math.min(14, Math.max(8, Math.ceil(-Math.log10(price)) + 4));
+}
+
+/** Resolve and validate the exact rounded protective stop shared by plan and preview. */
+function stopGeometry(signal: Signal, config: RiskConfig): StopGeometry | null {
+  if (
+    (signal.side !== 'LONG' && signal.side !== 'SHORT') ||
+    !Number.isFinite(signal.price) || signal.price <= 0 ||
+    !Number.isFinite(signal.atrPct) || signal.atrPct <= 0 ||
+    !Number.isFinite(config.atrStopMultiple) || config.atrStopMultiple <= 0
+  ) return null;
+
+  const dir = signal.side === 'LONG' ? 1 : -1;
+  const entry = signal.price;
+  const trendMultiple = config.atrStopMultiple;
+  const atrMultiple = signal.regime === 'RANGE' ? trendMultiple * 0.68 : trendMultiple;
+  const volStopPct = signal.atrPct * atrMultiple;
+  if (!Number.isFinite(volStopPct) || volStopPct <= 0) return null;
+
+  let stopDistancePct = volStopPct;
+  let stopBasis = 'volatiliteit';
+  const anchor = signal.side === 'LONG' ? signal.swingLow : signal.swingHigh;
+  const anchorIsProtective = Number.isFinite(anchor) && anchor > 0 && dir * (entry - anchor) > 0;
+  if (anchorIsProtective) {
+    // Wrong-side or invalid swing anchors deliberately fall back to ATR, never abs-distance.
+    const structurePct = (dir * (entry - anchor) / entry) * 1.15;
+    if (structurePct >= volStopPct * 0.5 && structurePct <= volStopPct * 2) {
+      stopDistancePct = structurePct;
+      stopBasis = 'marktstructuur';
+    }
+  }
+
+  const scalp = signal.marketStructure?.imbalanceScalp;
+  const isImbalanceScalp =
+    config.imbalanceScalpEnabled !== false && Boolean(scalp?.eligible) && scalp?.side === signal.side;
+  let scalpTargetPrice: number | undefined;
+  if (isImbalanceScalp) {
+    // An eligible scalp is rejected unless both its stop and target are on the protective/profit side.
+    if (
+      !scalp || !Number.isFinite(scalp.stopLoss) || scalp.stopLoss <= 0 ||
+      dir * (entry - scalp.stopLoss) <= 0 ||
+      !Number.isFinite(scalp.targetPrice) || scalp.targetPrice <= 0 ||
+      dir * (scalp.targetPrice - entry) <= 0
+    ) return null;
+    stopDistancePct = Math.max(0.004, Math.min(0.08, (dir * (entry - scalp.stopLoss)) / entry));
+    stopBasis = 'sweep-wick (SMC scalp)';
+    scalpTargetPrice = round(scalp.targetPrice, priceDecimalsFor(entry));
+    if (!Number.isFinite(scalpTargetPrice) || scalpTargetPrice <= 0 || dir * (scalpTargetPrice - entry) <= 0) {
+      return null;
+    }
+  } else {
+    stopDistancePct = Math.max(0.006, Math.min(0.12, stopDistancePct));
+  }
+  if (!Number.isFinite(stopDistancePct) || stopDistancePct <= 0) return null;
+
+  const priceDecimals = priceDecimalsFor(entry);
+  const stopLoss = round(entry * (1 - dir * stopDistancePct), priceDecimals);
+  if (!Number.isFinite(stopLoss) || stopLoss <= 0 || dir * (entry - stopLoss) <= 0) return null;
+  const actualStopDistancePct = (dir * (entry - stopLoss)) / entry;
+  if (!Number.isFinite(actualStopDistancePct) || actualStopDistancePct <= 0) return null;
+  return { stopLoss, stopDistancePct: actualStopDistancePct, stopBasis, isImbalanceScalp, scalpTargetPrice };
+}
+
+function leverageForStop(signal: Signal, config: RiskConfig, stopDistancePct: number): number | null {
+  const liquidationCap = (1 / stopDistancePct) * LIQUIDATION_BUFFER;
+  const { volCap, confFloor, turboActive } = leverageCaps(signal, config);
+  const confHighMark = 0.85;
+  const confT = Math.max(
+    0,
+    Math.min(1, (signal.confidence - config.minConfidence) / (confHighMark - config.minConfidence))
+  );
+  const effectiveCeiling = turboActive ? volCap : config.maxLeverage;
+  const confidenceCap = confFloor + confT * (effectiveCeiling - confFloor);
+  const leverageCap = Math.min(effectiveCeiling, volCap, liquidationCap, confidenceCap);
+  if (!Number.isFinite(leverageCap) || leverageCap < 1) return null;
+  return Math.max(1, Math.min(Math.floor(leverageCap), effectiveCeiling));
+}
+
 /**
  * Preview the leverage {@link planTrade} would pick for a signal, without an
  * account.
  *
- * Mirrors the stop-distance and conviction-scaling steps of `planTrade` — the
- * two inputs leverage actually depends on — so the dashboard can show
+ * Uses the same validated, rounded stop geometry and conviction-scaling steps
+ * as `planTrade`, so the dashboard can show
  * "this signal would use ~14x" next to a candidate before it is ever sized
  * into a real trade. Position sizing (margin, notional) still needs the
  * account and only happens in `planTrade` itself.
@@ -311,36 +390,14 @@ function round(value: number, decimals: number): number {
  * @returns the leverage `planTrade` would use for this signal today, or null when the signal would not qualify.
  */
 export function previewLeverage(signal: Signal, config: RiskConfig): number | null {
-  if (!Number.isFinite(signal.confidence) || signal.confidence < config.minConfidence) return null;
-  if (!Number.isFinite(signal.atrPct) || signal.atrPct <= 0) return null;
+  if (
+    !Number.isFinite(signal.confidence) || signal.confidence < config.minConfidence || signal.confidence > 1 ||
+    !Number.isFinite(config.minConfidence) || !Number.isFinite(config.maxLeverage) || config.maxLeverage < 1
+  ) return null;
   if (config.requireHigherAlignment && !signal.alignedWithHigher) return null;
-
-  const trendMultiple = config.atrStopMultiple;
-  const atrMultiple = signal.regime === 'RANGE' ? trendMultiple * 0.68 : trendMultiple;
-  let stopDistancePct = signal.atrPct * atrMultiple;
-  const anchor = signal.side === 'LONG' ? signal.swingLow : signal.swingHigh;
-  if (Number.isFinite(anchor) && anchor > 0 && Number.isFinite(signal.price) && signal.price > 0) {
-    const structurePct = (Math.abs(signal.price - anchor) / signal.price) * 1.15;
-    if (structurePct >= stopDistancePct * 0.5 && structurePct <= stopDistancePct * 2) {
-      stopDistancePct = structurePct;
-    }
-  }
-  stopDistancePct = Math.max(0.006, Math.min(0.12, stopDistancePct));
-
-  const liquidationCap = (1 / stopDistancePct) * LIQUIDATION_BUFFER;
-  const { volCap, confFloor, turboActive } = leverageCaps(signal, config);
-  const confHighMark = 0.85;
-  const confT = Math.max(
-    0,
-    Math.min(1, (signal.confidence - config.minConfidence) / (confHighMark - config.minConfidence))
-  );
-  // In turbo mode the volCap intentionally exceeds maxLeverage — use it as the
-  // effective ceiling so the boost is not negated by Math.min.
-  const effectiveCeiling = turboActive ? volCap : config.maxLeverage;
-  const confidenceCap = confFloor + confT * (effectiveCeiling - confFloor);
-  const leverageCap = Math.min(effectiveCeiling, volCap, liquidationCap, confidenceCap);
-  if (leverageCap < 1) return null;
-  return Math.max(1, Math.min(Math.floor(leverageCap), effectiveCeiling));
+  const geometry = stopGeometry(signal, config);
+  if (!geometry) return null;
+  return leverageForStop(signal, config, geometry.stopDistancePct);
 }
 
 /**
@@ -405,11 +462,39 @@ function confidenceScaledStakePct(confidence: number, config: RiskConfig): numbe
   return floor + t * (ceiling - floor);
 }
 
-export function planTrade(signal: Signal, account: Account, config: RiskConfig): TradePlan | null {
-  if (!Number.isFinite(signal.confidence) || signal.confidence < config.minConfidence) return null;
+/**
+ * Turn a signal into a fully sized trade plan, sizing against its rounded stop.
+ *
+ * @param signal the scored opportunity.
+ * @param account current account snapshot.
+ * @param config active risk configuration.
+ * @param feeRate per-side taker fee used for entry and stop-exit risk (defaults to {@link FEE}).
+ * @returns a trade plan, or null when the signal fails a risk gate.
+ */
+export function planTrade(signal: Signal, account: Account, config: RiskConfig, feeRate = FEE): TradePlan | null {
+  if (!Number.isFinite(signal.confidence) || signal.confidence < 0 || signal.confidence > 1) return null;
   if (!Number.isFinite(signal.price) || signal.price <= 0) return null;
   if (!Number.isFinite(signal.atrPct) || signal.atrPct <= 0) return null;
-  if (!Number.isFinite(account.equity) || account.equity <= 0) return null;
+  if (
+    !Number.isFinite(account.equity) || account.equity <= 0 ||
+    !Number.isFinite(account.balance) || account.balance <= 0 ||
+    !Number.isFinite(account.usedMargin) || account.usedMargin < 0 ||
+    !Number.isFinite(account.drawdownPct) ||
+    !Number.isFinite(config.minConfidence) || config.minConfidence < 0 || config.minConfidence > 1 ||
+    !Number.isFinite(config.baseRiskPct) || config.baseRiskPct <= 0 ||
+    !Number.isFinite(config.maxRiskPct) || config.maxRiskPct <= 0 ||
+    !Number.isFinite(config.atrStopMultiple) || config.atrStopMultiple <= 0 ||
+    !Number.isFinite(config.maxTotalMarginPct) || config.maxTotalMarginPct <= 0 ||
+    !Number.isFinite(config.maxOpenPositions) || config.maxOpenPositions <= 0 ||
+    !Number.isFinite(config.maxLeverage) || config.maxLeverage < 1 ||
+    !Number.isFinite(feeRate) || feeRate < 0 || feeRate >= 1 ||
+    (config.minTradeMarginUsdt !== undefined &&
+      (!Number.isFinite(config.minTradeMarginUsdt) || config.minTradeMarginUsdt < 0))
+  ) return null;
+  if (config.targetStakePct !== undefined && (!Number.isFinite(config.targetStakePct) || config.targetStakePct < 0)) return null;
+  if (config.minStakePct !== undefined && (!Number.isFinite(config.minStakePct) || config.minStakePct < 0)) return null;
+  if (config.targetStakePct && config.minStakePct !== undefined && config.minStakePct > config.targetStakePct) return null;
+  if (signal.confidence < config.minConfidence) return null;
 
   // An entry the higher timeframe does not actively confirm is optional: it is
   // the single biggest driver of trade quality, so it is configurable rather
@@ -418,41 +503,13 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig):
 
   const dir = signal.side === 'LONG' ? 1 : -1;
   const entry = signal.price;
-
-  // 1. Stop distance. Volatility sets the baseline, but when a confirmed swing
-  //    sits just beyond it we place the stop behind that level instead — price
-  //    has to break real structure to take us out, not just wobble.
-  const trendMultiple = config.atrStopMultiple;
-  const atrMultiple = signal.regime === 'RANGE' ? trendMultiple * 0.68 : trendMultiple;
-  const volStopPct = signal.atrPct * atrMultiple;
-  const anchor = signal.side === 'LONG' ? signal.swingLow : signal.swingHigh;
-  let stopDistancePct = volStopPct;
-  let stopBasis = 'volatiliteit';
-  if (Number.isFinite(anchor) && anchor > 0) {
-    // Small buffer beyond the level so a clean wick does not trigger the stop.
-    const structurePct = (Math.abs(entry - anchor) / entry) * 1.15;
-    // Only adopt it when it is a sane distance — never tighter than half the
-    // volatility stop, never more than double it.
-    if (structurePct >= volStopPct * 0.5 && structurePct <= volStopPct * 2) {
-      stopDistancePct = structurePct;
-      stopBasis = 'marktstructuur';
-    }
-  }
-
-  const isImbalanceScalp =
-    config.imbalanceScalpEnabled !== false &&
-    signal.marketStructure?.imbalanceScalp?.eligible &&
-    signal.marketStructure.imbalanceScalp.side === signal.side;
-
-  if (isImbalanceScalp) {
-    const scalp = signal.marketStructure!.imbalanceScalp!;
-    const scalpStopDistPct = Math.abs(entry - scalp.stopLoss) / entry;
-    // Tight stop based on sweep wick
-    stopDistancePct = Math.max(0.004, Math.min(0.08, scalpStopDistPct));
-    stopBasis = 'sweep-wick (SMC scalp)';
-  } else {
-    stopDistancePct = Math.max(0.006, Math.min(0.12, stopDistancePct));
-  }
+  const geometry = stopGeometry(signal, config);
+  if (!geometry) return null;
+  const { stopLoss, stopBasis, isImbalanceScalp, scalpTargetPrice } = geometry;
+  const stopDistancePct = geometry.stopDistancePct;
+  const priceDecimals = priceDecimalsFor(entry);
+  const lossFractionAtStop = stopDistancePct + feeRate * (entry + stopLoss) / entry;
+  if (!Number.isFinite(lossFractionAtStop) || lossFractionAtStop <= 0) return null;
 
   // 2. Risk budget scales with conviction, capped, and shrinks in drawdown.
   const convictionScale = 0.5 + signal.confidence;
@@ -467,15 +524,18 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig):
           : 1;
   const riskPct = Math.min(config.maxRiskPct, config.baseRiskPct * convictionScale * drawdownScale);
   const riskAmount = account.equity * riskPct;
+  if (!Number.isFinite(riskAmount) || riskAmount <= 0) return null;
 
-  // 3. Notional follows from the risk budget divided by the stop distance.
-  const targetNotional = riskAmount / stopDistancePct;
+  // 3. Include the entry and stop-exit fees in the trade's fixed risk budget.
+  const maxNotionalForRisk = riskAmount / lossFractionAtStop;
+  if (!Number.isFinite(maxNotionalForRisk) || maxNotionalForRisk <= 0) return null;
 
   // 4. Work out how much collateral this trade may use.
   const maxMarginByPortfolio = Math.max(
     0,
     account.equity * config.maxTotalMarginPct - account.usedMargin
   );
+  if (!Number.isFinite(maxMarginByPortfolio)) return null;
   // Never commit more than one trade's fair share of the portfolio budget.
   // When `targetStakePct` is set it IS that share (e.g. 20% per user
   // request) — using it directly here, rather than dividing the total budget
@@ -488,38 +548,23 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig):
     (Number.isFinite(config.targetStakePct) && (config.targetStakePct as number) > 0
       ? (config.targetStakePct as number)
       : config.maxTotalMarginPct / config.maxOpenPositions);
+  if (!Number.isFinite(perTradeCap) || perTradeCap <= 0) return null;
   const minTradeFloor = Math.max(MIN_MARGIN, config.minTradeMarginUsdt ?? 0);
   const freeMargin = Math.min(account.balance, maxMarginByPortfolio, perTradeCap);
-  if (freeMargin < minTradeFloor) return null;
+  if (!Number.isFinite(freeMargin) || freeMargin < minTradeFloor) return null;
   // 5. Cap leverage so the stop loss always sits inside the liquidation price,
   //    then apply the volatility, conviction and configured caps on top.
-  const liquidationCap = (1 / stopDistancePct) * LIQUIDATION_BUFFER;
   // Scaled alongside maxLeverage (15x default): high volatility still caps
   // hardest (8x), medium volatility next (12x), calm markets may use the full
   // configured ceiling. Turbo mode raises the calm/medium bands — see
   // `leverageCaps` — the 8x high-volatility floor is never relaxed.
-  const { volCap, confFloor, turboActive } = leverageCaps(signal, config);
-  // Conviction also gates leverage, not just position size: a signal that barely
-  // clears `minConfidence` gets the conservative end (~8x, the level this desk
-  // ran on before the multiplier was raised); only signals the strategy is most
-  // sure about (0.85+ confidence) are allowed to reach the full configured ceiling.
-  // In turbo mode the volCap intentionally exceeds maxLeverage — use it as the
-  // effective ceiling so the boost is not negated by Math.min.
-  const effectiveCeiling = turboActive ? volCap : config.maxLeverage;
-  const confHighMark = 0.85;
-  const confT = Math.max(
-    0,
-    Math.min(1, (signal.confidence - config.minConfidence) / (confHighMark - config.minConfidence))
-  );
-  const confidenceCap = confFloor + confT * (effectiveCeiling - confFloor);
-  const leverageCap = Math.min(effectiveCeiling, volCap, liquidationCap, confidenceCap);
-  if (leverageCap < 1) return null;
+  const leverage = leverageForStop(signal, config, stopDistancePct);
+  if (leverage === null) return null;
 
   // Take the highest safe leverage rather than the lowest that fits. The loss at
   // the stop is identical either way — the stop defines the risk — but higher
   // leverage locks up far less collateral, keeping capital free for other setups.
   // The caps above guarantee the stop still fires before liquidation.
-  const leverage = Math.max(1, Math.min(Math.floor(leverageCap), effectiveCeiling));
 
   // Optional target stake as a fraction of equity — see `targetStakePct` doc
   // comment on RiskConfig. Only scales the stake UP: it raises the floor a
@@ -540,37 +585,30 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig):
   // 6. Size the position, never exceeding the collateral available. The
   //    risk-budget size is a floor raised to `stakeFloor` when that target is
   //    larger — it never shrinks a trade the risk budget already sized bigger.
-  const riskSizedMargin = Math.min(freeMargin, targetNotional / leverage);
+  const riskSizedMargin = Math.min(freeMargin, maxNotionalForRisk / leverage);
   let margin = Math.min(freeMargin, Math.max(riskSizedMargin, stakeFloor));
   if (margin < minTradeFloor) return null;
-  // Hard outer ceiling on realised risk regardless of how the stake floor and
-  // leverage combine: even with the leverage adjustment above, never let a
-  // single trade risk more than 2.5x `maxRiskPct` of equity at the stop.
-  const hardRiskCeiling = account.equity * config.maxRiskPct * 2.5;
-  const maxMarginForRisk = hardRiskCeiling / (leverage * stopDistancePct);
-  margin = Math.min(margin, maxMarginForRisk);
+  // This final cap also constrains the target-stake floor. Floor, rather than
+  // round, so cent precision can never move margin above the risk allowance.
+  margin = floorTo(Math.min(margin, maxNotionalForRisk / leverage), 2);
   if (margin < minTradeFloor) return null;
-  const notional = margin * leverage;
+  const notional = floorTo(Math.min(margin * leverage, maxNotionalForRisk), 2);
   if (!Number.isFinite(notional) || notional <= 0) return null;
 
   const quantity = notional / entry;
-  const stopLoss = entry * (1 - dir * stopDistancePct);
-  if (stopLoss <= 0) return null;
-
+  if (!Number.isFinite(quantity) || quantity <= 0) return null;
   // Dynamic price precision: sub-penny and meme tokens (PEPE, SHIB, BONK) can have
   // 8-10+ decimals. Hardcoded 8 decimals rounds their targets to 0 or entry.
   // We guarantee at least 4-6 significant digits of precision up to 14 decimals.
-  const priceDecimals = entry > 0 ? Math.min(14, Math.max(8, Math.ceil(-Math.log10(entry)) + 4)) : 8;
-
   // 7. Staged profit targets. Taking money off the table in tranches converts a
   //    winning move into realised profit without giving up the tail: the first
   //    level pays for the trade, the last one rides the trend.
   let takeProfits: TakeProfitLevel[];
   let ladderDesc: string;
 
-  if (isImbalanceScalp && signal.marketStructure?.imbalanceScalp?.targetPrice) {
-    const targetPrice = signal.marketStructure.imbalanceScalp.targetPrice;
-    const rMultiple = Math.max(1.5, Math.abs(targetPrice - entry) / (entry * stopDistancePct));
+  if (isImbalanceScalp && scalpTargetPrice !== undefined) {
+    const targetPrice = scalpTargetPrice;
+    const rMultiple = (dir * (targetPrice - entry)) / (entry * stopDistancePct);
     takeProfits = [
       {
         price: round(targetPrice, priceDecimals),
@@ -599,7 +637,15 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig):
       .join(' / ')}`;
   }
 
-  if (takeProfits.some((t) => t.price <= 0)) return null;
+  if (
+    takeProfits.length === 0 ||
+    takeProfits.some((t) =>
+      !Number.isFinite(t.price) || t.price <= 0 ||
+      !Number.isFinite(t.portion) || t.portion <= 0 ||
+      !Number.isFinite(t.rMultiple) || t.rMultiple <= 0 ||
+      (dir === 1 ? t.price <= entry : t.price >= entry)
+    )
+  ) return null;
   const takeProfit = takeProfits[takeProfits.length - 1].price;
 
   const reasons = [...signal.reasons];
@@ -618,7 +664,7 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig):
     takeProfit,
     takeProfits,
     // Actual risk after all caps — may be below the budget, never above it.
-    riskPct: round((notional * stopDistancePct) / account.equity, 4),
+    riskPct: floorTo((notional * lossFractionAtStop) / account.equity, 6),
     confidence: round(signal.confidence, 3),
     regime: signal.regime,
     reasons,
@@ -695,9 +741,9 @@ function targetLadder(
  * @returns a blocking reason, or null when trading is allowed.
  */
 /**
- * Whether a position has achieved its first profit milestone (TP1) and is thus
- * derisked (stop moved to break-even, initial margin partially released).
- * Derisked positions free up their active trade slot so new setups can be taken.
+ * Whether the remaining position is protected from a net loss at its stop.
+ * TP, break-even, and trailing flags alone do not release an active trade slot.
+ * @param feeRate per-side taker fee used for exact break-even coverage (defaults to {@link FEE}).
  */
 export function isPositionDerisked(position: {
   breakEven?: boolean;
@@ -708,29 +754,21 @@ export function isPositionDerisked(position: {
   stopLoss?: number;
   entry?: number;
   side?: Side;
-}): boolean {
-  if (position.breakEven) return true;
-  if (position.trailingArmed) return true;
-  if (position.takeProfits?.some((t) => t.hit)) return true;
+}, feeRate = FEE): boolean {
   if (
-    position.remainingQuantity !== undefined &&
-    position.quantity !== undefined &&
-    position.quantity > 0 &&
-    position.remainingQuantity < position.quantity * 0.99
+    (position.side !== 'LONG' && position.side !== 'SHORT') ||
+    !Number.isFinite(position.stopLoss) || position.stopLoss! <= 0 ||
+    !Number.isFinite(position.entry) || position.entry! <= 0 ||
+    !Number.isFinite(position.quantity) || position.quantity! <= 0 ||
+    !Number.isFinite(position.remainingQuantity) || position.remainingQuantity! <= 0 ||
+    position.remainingQuantity! > position.quantity! ||
+    !Number.isFinite(feeRate) || feeRate < 0 || feeRate >= 1
   ) {
-    return true;
+    return false;
   }
-  if (
-    position.stopLoss !== undefined &&
-    position.entry !== undefined &&
-    position.side !== undefined
-  ) {
-    const isLong = position.side === 'LONG';
-    if (isLong ? position.stopLoss >= position.entry : position.stopLoss <= position.entry) {
-      return true;
-    }
-  }
-  return false;
+  const isLong = position.side === 'LONG';
+  const feeCoveredStop = position.entry! * (isLong ? (1 + feeRate) / (1 - feeRate) : (1 - feeRate) / (1 + feeRate));
+  return isLong ? position.stopLoss! >= feeCoveredStop : position.stopLoss! <= feeCoveredStop;
 }
 
 export function tradingBlockedReason(

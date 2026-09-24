@@ -21,9 +21,10 @@ import {
   trimForRegimeFlip,
 } from './exits.js';
 import { rsi } from './indicators.js';
-import { MexcExchangeAdapter } from './exchange-adapter.js';
+import { LIVE_EXECUTION_DISABLED_REASON, MexcExchangeAdapter, type IExchangeAdapter } from './exchange-adapter.js';
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { notify } from './notifier.js';
+import { rankCandidates } from './candidate-ranking.js';
 import { DEFAULT_RISK, concentrationBlock, isPositionDerisked, planTrade, previewLeverage, tradingBlockedReason } from './risk.js';
 import { btcTrendConflict, buildSignal, checkLtfReversal, detectRegime } from './strategy.js';
 import { analyzeMarketStructure } from './market-structure.js';
@@ -181,14 +182,33 @@ const WATCH_BAND = 0.08;
  */
 const WATCH_R = 0.25;
 
+/** Convert base quantity to supported whole contracts without rounding risk upward. */
+export function toContractVolume(quantity: number, contractSize: number, minVol: number, maxVol: number): number {
+  if (![quantity, contractSize, minVol, maxVol].every(Number.isFinite) || quantity <= 0 || contractSize <= 0) {
+    return 0;
+  }
+  const vol = Math.floor(quantity / contractSize);
+  return vol >= minVol && vol <= maxVol ? vol : 0;
+}
+
+/** Allocate TP contract lots without exceeding the position's total volume. */
+export function allocateTakeProfitVolumes(totalVol: number, portions: number[], minVol: number): number[] {
+  let allocated = 0;
+  return portions.map((portion, index) => {
+    const requested = index === portions.length - 1 ? totalVol - allocated : Math.floor(totalVol * portion);
+    const vol = Number.isFinite(requested) && requested >= minVol && allocated + requested <= totalVol ? requested : 0;
+    allocated += vol;
+    return vol;
+  });
+}
+
 
 /**
  * The autonomous trading engine.
  *
- * Every cycle it scans the market, scores opportunities, sizes them against the
- * risk budget, opens positions, and manages the exits of everything already open.
- * Execution is simulated against live prices — swap {@link Engine} consumers to a
- * real broker adapter to go live on a venue you are allowed to use.
+ * Every cycle scans and scores opportunities for the paper book. Existing venue
+ * positions remain readable/reconciled, but live order execution and local
+ * price-based management are disabled until confirmed fills can be reconciled.
  */
 export class Engine {
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -199,6 +219,12 @@ export class Engine {
   private fast = false;
 
   private busy = false;
+
+  private resetting = false;
+
+  private readonly closingPositions = new Set<string>();
+
+  private liveExecutionWarningLogged = false;
 
   private lastSignals: Signal[] = [];
 
@@ -267,7 +293,7 @@ export class Engine {
      * whenever live trading is armed. Shared with {@link TradingService} so a
      * credential save from the dashboard is visible here immediately.
      */
-    private readonly exchange: MexcExchangeAdapter = new MexcExchangeAdapter(),
+    private readonly exchange: IExchangeAdapter = new MexcExchangeAdapter(),
     /**
      * Seconds between cycles once a setup is near its trigger. The strategy runs
      * on 1h bars, so this does not produce new signal information — it exists so
@@ -649,9 +675,13 @@ export class Engine {
    * new entries. Overlapping invocations are ignored.
    */
   async cycle(): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.resetting) return;
     this.busy = true;
     try {
+      if (!this.liveExecutionWarningLogged) {
+        this.liveExecutionWarningLogged = true;
+        await this.log('warn', LIVE_EXECUTION_DISABLED_REASON);
+      }
       await this.refreshMarks();
       await this.reconcileLivePositions();
       await this.manageOpenPositions();
@@ -733,12 +763,94 @@ export class Engine {
    * @returns true when the position was found and closed.
    */
   async closePosition(id: string): Promise<boolean> {
-    const open = await this.store.positions('OPEN');
-    const position = open.find((p) => p.id === id);
-    if (!position) return false;
-    const price = (await this.livePrice(position.symbol)) || this.marks.get(position.symbol) || 0;
-    if (!price) return false;
-    return this.close(position, price, 'MANUAL');
+    if (this.resetting || this.closingPositions.has(id)) return false;
+    this.closingPositions.add(id);
+    try {
+      const open = await this.store.positions('OPEN');
+      const position = open.find((p) => p.id === id);
+      if (!position) return false;
+      if (position.live && !this.exchange.status().enabled) {
+        await this.reportLiveExecutionBlocked();
+        return false;
+      }
+      const price = await this.livePrice(position.symbol);
+      if (!Number.isFinite(price) || price <= 0) return false;
+      return await this.closeUnlocked(position, price, 'MANUAL');
+    } finally {
+      this.closingPositions.delete(id);
+    }
+  }
+
+  /**
+   * Partially reduce an open position (e.g. 50% profit take).
+   *
+   * @param id position id
+   * @param fraction fraction to close (0 < fraction < 1, defaults to 0.5)
+   * @returns true if position was reduced, false otherwise
+   */
+  async reducePosition(id: string, fraction = 0.5): Promise<boolean> {
+    if (this.resetting || this.closingPositions.has(id)) return false;
+    const boundedFraction = Math.max(0.01, Math.min(0.99, fraction));
+    this.closingPositions.add(id);
+    try {
+      const open = await this.store.positions('OPEN');
+      const position = open.find((p) => p.id === id);
+      if (!position || position.remainingQuantity <= 0) return false;
+      if (position.live && !this.exchange.status().enabled) {
+        await this.reportLiveExecutionBlocked();
+        return false;
+      }
+      const price = await this.livePrice(position.symbol);
+      if (!Number.isFinite(price) || price <= 0) return false;
+
+      const reduceQty = position.remainingQuantity * boundedFraction;
+      const reduceMargin = position.margin * (reduceQty / position.remainingQuantity);
+      const direction = position.side === 'LONG' ? 1 : -1;
+      const trancheGrossPnl = direction * (price - position.entry) * reduceQty;
+      const exitFee = reduceQty * price * FEE;
+      const trancheNetPnl = trancheGrossPnl - exitFee;
+
+      if (position.live) {
+        const reduced = await this.reduceLivePosition(position, reduceQty);
+        if (!reduced) return false;
+        if (position.liveStopOrderId) {
+          await this.moveLiveStop(position, position.stopLoss, position.remainingQuantity - reduceQty);
+        }
+      }
+
+      const nextRemaining = position.remainingQuantity - reduceQty;
+      const nextMargin = Math.max(0, position.margin - reduceMargin);
+      const nextNotional = position.notional * (nextRemaining / position.quantity);
+
+      await this.store.updatePosition(position.id, {
+        remainingQuantity: nextRemaining,
+        margin: nextMargin,
+        notional: nextNotional,
+        realisedPnl: (position.realisedPnl || 0) + trancheNetPnl,
+      });
+
+      await this.store.applyBalanceDelta({
+        balance: reduceMargin + trancheNetPnl,
+        realisedPnl: trancheNetPnl,
+      });
+
+      position.remainingQuantity = nextRemaining;
+      position.margin = nextMargin;
+      position.notional = nextNotional;
+      position.realisedPnl = (position.realisedPnl || 0) + trancheNetPnl;
+
+      await this.log(
+        'trade',
+        `✂️ DEELSLUITING ${position.side} ${position.symbol} @ ${price} · ${Math.round(boundedFraction * 100)}% gesloten · PnL ${trancheNetPnl >= 0 ? '+' : ''}${trancheNetPnl.toFixed(2)}${position.live ? ' · 🔴 LIVE' : ''}`
+      );
+      void notify({
+        kind: 'trade-close',
+        message: `✂️ DEELSLUITING ${position.side} ${position.symbol} @ ${price} · ${Math.round(boundedFraction * 100)}% gesloten · PnL ${trancheNetPnl >= 0 ? '+' : ''}${trancheNetPnl.toFixed(2)}${position.live ? ' · LIVE' : ''}`,
+      });
+      return true;
+    } finally {
+      this.closingPositions.delete(id);
+    }
   }
 
   /**
@@ -755,19 +867,30 @@ export class Engine {
    */
   async simulatePrice(symbol: string, price: number): Promise<Position[]> {
     if (!Number.isFinite(price) || price <= 0) throw new Error('invalid price');
-    this.marks.set(symbol, price);
-    await this.manageOpenPositions();
-    const open = await this.store.positions('OPEN');
-    return open.filter((p) => p.symbol === symbol);
+    void symbol;
+    throw new Error('Synthetic price simulation is disabled; it cannot safely be isolated from live position management.');
   }
 
   /** Reset the paper account and wipe all history. */
   async reset(): Promise<void> {
-    await this.store.reset();
-    this.lastSignals = [];
-    this.blockedReason = null;
-    this.marks.clear();
-    await this.log('warn', 'Account gereset naar startsaldo');
+    if (this.busy || this.resetting || this.closingPositions.size > 0) {
+      throw new Error('Cannot reset while engine or position mutations are in progress.');
+    }
+    this.resetting = true;
+    try {
+      const liveOpen = (await this.store.positions('OPEN')).some((position) => position.live);
+      if (liveOpen) {
+        throw new Error('Cannot reset while live venue positions are tracked; reconcile them manually first.');
+      }
+      await this.store.reset();
+      this.lastSignals = [];
+      this.blockedReason = null;
+      this.marks.clear();
+      this.missingTicks.clear();
+      await this.log('warn', 'Account gereset naar startsaldo');
+    } finally {
+      this.resetting = false;
+    }
   }
 
   /**
@@ -777,33 +900,29 @@ export class Engine {
   private async refreshMarks(): Promise<void> {
     const open = await this.store.positions('OPEN');
     if (!open.length) return;
+    let tickers: Ticker[] = [];
     try {
-      const tickers = await this.market.tickers(this.priceMaxAgeMs());
-      const bySymbol = new Map(tickers.map((t) => [t.symbol, t.lastPrice]));
-      for (const p of open) {
-        const price = bySymbol.get(p.symbol);
-        if (price) this.marks.set(p.symbol, price);
-      }
-      // Anything not present in the bulk feed gets an individual lookup.
-      const missing = open.filter((p) => !bySymbol.has(p.symbol));
-      await Promise.all(
-        missing.map(async (p) => {
-          const price = await this.livePrice(p.symbol);
-          if (price) {
-            this.marks.set(p.symbol, price);
-            this.missingTicks.delete(p.symbol);
-          } else {
-            // No price anywhere — bulk feed AND individual lookup both empty.
-            // Count it rather than silently sitting on the last known mark
-            // forever, which is what let a delisted market's position just
-            // wait indefinitely instead of closing out.
-            this.missingTicks.set(p.symbol, (this.missingTicks.get(p.symbol) || 0) + 1);
-          }
-        })
-      );
+      tickers = await this.market.tickers(this.priceMaxAgeMs());
     } catch (err) {
       await this.log('warn', `Prijzen verversen mislukt: ${(err as Error).message}`);
     }
+    const bySymbol = new Map(tickers.map((ticker) => [ticker.symbol, ticker.lastPrice]));
+    await Promise.all(open.map(async (position) => {
+      const tickerPrice = bySymbol.get(position.symbol);
+      if (Number.isFinite(tickerPrice) && tickerPrice! > 0) {
+        this.marks.set(position.symbol, tickerPrice!);
+        this.missingTicks.delete(position.symbol);
+        return;
+      }
+      const price = await this.livePrice(position.symbol);
+      if (Number.isFinite(price) && price > 0) {
+        this.marks.set(position.symbol, price);
+        this.missingTicks.delete(position.symbol);
+      } else {
+        this.marks.delete(position.symbol);
+        this.missingTicks.set(position.symbol, (this.missingTicks.get(position.symbol) || 0) + 1);
+      }
+    }));
   }
 
   /**
@@ -824,7 +943,7 @@ export class Engine {
    * positions.
    */
   private async reconcileLivePositions(): Promise<void> {
-    if (!this.exchange.status().enabled) return;
+    if (!this.exchange.status().configured) return;
     let onVenue: Awaited<ReturnType<MexcExchangeAdapter['getOpenPositions']>>;
     try {
       onVenue = await this.exchange.getOpenPositions();
@@ -835,10 +954,11 @@ export class Engine {
 
     const open = await this.store.positions('OPEN');
     const liveOpen = open.filter((p) => p.live);
-    const bySymbol = new Map(onVenue.map((p) => [p.symbol, p]));
+    const positionKey = (symbol: string, side: Position['side']) => `${symbol}:${side}`;
+    const byPosition = new Map(onVenue.map((p) => [positionKey(p.symbol, p.side), p]));
 
     for (const position of liveOpen) {
-      const venue = bySymbol.get(position.symbol);
+      const venue = byPosition.get(positionKey(position.symbol, position.side));
       const contractSize = position.liveContractSize || 1;
 
       if (!venue || venue.side !== position.side || venue.vol <= 0) {
@@ -847,75 +967,28 @@ export class Engine {
         // Settle it locally at the last known mark so the paper book (balance,
         // stats, dashboard) stops reflecting a position that is already gone.
         // No reduce order is sent — there is nothing left on the venue to reduce.
-        const price = this.markOf(position);
         await this.log(
           'warn',
-          `⚠️ Reconciliatie: ${position.symbol} niet (meer) gevonden op MEXC — lokaal gesloten op ${price} om boekhouding gelijk te trekken met de exchange.`
+          `Reconciliatie: ${position.symbol} ${position.side} is niet (meer) open op MEXC. Exposure-afwezigheid bevestigd, maar zonder fill-ledger wordt geen lokale close/PnL geboekt en blijven beschermingsorders ongemoeid.`
         );
-        await this.settleExternally(position, price);
         continue;
       }
 
-      const expectedVol = Math.round((position.remainingQuantity ?? position.quantity) / contractSize);
+      const expectedVol = Math.floor((position.remainingQuantity ?? position.quantity) / contractSize);
       if (expectedVol > 0 && Math.abs(venue.vol - expectedVol) >= 1) {
         const newQty = venue.vol * contractSize;
-        const diff = venue.vol - expectedVol;
-        if (diff < 0) {
-          if (!position.breakEven || !position.takeProfits?.[0]?.hit) {
-            if (position.takeProfits && position.takeProfits[0]) {
-              position.takeProfits[0].hit = true;
-            }
-            position.breakEven = true;
-          }
-          await this.log(
-            'warn',
-            `⚠️ Reconciliatie: ${position.symbol} kleiner op MEXC dan verwacht (${venue.vol} vs ${expectedVol} contracten) — TP-doel geraakt op exchange, positie gemarkeerd als break-even.`
-          );
-          // Re-align any resting TP orders on MEXC so their volume never exceeds remaining contracts
-          if (position.live) {
-            try {
-              const venueOrders = await this.exchange.getOpenPlanOrders(position.symbol);
-              const isLong = position.side === 'LONG';
-              const tpOrders = venueOrders.filter((o) => (isLong ? o.triggerType === 1 : o.triggerType === 2));
-              for (const tpOrder of tpOrders) {
-                if (tpOrder.vol > venue.vol) {
-                  await this.exchange.cancelPlanOrders([{ symbol: position.symbol, orderId: tpOrder.id }]);
-                  if (venue.vol > 0) {
-                    await this.exchange.placeTakeProfitOrder({
-                      symbol: position.symbol,
-                      side: position.side,
-                      vol: venue.vol,
-                      triggerPrice: tpOrder.triggerPrice,
-                      externalOid: `${position.id}-tp-realigned-${Date.now()}`,
-                    }).catch(() => {});
-                  }
-                }
-              }
-            } catch {
-              // Non-fatal if exchange query fails
-            }
-          }
-        } else {
-          await this.log(
-            'info',
-            `ℹ️ Reconciliatie: ${position.symbol} volume bijgewerkt naar exchange (${venue.vol} contracten).`
-          );
-        }
+        await this.log('warn', `Reconciliatie: ${position.symbol} ${position.side} venue-volume ${venue.vol} wijkt af van lokaal ${expectedVol}; alleen open volume bijgewerkt, geen fill/TP-status afgeleid.`);
         await this.store.updatePosition(position.id, {
-          remainingQuantity: Math.max(0, newQty),
-          quantity: Math.max(position.quantity, newQty),
-          margin: (newQty * venue.entryPrice) / (venue.leverage || position.leverage),
-          breakEven: position.breakEven,
-          takeProfits: position.takeProfits,
+          remainingQuantity: newQty,
         });
         position.remainingQuantity = Math.max(0, newQty);
       }
     }
 
     // Adopt any positions open on MEXC that were not in the local book (e.g. after server restart)
-    const tracked = new Set(liveOpen.map((p) => p.symbol));
+    const tracked = new Set(liveOpen.map((p) => positionKey(p.symbol, p.side)));
     for (const venue of onVenue) {
-      if (!tracked.has(venue.symbol) && venue.vol > 0) {
+      if (!tracked.has(positionKey(venue.symbol, venue.side)) && venue.vol > 0) {
         const detail = await this.market
           .contractDetail(venue.symbol)
           .catch(() => ({ contractSize: 1, minVol: 1, maxVol: 100000, priceScale: 4 }));
@@ -945,28 +1018,17 @@ export class Engine {
           const isLong = venue.side === 'LONG';
           // SL: triggerType 2 for LONG, 1 for SHORT
           const slOrders = venuePlanOrders
-            .filter((o) => (isLong ? o.triggerType === 2 : o.triggerType === 1))
+            .filter((o) => (isLong ? o.triggerType === 2 && o.side === 4 : o.triggerType === 1 && o.side === 2))
             .sort((a, b) => b.createTime - a.createTime);
 
           if (slOrders.length > 0) {
             liveStopOrderId = slOrders[0].id;
             stopLoss = slOrders[0].triggerPrice;
-            // Clean up any duplicate SL triggers on MEXC immediately
-            if (slOrders.length > 1) {
-              const duplicates = slOrders.slice(1);
-              await this.exchange.cancelPlanOrders(
-                duplicates.map((d) => ({ symbol: venue.symbol, orderId: d.id }))
-              );
-              await this.log(
-                'info',
-                `🧹 ${venue.symbol}: ${duplicates.length} dubbele stop-orders opgeruimd bij reconciliatie.`
-              );
-            }
           }
 
           // TP: triggerType 1 for LONG, 2 for SHORT
           const tpOrders = venuePlanOrders
-            .filter((o) => (isLong ? o.triggerType === 1 : o.triggerType === 2))
+            .filter((o) => (isLong ? o.triggerType === 1 && o.side === 4 : o.triggerType === 2 && o.side === 2))
             .sort((a, b) => (isLong ? a.triggerPrice - b.triggerPrice : b.triggerPrice - a.triggerPrice));
 
           if (tpOrders.length > 0) {
@@ -1008,6 +1070,7 @@ export class Engine {
           liveStopOrderId,
         };
         await this.store.insertPosition(adopted);
+        tracked.add(positionKey(venue.symbol, venue.side));
         this.marks.set(adopted.symbol, entry);
         await this.log(
           'info',
@@ -1017,68 +1080,24 @@ export class Engine {
     }
   }
 
-  /**
-   * Settle a position the venue no longer reports as open, without sending any
-   * further order — used by {@link reconcileLivePositions} where the exchange
-   * side is already gone (manual close, offline stop trigger, liquidation).
-   *
-   * Unlike {@link close}, this never calls `reduceLivePosition` or
-   * `cancelStopOrder`: doing so against a position MEXC no longer holds would
-   * just fail and could throw away the settlement.
-   *
-   * @param position the position to settle locally.
-   * @param price the price to settle at — the last known mark, since the exact
-   *   external fill price is not available from `getOpenPositions()`.
-   */
-  private async settleExternally(position: Position, price: number): Promise<void> {
-    if (position.live) {
-      if (position.liveStopOrderId) {
-        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol).catch(() => {});
-      }
-      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
-    }
-    const { total, settling, net } = closeSettlement(position, price);
-    const claimed = await this.store.settlePosition(position.id, {
-      closedAt: Date.now(),
-      exit: price,
-      pnl: net,
-      pnlPct: position.margin ? net / position.margin : 0,
-      exitReason: 'MANUAL',
-      remainingQuantity: 0,
-      realisedPnl: total,
-    });
-    if (!claimed) return;
-    await this.store.applyBalanceDelta({
-      balance: position.margin + settling,
-      realisedPnl: settling,
-    });
-    this.marks.delete(position.symbol);
-    void notify({
-      kind: 'trade-close',
-      message: `CLOSE ${position.side} ${position.symbol} @ ${price} · extern (buiten de engine om) · ${
-        net >= 0 ? '+' : ''
-      }${net.toFixed(2)} · LIVE`,
-    });
-  }
-
   private async manageOpenPositions(): Promise<void> {
     const open = await this.store.positions('OPEN');
     for (const position of open) {
-      // A market with no ticker data for several cycles in a row is treated
-      // as delisted/suspended, not just briefly slow — close it out at the
-      // last known mark rather than leaving it open to be re-priced on stale
-      // or wrong data whenever the feed comes back. Per user request: "zodra
-      // een beurs sluit dat is die klaar, niet blijven wachten en op
-      // verkeerde prijzen kopen/verkopen".
+      if (this.closingPositions.has(position.id)) continue;
+      // Local price-derived exits cannot safely manage venue exposure without
+      // confirmed fills. Keep live positions visible and reconcile them only.
+      if (position.live) continue;
+
+      // Missing data is tracked for diagnostics, never used as a synthetic exit price.
       const missCount = this.missingTicks.get(position.symbol) || 0;
       if (missCount >= Engine.MAX_MISSING_TICKS) {
-        const lastKnown = this.marks.get(position.symbol) || position.entry;
-        await this.log(
-          'warn',
-          `${position.symbol}: geen marktdata meer sinds ${missCount} cycli — vermoedelijk gedelist, positie gesloten op laatst bekende prijs`
-        );
-        await this.close(position, lastKnown, 'DELISTED');
-        this.missingTicks.delete(position.symbol);
+        if (missCount === Engine.MAX_MISSING_TICKS) {
+          await this.log(
+            'warn',
+            `${position.symbol}: geen verse marktdata sinds ${missCount} cycli; positie blijft open tot er een actuele prijs beschikbaar is.`
+          );
+          this.missingTicks.set(position.symbol, missCount + 1);
+        }
         continue;
       }
 
@@ -1100,8 +1119,9 @@ export class Engine {
       // Staged take-profits: book a tranche at each level the price has reached.
       const filled = await this.takePartialProfits(position, price);
       if (filled === 'CLOSED') continue;
-      // Re-read after a partial fill so later logic sees the reduced size.
-      const current = filled === 'FILLED' ? await this.store.position(position.id) : position;
+      // Re-read after any attempted settlement so a failed final close or a
+      // concurrent close cannot continue mutating a stale OPEN object.
+      const current = await this.store.position(position.id);
       if (!current || current.status !== 'OPEN') continue;
 
       const ageHours = (Date.now() - current.openedAt) / 3_600_000;
@@ -1112,8 +1132,7 @@ export class Engine {
 
       const isDerisked = isPositionDerisked(current);
 
-      // Stagnation Exit: close trades that stagnate around break-even after stagnationHours (default 2.5h)
-      // without reaching TP1 and without making progress towards targets.
+      // Close trades that stagnate without a fee-covered break-even stop or progress towards targets.
       const stagnationEnabled = this.risk.stagnationExitEnabled !== false;
       const stagnationHours = this.risk.stagnationHours ?? 2.5;
       const maxStagnationR = this.risk.stagnationMaxR ?? 0.35;
@@ -1131,8 +1150,7 @@ export class Engine {
         }
       }
 
-      // Stale Trade Exit: if a position has been open for > maxStaleHours (default 12h)
-      // without reaching TP1 (still at risk), and price has made no significant headway
+      // Close positions still exposed after maxStaleHours (default 12h) when price has made no significant headway
       // (< 0.8R progress), momentum is dead — close cleanly to recycle capital and free the slot.
       const staleHours = this.risk.maxStaleHours ?? 12;
       if (!isDerisked && ageHours > staleHours) {
@@ -1142,7 +1160,7 @@ export class Engine {
         if (currentR < 0.8) {
           await this.log(
             'trade',
-            `⏱️ Time-Stop / Stale Trade: ${current.symbol} staat al ${ageHours.toFixed(1)}u open zonder TP1 te halen (${currentR.toFixed(2)}R) — positie gesloten om kapitaal vrij te maken${current.live ? ' · 🔴 LIVE' : ''}`
+            `⏱️ Time-Stop / Stale Trade: ${current.symbol} staat al ${ageHours.toFixed(1)}u open zonder fee-covered break-even stop (${currentR.toFixed(2)}R) — positie gesloten om kapitaal vrij te maken${current.live ? ' · 🔴 LIVE' : ''}`
           );
           await this.close(current, price, 'STALE_TRADE');
           continue;
@@ -1319,7 +1337,8 @@ export class Engine {
           const trim = trimForRegimeFlip(current, price, 0.25);
           if (trim) {
             if (current.live) {
-              await this.reduceLivePosition(current, trim.trimmedQty);
+              const reduced = await this.reduceLivePosition(current, trim.trimmedQty);
+              if (!reduced) continue;
             }
             const { patch, freedMargin } = regimeTrimPatch(current, trim);
             patch.climaxTrimmed = true;
@@ -1394,64 +1413,6 @@ export class Engine {
   }
 
   /**
-   * Replace a position's resting broker-side stop order with one at the new
-   * trigger price — MEXC has no "amend" endpoint for trigger orders, so this
-   * is always a cancel of the old order followed by placing a new one.
-   *
-   * Mutates `position.liveStopOrderId` in place; the caller is responsible for
-   * persisting it as part of the same patch that moves `stopLoss` in the store,
-   * so the two never drift out of sync across a restart.
-   *
-   * @param position the live position whose stop is moving.
-   * @param newStop the new trigger price.
-   * @param vol size still open, in base-asset units — converted to venue `vol`.
-   */
-  private async moveLiveStop(position: Position, newStop: number, vol: number): Promise<void> {
-    const contractSize = position.liveContractSize || 1;
-    const venueVol = Math.max(1, Math.round(vol / contractSize));
-    try {
-      const detail = await this.market.contractDetail(position.symbol);
-      const scale = detail.priceScale ?? 4;
-      const roundedStop = Number(newStop.toFixed(scale));
-
-      if (position.liveStopOrderId) {
-        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
-      }
-
-      // Proactively clean up any other resting SL orders on MEXC for this symbol to eliminate duplicate triggers
-      try {
-        const venueOrders = await this.exchange.getOpenPlanOrders(position.symbol);
-        const isLong = position.side === 'LONG';
-        const straySl = venueOrders.filter((o) => (isLong ? o.triggerType === 2 : o.triggerType === 1));
-        if (straySl.length > 0) {
-          await this.exchange.cancelPlanOrders(
-            straySl.map((o) => ({ symbol: position.symbol, orderId: o.id }))
-          );
-        }
-      } catch {
-        // Non-fatal if exchange query fails
-      }
-
-      const stop = await this.exchange.placeStopOrder({
-        symbol: position.symbol,
-        side: position.side,
-        vol: venueVol,
-        triggerPrice: roundedStop,
-        externalOid: `${position.id}-stop-${Date.now()}`,
-      });
-      position.liveStopOrderId = stop.orderId;
-      await this.store.updatePosition(position.id, { liveStopOrderId: stop.orderId });
-    } catch (err) {
-      position.liveStopOrderId = null;
-      await this.store.updatePosition(position.id, { liveStopOrderId: undefined });
-      await this.log(
-        'warn',
-        `⚠️ Live stop verplaatsen mislukt voor ${position.symbol}: ${(err as Error).message} — alleen nog engine-side bewaakt, controleer handmatig op MEXC.`
-      );
-    }
-  }
-
-  /**
    * Book profit at every target the price has reached since the last check.
    *
    * The first fill also moves the stop to break-even, so a winner can no longer
@@ -1468,8 +1429,8 @@ export class Engine {
 
     if (fill.allDone) {
       // Final tranche filled — settle whatever is left at the last target.
-      await this.settleRemainder(position, fill.levels, fill.bookedPnl, fill.remaining, price);
-      return 'CLOSED';
+      const settled = await this.settleRemainder(position, fill.levels, fill.bookedPnl, fill.remaining, price);
+      return settled ? 'CLOSED' : 'NONE';
     }
 
     // Mirror the tranche close onto MEXC BEFORE booking it locally — a failed
@@ -1490,8 +1451,8 @@ export class Engine {
     });
     await this.store.updatePosition(position.id, patch);
 
-    // Break-even after TP1 also moves the resting broker-side stop, sized to
-    // whatever quantity remains open after this tranche.
+    // TP1 may move the stop; the risk gate counts the position derisked only
+    // when that stop covers entry fees for the remaining quantity.
     if (patch.stopLoss !== undefined && position.live) {
       await this.moveLiveStop(position, patch.stopLoss, fill.remaining);
       await this.store.updatePosition(position.id, { liveStopOrderId: position.liveStopOrderId ?? undefined });
@@ -1545,37 +1506,6 @@ export class Engine {
       )}) om verlies te beperken bij een echte trendomkeer${position.live ? ' · 🔴 LIVE' : ''}`
     );
     return true;
-  }
-
-  /**
-   * Reduce a live position on MEXC by closing part of it at market — used to
-   * mirror a paper take-profit tranche onto the real account.
-   *
-   * @param position the live position being trimmed.
-   * @param qty base-asset quantity to close, from the paper fill.
-   * @returns true when the reduce order was placed (or there was nothing to
-   *   mirror, e.g. below the venue's minimum size), false when it failed and
-   *   the caller must not book the tranche locally either.
-   */
-  private async reduceLivePosition(position: Position, qty: number): Promise<boolean> {
-    const contractSize = position.liveContractSize || 1;
-    const vol = Math.round(qty / contractSize);
-    if (vol <= 0) return true; // Too small to represent on the venue — nothing to mirror, paper still books it.
-    try {
-      await this.exchange.closePosition({
-        symbol: position.symbol,
-        side: position.side,
-        vol,
-        externalOid: `${position.id}-tp-${Date.now()}`,
-      });
-      return true;
-    } catch (err) {
-      await this.log(
-        'warn',
-        `Live take-profit sluiten mislukt voor ${position.symbol}: ${(err as Error).message} — wordt volgende cyclus opnieuw geprobeerd.`
-      );
-      return false;
-    }
   }
 
   /**
@@ -1643,18 +1573,20 @@ export class Engine {
     bookedPnl: number,
     remaining: number,
     price: number
-  ): Promise<void> {
-    // Mirror the final tranche onto MEXC first — same ordering rule as every
-    // other exit path: a failed real close must not book a local close.
-    if (position.live && remaining > 0) {
-      const reduced = await this.reduceLivePosition(position, remaining);
-      if (!reduced) return;
-    }
+  ): Promise<boolean> {
     if (position.live) {
-      if (position.liveStopOrderId) {
-        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
+      if (!this.exchange.status().enabled) {
+        await this.reportLiveExecutionBlocked();
+        return false;
       }
-      await this.exchange.cancelAllPlanOrders(position.symbol);
+      if (remaining > 0) {
+        const reduced = await this.reduceLivePosition(position, remaining);
+        if (!reduced) return false;
+      }
+      if (position.liveStopOrderId) {
+        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol).catch(() => {});
+      }
+      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
     }
 
     const dir = position.side === 'LONG' ? 1 : -1;
@@ -1677,7 +1609,7 @@ export class Engine {
       realisedPnl: total,
       postMortem,
     });
-    if (!claimed) return;
+    if (!claimed) return false;
 
     // Atomic delta — keeps this credit correct even if another position settles
     // in the same instant.
@@ -1690,6 +1622,7 @@ export class Engine {
       'trade',
       `CLOSE ${position.side} ${position.symbol} · alle targets geraakt · +${net.toFixed(2)}${position.live ? ' · 🔴 LIVE' : ''}`
     );
+    return true;
   }
 
   private async scanAndEnter(): Promise<void> {
@@ -1774,9 +1707,8 @@ export class Engine {
     const held = new Set(open.map((p) => p.symbol));
     const book = atRisk.map((p) => ({ symbol: p.symbol, side: p.side }));
 
-    // Regular slots come from `maxOpenPositions` minus active positions awaiting TP1.
-    // Positions that already hit TP1 have locked in gains and moved their stop to break-even,
-    // freeing up their slot so new trades can be opened without waiting for full exit.
+    // Capacity uses `isPositionDerisked`: TP1 alone does not free a slot unless
+    // the remaining position's stop covers entry fees at break-even.
     let slots = Math.max(0, this.risk.maxOpenPositions - atRisk.length);
     const overflowUsed = Math.max(0, atRisk.length - this.risk.maxOpenPositions);
     let overflow = Math.max(0, this.risk.maxOverflowPositions - overflowUsed);
@@ -1784,12 +1716,12 @@ export class Engine {
     if (slots <= 0 && overflow > 0) {
       this.blockedReason = {
         kind: 'capacity',
-        message: `Portefeuille vol (${atRisk.length}/${this.risk.maxOpenPositions} wachtend op TP1) — alleen nog ruimte voor een setup van ${Math.round(this.risk.highConvictionConfidence * 100)}%+ zekerheid`,
+        message: `Portefeuille vol (${atRisk.length}/${this.risk.maxOpenPositions} nog niet beschermd op fee-covered break-even) — alleen nog ruimte voor een setup van ${Math.round(this.risk.highConvictionConfidence * 100)}%+ zekerheid`,
       };
     } else if (slots <= 0 && overflow <= 0) {
       this.blockedReason = {
         kind: 'capacity',
-        message: `Portefeuille volledig vol (${atRisk.length}/${this.risk.maxOpenPositions + this.risk.maxOverflowPositions} wachtend op TP1 incl. overflow) — wachten op TP1 of exit`,
+        message: `Portefeuille volledig vol (${atRisk.length}/${this.risk.maxOpenPositions + this.risk.maxOverflowPositions} nog niet beschermd op fee-covered break-even incl. overflow) — wachten op risicoreductie of exit`,
       };
     } else {
       this.blockedReason = null;
@@ -1838,11 +1770,11 @@ export class Engine {
         if ((existingPos.scaleInCount ?? 0) >= 1) continue; // Max 1 scale-in (2 tranches total)
         if (existingPos.side !== signal.side) continue;
 
-        // Existing position MUST be derisked (TP1 filled or stop >= entry)
+        // A TP1 flag is insufficient; the stop must cover fees at break-even.
         if (!isPositionDerisked(existingPos)) {
           await this.logSkip(
             signal.symbol,
-            `Bestaande ${signal.symbol} positie staat nog niet op break-even/TP1 — bijschalen (pyramiding) niet toegestaan ter bescherming`
+            `Bestaande ${signal.symbol} positie heeft nog geen fee-covered break-even stop — bijschalen niet toegestaan`
           );
           continue;
         }
@@ -2051,18 +1983,6 @@ export class Engine {
         }
         continue;
       }
-      // Second, fresh-data check right before committing capital. The signal
-      // above can be a few seconds to tens of seconds old by the time a slot
-      // is actually free (earlier signals in this same loop may have just
-      // opened positions) — re-pull the live price and refuse the entry if it
-      // already ran a meaningful chunk of the stop distance against the
-      // planned direction, which means the edge that qualified it has eroded.
-      const confirmed = await this.confirmEntry(signal, plan);
-      if (!confirmed.ok) {
-        await this.logSkip(signal.symbol, `bij dubbele check: ${confirmed.reason}`);
-        continue;
-      }
-
       // 5-Minute (5m) Sniper Trigger: verify micro-reversal on 5m candles right before opening trade
       if (this.risk.ltfSniper5mEnabled !== false) {
         try {
@@ -2075,8 +1995,12 @@ export class Engine {
             );
             continue;
           }
-        } catch {
-          // Non-fatal if 5m kline fails; proceed with 15m/1h confirmation
+        } catch (err) {
+          await this.logSkip(
+            signal.symbol,
+            `5m sniper timing unavailable: ${err instanceof Error ? err.message : String(err)}`
+          );
+          continue;
         }
       }
       if (this.exchange.status().enabled) {
@@ -2088,8 +2012,17 @@ export class Engine {
         }
       }
 
+      // Re-read the mark after timing/venue checks and fully re-size the plan
+      // from that accepted execution price immediately before opening.
+      const confirmed = await this.confirmEntry(signal, plan);
+      if (!confirmed.ok) {
+        await this.logSkip(signal.symbol, `bij dubbele check: ${confirmed.reason}`);
+        continue;
+      }
+      const executionPlan = confirmed.plan;
+
       if (isScaleIn && existingPos) {
-        const scaled = await this.scaleIn(existingPos, plan);
+        const scaled = await this.scaleIn(existingPos, executionPlan);
         if (scaled) {
           this.lastSkipReasons.delete(signal.symbol);
           this.lastEntryAt = Date.now();
@@ -2098,7 +2031,7 @@ export class Engine {
         continue;
       }
 
-      const opened = await this.open(plan, signal);
+      const opened = await this.open(executionPlan, signal, confirmed.price);
       if (!opened) continue;
       this.lastSkipReasons.delete(signal.symbol);
       this.lastEntryAt = Date.now();
@@ -2110,7 +2043,7 @@ export class Engine {
       } else if (open.length >= this.risk.maxOpenPositions) {
         await this.log(
           'info',
-          `${signal.symbol}: nieuwe positie geopend (${open.length + 1}e open positie, eerdere posities hebben TP1 al bereikt en zijn risicovrij).`
+          `${signal.symbol}: nieuwe positie geopend (${open.length + 1}e open positie, eerdere posities zijn beschermd op fee-covered break-even).`
         );
       }
       held.add(signal.symbol);
@@ -2151,9 +2084,12 @@ export class Engine {
     // not normal, so only that case is logged. Warning on both would cry wolf
     // every cycle and train the user to ignore the log.
     const broken: string[] = [];
-    const [btcCandles, learning] = await Promise.all([
+    const [btcCandles, ethCandles, learning] = await Promise.all([
       this.risk.smtFilterEnabled !== false
         ? this.market.candles('BTC_USDT', ENTRY_INTERVAL).catch(() => [] as Candle[])
+        : Promise.resolve([] as Candle[]),
+      this.risk.smtFilterEnabled !== false
+        ? this.market.candles('ETH_USDT', ENTRY_INTERVAL).catch(() => [] as Candle[])
         : Promise.resolve([] as Candle[]),
       this.store.learning(),
     ]);
@@ -2172,14 +2108,16 @@ export class Engine {
             broken.push(`${ticker.symbol} (${candles.length} candles)`);
             return null;
           }
+          const bmCandles = ticker.symbol === 'BTC_USDT' ? ethCandles : btcCandles;
+          const bmSymbol = ticker.symbol === 'BTC_USDT' ? 'ETH_USDT' : 'BTC_USDT';
           return buildSignal(
             ticker,
             candles,
             higher,
             lower,
             learning,
-            ticker.symbol === 'BTC_USDT' ? [] : btcCandles,
-            'BTC_USDT'
+            bmCandles,
+            bmSymbol
           );
         } catch (err) {
           broken.push(`${ticker.symbol} (${(err as Error).message})`);
@@ -2197,21 +2135,18 @@ export class Engine {
       await this.log('warn', `Marktdata ontbreekt voor ${broken.join(', ')}`);
     }
 
-    return results
-      .filter((s): s is Signal => s !== null)
-      .map((s) => ({ ...s, plannedLeverage: previewLeverage(s, this.risk) }))
-      .sort((a, b) => {
-        const aSpurt = a.checks.some((c) => c.name === 'Volume Spurt' && c.passed) ? 0.05 : 0;
-        const bSpurt = b.checks.some((c) => c.name === 'Volume Spurt' && c.passed) ? 0.05 : 0;
-        return b.confidence + bSpurt - (a.confidence + aSpurt);
-      });
+    return rankCandidates(
+      results
+        .filter((s): s is Signal => s !== null)
+        .map((s) => ({ ...s, plannedLeverage: previewLeverage(s, this.risk) }))
+    );
   }
 
   /**
    * Scale into an existing winning position (pyramiding / add to winners).
    *
-   * Only allowed when the existing position is already derisked (TP1 filled
-   * or stop at/above break-even), so additional size never risks the initial capital.
+   * Only allowed when the remaining position's stop covers entry fees at
+   * break-even; TP and break-even flags alone are not sufficient.
    */
   private async scaleIn(existing: Position, plan: TradePlan): Promise<boolean> {
     const fee = plan.notional * FEE;
@@ -2235,43 +2170,28 @@ export class Engine {
         ? Math.max(existing.stopLoss, plan.stopLoss)
         : Math.min(existing.stopLoss, plan.stopLoss);
 
-    // Mirror onto MEXC live exchange if armed
-    if (existing.live && this.exchange.status().enabled) {
+    // Mirror onto live exchange if armed
+    if (existing.live) {
+      if (!this.exchange.status().enabled) {
+        await this.reportLiveExecutionBlocked();
+        return false;
+      }
+      const contractSize = existing.liveContractSize || 1;
+      const vol = Math.max(1, Math.round(addedQty / contractSize));
       try {
-        const detail = await this.market.contractDetail(existing.symbol);
-        const addedVol = Math.round(addedQty / detail.contractSize);
-        if (addedVol < detail.minVol) {
-          await this.log('warn', `Bijschalen ${existing.symbol} overgeslagen: volume onder MEXC minimum`);
-          return false;
-        }
-
-        await this.exchange.placeMarketOrder({
+        const order = await this.exchange.placeMarketOrder({
           symbol: existing.symbol,
           intent: existing.side === 'LONG' ? 'OPEN_LONG' : 'OPEN_SHORT',
-          vol: addedVol,
+          vol,
           leverage: existing.leverage,
-          openType: 'isolated',
           externalOid: `${existing.id}-scale-${Date.now()}`,
         });
-
-        // Cancel old stop and place updated stop for the combined total volume
-        if (existing.liveStopOrderId) {
-          await this.exchange.cancelStopOrder(existing.liveStopOrderId, existing.symbol).catch(() => {});
+        if (!order || !order.orderId) {
+          throw new Error('Exchange retourneerde geen orderId bij scale-in');
         }
-
-        const totalVol = Math.round(newRemainingQty / detail.contractSize);
-        const priceScale = detail.priceScale ?? 4;
-        const slPrice = Number(newStopLoss.toFixed(priceScale));
-        const stop = await this.exchange.placeStopOrder({
-          symbol: existing.symbol,
-          side: existing.side,
-          vol: totalVol,
-          triggerPrice: slPrice,
-          externalOid: `${existing.id}-stop-scaled-${Date.now()}`,
-        });
-        existing.liveStopOrderId = stop.orderId;
+        await this.moveLiveStop(existing, newStopLoss, newRemainingQty);
       } catch (err) {
-        await this.log('warn', `Live bijschalen mislukt voor ${existing.symbol}: ${(err as Error).message}`);
+        await this.log('error', `Live scale-in order mislukt voor ${existing.symbol}: ${(err as Error).message}`);
         return false;
       }
     }
@@ -2320,11 +2240,12 @@ export class Engine {
     return true;
   }
 
-  private async open(plan: TradePlan, signal?: Signal): Promise<boolean> {
+  private async open(plan: TradePlan, signal: Signal, acceptedEntry: number): Promise<boolean> {
     const state = await this.account();
     const fee = plan.notional * FEE;
     // Never let an entry overdraw the free balance.
     if (plan.margin + fee > state.balance) return false;
+    if (!this.planMatchesAcceptedEntry(plan, acceptedEntry, state.equity)) return false;
 
     const position: Position = {
       id: randomUUID(),
@@ -2378,33 +2299,45 @@ export class Engine {
     return true;
   }
 
+  private planMatchesAcceptedEntry(plan: TradePlan, acceptedEntry: number, equity: number): boolean {
+    const directionSign = plan.side === 'LONG' ? 1 : -1;
+    if (
+      !Number.isFinite(acceptedEntry) || acceptedEntry <= 0 || plan.entry !== acceptedEntry ||
+      !Number.isFinite(plan.stopLoss) || plan.stopLoss <= 0 ||
+      directionSign * (plan.entry - plan.stopLoss) <= 0 ||
+      !Number.isFinite(plan.quantity) || plan.quantity <= 0 ||
+      !Number.isFinite(plan.notional) || plan.notional <= 0 ||
+      !Number.isFinite(equity) || equity <= 0
+    ) return false;
+
+    const quantityFromNotional = plan.notional / acceptedEntry;
+    const actualRiskPct =
+      (plan.quantity * (Math.abs(acceptedEntry - plan.stopLoss) + FEE * (acceptedEntry + plan.stopLoss))) / equity;
+    return (
+      Math.abs(plan.quantity - quantityFromNotional) <= Math.max(1e-12, quantityFromNotional * 1e-6) &&
+      actualRiskPct <= Math.max(plan.riskPct, this.risk.maxRiskPct) + 1e-6
+    );
+  }
+
   /**
-   * Place the real MEXC entry order and a resting protective stop for a
-   * position the engine has decided to open, mutating `position` in place with
-   * the venue metadata ({@link Position.live}, order ids, contract size) on
-   * success.
-   *
-   * Sizing is converted from the plan's base-asset quantity into MEXC's `vol`
-   * (contract count) using the venue's contract size for the symbol, and
-   * clamped to the venue's minimum order size — never bumped up, since
-   * silently trading larger than the risk-sized amount would defeat the whole
-   * point of position sizing. Below the minimum, the entry is skipped entirely
-   * rather than risking more than planned.
+   * Fail closed rather than treating an order acknowledgement as a confirmed
+   * fill. The live entry remains disabled until reconciliation exists.
    *
    * @param position the paper position about to be opened.
-   * @returns true when the real order (and its protective stop) were placed
-   *   successfully, or when a stop-order failure still leaves a real,
-   *   directionally-correct position open (logged, not fatal). False when the
-   *   entry itself could not be placed — the caller must not open on paper either.
+   * @returns always false until confirmed-fill reconciliation is implemented.
    */
   private async mirrorOpenLive(position: Position): Promise<boolean> {
+    if (!this.exchange.status().enabled) {
+      await this.reportLiveExecutionBlocked();
+      return false;
+    }
     try {
       const detail = await this.market.contractDetail(position.symbol);
       const vol = Math.round(position.quantity / detail.contractSize);
       if (vol < detail.minVol) {
         await this.log(
           'warn',
-          `Live entry overgeslagen: ${position.symbol} — gesized volume (${vol}) onder het minimum van MEXC (${detail.minVol}). Vergroot de inzet of sla dit signaal over.`
+          `Live entry overgeslagen: ${position.symbol} — gesized volume (${vol}) onder het minimum van de exchange (${detail.minVol}). Vergroot de inzet of sla dit signaal over.`
         );
         return false;
       }
@@ -2412,7 +2345,6 @@ export class Engine {
       const priceScale = detail.priceScale ?? 4;
       const roundPrice = (p: number) => Number(p.toFixed(priceScale));
       const slPrice = position.stopLoss ? roundPrice(position.stopLoss) : undefined;
-      const tpPrice = position.takeProfits?.[0]?.price ? roundPrice(position.takeProfits[0].price) : undefined;
 
       await this.exchange.setLeverage(position.symbol, position.leverage, position.side, 'isolated');
       const opened = await this.exchange.placeMarketOrder({
@@ -2451,10 +2383,6 @@ export class Engine {
           }
 
           if (!stopPlaced) {
-            // Broker-side stop failed even after retry.
-            // Leaving an unhedged/unprotected leveraged position on MEXC without a broker stop
-            // is unacceptable risk (e.g. if Pi loses internet or power).
-            // Attempt an immediate emergency market close on MEXC to protect capital.
             await this.log(
               'error',
               `🚨 Live positie ${position.symbol} geopend maar stop plaatsen mislukt na 2 pogingen: ${(lastErr as Error).message}. Noodsluiting uitvoeren om kapitaal te beschermen...`
@@ -2471,18 +2399,16 @@ export class Engine {
                 kind: 'risk-halt',
                 message: `Stop-order mislukt voor ${position.symbol} — positie automatisch gesloten ter beveiliging.`,
               });
-              return false; // Do not open paper position
+              return false;
             } catch (closeErr) {
-              // Both stop placement and emergency close failed!
-              // We MUST keep position tracked in paper so engine's internal monitor can attempt to close it.
               position.liveStopOrderId = null;
               await this.log(
                 'error',
-                `🚨 CRITIEK: Noodsluiting voor ${position.symbol} MISLUKT: ${(closeErr as Error).message}. Sluit deze positie ONMIDDELLIJK handmatig op MEXC!`
+                `🚨 CRITIEK: Noodsluiting voor ${position.symbol} MISLUKT: ${(closeErr as Error).message}. Sluit deze positie ONMIDDELLIJK handmatig op de exchange!`
               );
               void notify({
                 kind: 'risk-halt',
-                message: `CRITIEK NOODGEVAL: ${position.symbol} open zonder stop én noodsluiting mislukt! Handmatige actie vereist op MEXC!`,
+                message: `CRITIEK NOODGEVAL: ${position.symbol} open zonder stop én noodsluiting mislukt! Handmatige actie vereist op de exchange!`,
               });
             }
           }
@@ -2492,7 +2418,7 @@ export class Engine {
         await this.log('error', `Onverwachte fout bij stop-order afhandeling: ${(err as Error).message}`);
       }
 
-      // Place each Take Profit target in the ladder directly on MEXC
+      // Place each Take Profit target in the ladder directly on the exchange
       if (position.takeProfits?.length) {
         let remainingVol = vol;
         for (let i = 0; i < position.takeProfits.length; i++) {
@@ -2526,26 +2452,82 @@ export class Engine {
     }
   }
 
+  private async reduceLivePosition(position: Position, qty: number): Promise<boolean> {
+    const contractSize = position.liveContractSize || 1;
+    const vol = Math.round(qty / contractSize);
+    if (vol <= 0) return true;
+    try {
+      await this.exchange.closePosition({
+        symbol: position.symbol,
+        side: position.side,
+        vol,
+        externalOid: `${position.id}-tp-${Date.now()}`,
+      });
+      return true;
+    } catch (err) {
+      await this.log(
+        'warn',
+        `Live take-profit sluiten mislukt voor ${position.symbol}: ${(err as Error).message} — wordt volgende cyclus opnieuw geprobeerd.`
+      );
+      return false;
+    }
+  }
+
+  private async moveLiveStop(position: Position, stopPrice: number, remainingQty: number): Promise<void> {
+    if (!position.liveStopOrderId) return;
+    try {
+      await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
+    } catch {
+      // Ignore
+    }
+    const contractSize = position.liveContractSize || 1;
+    const vol = Math.max(1, Math.round(remainingQty / contractSize));
+    try {
+      const stop = await this.exchange.placeStopOrder({
+        symbol: position.symbol,
+        side: position.side,
+        vol,
+        triggerPrice: stopPrice,
+        externalOid: `${position.id}-stop-${Date.now()}`,
+      });
+      position.liveStopOrderId = stop.orderId;
+    } catch (err) {
+      await this.log('warn', `Stop verplaatsen op exchange mislukt voor ${position.symbol}: ${(err as Error).message}`);
+    }
+  }
+
   private async close(
     position: Position,
     price: number,
     reason: NonNullable<Position['exitReason']>
   ): Promise<boolean> {
-    // Mirror onto MEXC first. Exception: LIQUIDATED means the venue has almost
-    // certainly already force-closed the real position itself — sending a
-    // reduce order for a position that no longer exists would just fail and
-    // block the local settle, so that case skips straight to reconciling the
-    // paper book. Every other reason (stop, signal flip, max age, manual,
-    // stale market) requires an active reduce order here.
-    if (position.live && reason !== 'LIQUIDATED' && position.remainingQuantity > 0) {
-      const reduced = await this.reduceLivePosition(position, position.remainingQuantity);
-      if (!reduced) return false;
+    if (this.resetting || this.closingPositions.has(position.id)) return false;
+    this.closingPositions.add(position.id);
+    try {
+      return await this.closeUnlocked(position, price, reason);
+    } finally {
+      this.closingPositions.delete(position.id);
     }
+  }
+
+  private async closeUnlocked(
+    position: Position,
+    price: number,
+    reason: NonNullable<Position['exitReason']>
+  ): Promise<boolean> {
     if (position.live) {
-      if (position.liveStopOrderId) {
-        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
+      if (!this.exchange.status().enabled) {
+        await this.reportLiveExecutionBlocked();
+        return false;
       }
-      await this.exchange.cancelAllPlanOrders(position.symbol);
+      if (reason !== 'LIQUIDATED' && position.remainingQuantity > 0) {
+        const reduced = await this.reduceLivePosition(position, position.remainingQuantity);
+        if (!reduced) return false;
+      }
+      if (position.liveStopOrderId) {
+        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol).catch(() => {});
+      }
+      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
     }
 
     // Only the quantity still open is settled here — tranches closed at earlier
@@ -2647,7 +2629,16 @@ export class Engine {
    * @param plan the sized trade plan awaiting execution.
    * @returns whether the entry still qualifies, with a reason when it does not.
    */
-  private async confirmEntry(signal: Signal, plan: TradePlan): Promise<{ ok: boolean; reason: string }> {
+  private async confirmEntry(
+    signal: Signal,
+    plan: TradePlan
+  ): Promise<{ ok: true; reason: ''; price: number; plan: TradePlan } | { ok: false; reason: string }> {
+    if (
+      plan.symbol !== signal.symbol || plan.side !== signal.side || plan.entry !== signal.price ||
+      !Number.isFinite(plan.entry) || plan.entry <= 0 || !Number.isFinite(plan.stopLoss) || plan.stopLoss <= 0 ||
+      (plan.side === 'LONG' ? plan.stopLoss >= plan.entry : plan.stopLoss <= plan.entry)
+    ) return { ok: false, reason: 'oorspronkelijk plan is ongeldig of past niet bij het signaal' };
+
     const fresh = await this.livePrice(signal.symbol);
     if (!fresh || !Number.isFinite(fresh) || fresh <= 0) {
       return { ok: false, reason: 'geen verse prijs beschikbaar' };
@@ -2657,20 +2648,27 @@ export class Engine {
     if (!Number.isFinite(stopDistance) || stopDistance <= 0) {
       return { ok: false, reason: 'ongeldige stopafstand' };
     }
-    // Positive when price has moved in the ADVERSE direction since the signal
-    // was scored, expressed as a fraction of the planned stop distance.
-    const adverseMove = (dir * (plan.entry - fresh)) / stopDistance;
-    // More than 20% of the stop distance already run against the position
-    // before it is even opened means the entry price used for sizing is stale
-    // or slippage is elevated — skip it this cycle rather than open at a materially
-    // worse price than planned.
-    if (adverseMove > 0.20) {
+    const remainingStopDistance = dir * (fresh - plan.stopLoss);
+    if (remainingStopDistance <= 0) {
+      return { ok: false, reason: 'verse prijs is voorbij de geplande stop' };
+    }
+    const driftInRiskUnits = Math.abs(fresh - plan.entry) / stopDistance;
+    if (driftInRiskUnits > 0.20) {
       return {
         ok: false,
-        reason: `prijs liep ${(adverseMove * 100).toFixed(0)}% van de stopafstand tegen de trade in (max 20%)`,
+        reason: `verse prijs wijkt ${(driftInRiskUnits * 100).toFixed(0)}% van de stopafstand af van de geplande entry (max 20%)`,
       };
     }
-    return { ok: true, reason: '' };
+    const executionSignal = { ...signal, price: fresh };
+    const account = await this.account();
+    const executionPlan = planTrade(executionSignal, account, this.risk);
+    if (
+      !executionPlan || executionPlan.symbol !== signal.symbol || executionPlan.side !== signal.side ||
+      executionPlan.entry !== fresh || !this.planMatchesAcceptedEntry(executionPlan, fresh, account.equity)
+    ) {
+      return { ok: false, reason: 'verse prijs levert geen geldig plan op' };
+    }
+    return { ok: true, reason: '', price: fresh, plan: executionPlan };
   }
 
   /**
@@ -2684,6 +2682,12 @@ export class Engine {
       this.lastSkipReasons.set(symbol, { reason, at: now });
       await this.log('info', `${symbol} overgeslagen: ${reason}`);
     }
+  }
+
+  private async reportLiveExecutionBlocked(): Promise<void> {
+    if (this.liveExecutionWarningLogged) return;
+    this.liveExecutionWarningLogged = true;
+    await this.log('warn', LIVE_EXECUTION_DISABLED_REASON);
   }
 
   private async log(level: EngineEvent['level'], message: string): Promise<void> {

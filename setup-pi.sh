@@ -75,9 +75,6 @@ if [ -n "$STARTUP_CMD" ]; then
 fi
 pm2 save
 
-# Haal lokaal IP-adres op voor de gebruiker
-LOCAL_IP=$(hostname -I | awk '{print $1}')
-
 echo ""
 echo "========================================================="
 echo "   ✅ INSTALLATIE VOLTOOID & BOT ACTIEF!"
@@ -85,8 +82,8 @@ echo "========================================================="
 echo "De bot draait nu 24/7 op de achtergrond en zal direct"
 echo "automatisch opstarten zodra de Raspberry Pi stroom krijgt."
 echo ""
-echo "📱 Open het dashboard op je telefoon of PC:"
-echo "   http://${LOCAL_IP}:3000"
+echo "De API luistert alleen op localhost:3000."
+echo "Configureer een volledige HTTPS reverse proxy voordat je het dashboard vanaf een ander apparaat gebruikt."
 echo ""
 echo "Handige commando's op de Pi:"
 echo "   pm2 status          -> Bekijk status van de bot"

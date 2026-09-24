@@ -15,6 +15,8 @@ import {
 } from './exits.js';
 import { DEFAULT_RISK, concentrationBlock, isPositionDerisked, planTrade, tradingBlockedReason } from './risk.js';
 import { buildSignal } from './strategy.js';
+import { rsi, volumeRatio } from './indicators.js';
+import { rankCandidates } from './candidate-ranking.js';
 import type {
   Account,
   BacktestConfig,
@@ -45,6 +47,8 @@ const INTERVAL_SECONDS: Record<string, number> = {
 /** Bars of history the strategy needs before it can produce a signal. */
 const WARMUP_BARS = 60;
 
+const DAY_SECONDS = 86_400;
+
 /**
  * Bars handed to the strategy per evaluation.
  *
@@ -63,7 +67,129 @@ export type MarketHistory = {
   candles: Candle[];
   /** Confirmation-timeframe candles, oldest first. */
   higher: Candle[];
+  /** Optional historical 15m candles for replaying timing gates on other entry intervals. */
+  timing15m?: Candle[];
+  /** Optional historical 5m candles for replaying the sniper/reversal fallback gates. */
+  timing5m?: Candle[];
 };
+
+type TimingEvidence = { candles: Candle[]; reason: null } | { candles: null; reason: string };
+
+/** Return a bounded, valid, closed and fresh timing window as of replay time. */
+function timingEvidenceAt(
+  source: Candle[] | undefined,
+  time: number,
+  intervalSeconds: number,
+  minimum: number
+): TimingEvidence {
+  if (!Array.isArray(source) || source.length === 0) {
+    return { candles: null, reason: 'historical candles are missing' };
+  }
+
+  let lo = 0;
+  let hi = source.length - 1;
+  let end = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const candle = source[mid];
+    if (!candle || !Number.isFinite(candle.time)) {
+      return { candles: null, reason: 'historical candle timestamps are invalid' };
+    }
+    if (candle.time + intervalSeconds <= time) {
+      end = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (end < 0) return { candles: null, reason: 'no timing candle had closed at replay time' };
+  const start = Math.max(0, end + 1 - Math.max(LOOKBACK, minimum));
+  const candles = source.slice(start, end + 1);
+  if (candles.length < minimum) return { candles: null, reason: 'insufficient closed timing candles' };
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const candle = candles[i];
+    if (
+      !Number.isFinite(candle.time) || !Number.isFinite(candle.open) || candle.open <= 0 ||
+      !Number.isFinite(candle.high) || candle.high <= 0 || !Number.isFinite(candle.low) || candle.low <= 0 ||
+      !Number.isFinite(candle.close) || candle.close <= 0 || !Number.isFinite(candle.volume) || candle.volume < 0 ||
+      candle.high < Math.max(candle.open, candle.close, candle.low) ||
+      candle.low > Math.min(candle.open, candle.close) ||
+      candle.time + intervalSeconds > time ||
+      (i > 0 && candle.time - candles[i - 1].time !== intervalSeconds)
+    ) return { candles: null, reason: 'closed timing candles are invalid or non-contiguous' };
+  }
+
+  const latest = candles[candles.length - 1];
+  const age = time - latest.time;
+  if (age < intervalSeconds) return { candles: null, reason: 'latest timing candle is future or unclosed' };
+  if (age > intervalSeconds * 2) return { candles: null, reason: 'latest timing candle is stale' };
+  return { candles, reason: null };
+}
+
+/** Explain why replay cannot satisfy an enabled live timing gate. */
+export function replayTimingBlockReason(
+  signal: Signal,
+  risk: RiskConfig,
+  timing15m: Candle[] | undefined,
+  timing5m: Candle[] | undefined,
+  time: number
+): string | null {
+  if (risk.microTiming15mEnabled !== false || risk.reversal15mRequired !== false) {
+    const evidence = timingEvidenceAt(timing15m, time, 900, 15);
+    if (!evidence.candles) return `15m timing gate abstained: ${evidence.reason}`;
+  }
+
+  if (risk.microTiming15mEnabled !== false && signal.timingReady !== true) {
+    return '15m micro-timing gate is not confirmed by closed replay candles';
+  }
+
+  if (risk.reversal15mRequired !== false && signal.reversalConfirmed !== true) {
+    if (risk.ltfSniper5mEnabled === false) {
+      return '15m reversal gate is unconfirmed and the 5m fallback is disabled';
+    }
+    const fallback = timingEvidenceAt(timing5m, time, 300, 15);
+    if (!fallback.candles || !replayLtfReversalReady(fallback.candles, signal.side)) {
+      return `15m reversal gate lacks a valid 5m fallback: ${fallback.reason ?? '5m reversal is unconfirmed'}`;
+    }
+  }
+
+  if (risk.ltfSniper5mEnabled !== false) {
+    const evidence = timingEvidenceAt(timing5m, time, 300, 15);
+    if (!evidence.candles) return `5m sniper gate abstained: ${evidence.reason}`;
+    if (!replayLtfReversalReady(evidence.candles, signal.side)) {
+      return '5m sniper gate is not confirmed by closed replay candles';
+    }
+  }
+
+  return null;
+}
+
+/** Replay-time equivalent of the strategy's 5m reversal check, without Date.now(). */
+function replayLtfReversalReady(candles: Candle[], side: Signal['side']): boolean {
+  if (candles.length >= 15) {
+    const value = rsi(candles.map((candle) => candle.close), 14);
+    if (!Number.isFinite(value) || (side === 'LONG' && value > 78) || (side === 'SHORT' && value < 22)) {
+      return false;
+    }
+  }
+
+  const last = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+  const range = Math.max(0.0000001, last.high - last.low);
+  if (side === 'LONG') {
+    const hammer = (Math.min(last.open, last.close) - last.low) / range >= 0.35;
+    return !(
+      last.close < last.open && previous.close < previous.open && last.close < previous.close && !hammer
+    ) && (last.close >= last.open || hammer);
+  }
+
+  const star = (last.high - Math.max(last.open, last.close)) / range >= 0.35;
+  return !(
+    last.close > last.open && previous.close > previous.open && last.close > previous.close && !star
+  ) && (last.close <= last.open || star);
+}
 
 type SimPosition = Position & { entryBar: number };
 
@@ -131,6 +257,14 @@ export class Backtest {
 
   /** Equity at the previous bar, for the per-bar return series. */
   private prevEquity = 0;
+
+  /** Equity base and value of the latest return, replaceable after final settlement. */
+  private lastReturnBase = 0;
+
+  private lastReturnValue = 0;
+
+  /** Simulated timestamp of the most recent entry, in seconds. */
+  private lastEntryTime = 0;
 
   /**
    * @param markets pre-loaded history per market.
@@ -207,8 +341,17 @@ export class Backtest {
     // Snapshot: settling removes entries from this.open as we go.
     const stillOpen = this.open.slice();
     for (const position of stillOpen) {
-      const price = finalPrices.get(position.symbol) ?? position.entry;
-      this.settle(position, price, 'MANUAL', last, timeline.length - 1);
+      const price = finalPrices.get(position.symbol);
+      const market = this.bySymbol.get(position.symbol);
+      const index = market ? this.latestIndexAt(market, last) : -1;
+      if (price === undefined || !market || index < 0) {
+        throw new Error(`geen afsluitprijs beschikbaar voor ${position.symbol}`);
+      }
+      const closedAt = this.closeTime(market.candles[index]);
+      if (closedAt !== last) throw new Error(`verouderde afsluitprijs voor ${position.symbol}`);
+      const closeBar = timeline.indexOf(closedAt);
+      if (closeBar < 0) throw new Error(`geen afsluitbar beschikbaar voor ${position.symbol}`);
+      this.settle(position, price, 'MANUAL', closedAt, closeBar);
     }
 
     // Rewrite the closing point so it reflects the settled book. Without this the
@@ -220,6 +363,7 @@ export class Backtest {
       this.peakEquity > 0 ? Math.max(0, (this.peakEquity - settledEquity) / this.peakEquity) : 0;
     this.maxDrawdown = Math.max(this.maxDrawdown, finalDrawdown);
     this.lastEquity = settledEquity;
+    this.replaceLastReturn(settledEquity);
     this.curve[this.curve.length - 1] = {
       time: last,
       equity: round(settledEquity, 2),
@@ -238,6 +382,18 @@ export class Backtest {
       this.returnSum += r;
       this.returnSquares += r * r;
       this.returnCount += 1;
+      this.lastReturnBase = this.prevEquity;
+      this.lastReturnValue = r;
+    }
+    this.prevEquity = equity;
+  }
+
+  private replaceLastReturn(equity: number): void {
+    if (this.returnCount && this.lastReturnBase > 0) {
+      const next = (equity - this.lastReturnBase) / this.lastReturnBase;
+      this.returnSum += next - this.lastReturnValue;
+      this.returnSquares += next * next - this.lastReturnValue * this.lastReturnValue;
+      this.lastReturnValue = next;
     }
     this.prevEquity = equity;
   }
@@ -246,24 +402,22 @@ export class Backtest {
   private buildTimeline(): number[] {
     const times = new Set<number>();
     for (const market of this.markets) {
-      for (let i = WARMUP_BARS; i < market.candles.length; i += 1) times.add(market.candles[i].time);
+      for (let i = WARMUP_BARS; i < market.candles.length; i += 1) {
+        const closedAt = this.closeTime(market.candles[i]);
+        if (closedAt >= this.config.from && closedAt <= this.config.to) times.add(closedAt);
+      }
     }
     return [...times].sort((a, b) => a - b);
   }
 
-  /** Close price of every market at or before a timestamp. */
+  /** Latest available close price of every market at or before a timestamp. */
   private pricesAt(time: number): Map<string, number> {
     const out = new Map<string, number>();
     for (const market of this.markets) {
-      const bar = this.barAt(market, time);
-      if (bar) out.set(market.symbol, bar.close);
+      const index = this.latestIndexAt(market, time);
+      if (index >= 0) out.set(market.symbol, market.candles[index].close);
     }
     return out;
-  }
-
-  private barAt(market: MarketHistory, time: number): Candle | null {
-    const index = this.indexAt(market, time);
-    return index >= 0 ? market.candles[index] : null;
   }
 
   /**
@@ -275,17 +429,17 @@ export class Backtest {
   private indexAt(market: MarketHistory, time: number): number {
     const candles = market.candles;
     let cursor = this.indexCursor.get(market.symbol) ?? 0;
-    if (cursor < candles.length && candles[cursor].time <= time) {
-      while (cursor + 1 < candles.length && candles[cursor + 1].time <= time) cursor += 1;
+    if (cursor < candles.length && this.closeTime(candles[cursor]) <= time) {
+      while (cursor + 1 < candles.length && this.closeTime(candles[cursor + 1]) <= time) cursor += 1;
       this.indexCursor.set(market.symbol, cursor);
-      return candles[cursor].time === time ? cursor : -1;
+      return this.closeTime(candles[cursor]) === time ? cursor : -1;
     }
 
     let lo = 0;
     let hi = candles.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      const t = candles[mid].time;
+      const t = this.closeTime(candles[mid]);
       if (t === time) {
         this.indexCursor.set(market.symbol, mid);
         return mid;
@@ -294,6 +448,28 @@ export class Backtest {
       else hi = mid - 1;
     }
     return -1;
+  }
+
+  /** Index of the latest candle that had closed at `time`, or -1. */
+  private latestIndexAt(market: MarketHistory, time: number): number {
+    const candles = market.candles;
+    let lo = 0;
+    let hi = candles.length - 1;
+    let latest = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.closeTime(candles[mid]) <= time) {
+        latest = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return latest;
+  }
+
+  private closeTime(candle: Candle): number {
+    return candle.time + (INTERVAL_SECONDS[this.config.interval] || 900);
   }
 
   /**
@@ -319,15 +495,29 @@ export class Backtest {
       // Favourable extreme — the price that would have filled a target.
       const favourable = dir === 1 ? candle.high : candle.low;
 
-      if (isLiquidated(position, adverse)) {
-        this.settle(position, adverse, 'LIQUIDATED', time, bar);
+      if (isLiquidated(position, candle.open)) {
+        this.settle(position, candle.open, 'LIQUIDATED', time, bar);
         continue;
       }
 
       // Pessimistic ordering: when a bar covers both the stop and a target, assume
       // the stop filled first. Anything else would flatter the results.
       if (isStopHit(position, adverse)) {
-        this.settle(position, position.stopLoss, stopReason(position), time, bar);
+        const liquidationBeforeStop = isLiquidated(position, adverse) &&
+          (dir === 1
+            ? position.entry * (1 - 0.9 / position.leverage) >= position.stopLoss
+            : position.entry * (1 + 0.9 / position.leverage) <= position.stopLoss);
+        if (liquidationBeforeStop) {
+          this.settle(position, adverse, 'LIQUIDATED', time, bar);
+        } else {
+          const gappedThroughStop = dir === 1 ? candle.open <= position.stopLoss : candle.open >= position.stopLoss;
+          this.settle(position, gappedThroughStop ? candle.open : position.stopLoss, stopReason(position), time, bar);
+        }
+        continue;
+      }
+
+      if (isLiquidated(position, adverse)) {
+        this.settle(position, adverse, 'LIQUIDATED', time, bar);
         continue;
       }
 
@@ -347,10 +537,18 @@ export class Backtest {
           this.open = this.open.filter((p) => p.id !== position.id);
           continue;
         }
-        const { patch, freedMargin } = partialFillPatch(position, fill, this.exits);
+        const { patch, freedMargin } = partialFillPatch(position, fill, this.exits, this.feeRate);
         Object.assign(position, patch);
         this.balance += freedMargin + fill.bookedPnl;
         this.realised += fill.bookedPnl;
+      }
+
+      // With OHLC-only data, assume the favorable extreme came before the adverse
+      // one; a stop armed by this bar can therefore also be hit within this bar.
+      Object.assign(position, trailPatch(position, favourable, this.exits));
+      if (isStopHit(position, adverse)) {
+        this.settle(position, position.stopLoss, stopReason(position), time, bar);
+        continue;
       }
 
       const ageHours = (time - position.openedAt / 1000) / 3600;
@@ -360,7 +558,7 @@ export class Backtest {
       }
 
       const staleHours = this.risk.maxStaleHours ?? 12;
-      const isDerisked = isPositionDerisked(position);
+      const isDerisked = isPositionDerisked(position, this.feeRate);
       if (!isDerisked && ageHours > staleHours) {
         const dir = direction(position);
         const r = riskUnit(position);
@@ -371,7 +569,6 @@ export class Backtest {
         }
       }
 
-      Object.assign(position, trailPatch(position, favourable, this.exits));
     }
   }
 
@@ -380,7 +577,7 @@ export class Backtest {
     const dayPnlPct = this.dayPnlPct(time, equity);
     const account = this.account(equity);
 
-    const atRisk = this.open.filter((p) => !isPositionDerisked(p));
+    const atRisk = this.open.filter((p) => !isPositionDerisked(p, this.feeRate));
     const blocked = tradingBlockedReason(account, this.open.length, dayPnlPct, this.risk, atRisk.length);
     if (blocked) {
       if (blocked.kind === 'halt') this.blockedBars += 1;
@@ -392,18 +589,24 @@ export class Backtest {
     for (const market of this.markets) {
       if (held.has(market.symbol)) continue;
       const signal = this.signalAt(market, time);
-      if (signal) signals.push(signal);
+      if (!signal) continue;
+      const timing15m = this.timing15mAt(market, time);
+      const timing5m = this.timing5mAt(market, time);
+      if (replayTimingBlockReason(signal, this.risk, timing15m, timing5m, time)) continue;
+      signals.push(signal);
     }
-    signals.sort((a, b) => b.confidence - a.confidence);
+    const ranked = rankCandidates(signals);
+    const cooldownSeconds = Math.max(0, this.risk.entryCooldownMinutes ?? 0) * 60;
 
     let slots = this.risk.maxOpenPositions - atRisk.length;
     let live = account;
     const book = atRisk.map((p) => ({ symbol: p.symbol, side: p.side }));
-    for (const signal of signals) {
+    for (const signal of ranked) {
+      if (cooldownSeconds > 0 && this.lastEntryTime > 0 && time - this.lastEntryTime < cooldownSeconds) break;
       if (slots <= 0) break;
       // Concentration check before sizing: only at-risk positions count against same-side exposure
       if (concentrationBlock(signal, book, this.risk)) continue;
-      const plan = planTrade(signal, live, this.risk);
+      const plan = planTrade(signal, live, this.risk, this.feeRate);
       if (!plan) continue;
       const fee = plan.notional * this.feeRate;
       if (plan.margin + fee > this.balance) continue;
@@ -436,8 +639,10 @@ export class Backtest {
         entryBar: bar,
       };
       this.open.push(position);
+      book.push({ symbol: position.symbol, side: position.side });
       this.balance -= plan.margin + fee;
       this.realised -= fee;
+      this.lastEntryTime = time;
       slots -= 1;
       // Re-read equity so each further entry is sized against the capital that
       // is actually still free after the ones already taken this bar.
@@ -454,29 +659,37 @@ export class Backtest {
     if (index < WARMUP_BARS) return null;
     // Bounded window rather than the whole history — same inputs, linear cost.
     const candles = market.candles.slice(Math.max(0, index + 1 - LOOKBACK), index + 1);
+    if (!Number.isFinite(volumeRatio(candles, 20))) return null;
     const higher = this.higherUpTo(market, time);
 
-    const bar = market.candles[index];
-    const dayAgo = time - 86_400;
-    let volume = 0;
-    let prior = candles[0];
-    for (let i = candles.length - 1; i >= 0; i -= 1) {
-      if (candles[i].time < dayAgo) break;
-      volume += candles[i].volume * candles[i].close;
-      prior = candles[i];
-    }
-    const ticker: Ticker = {
-      symbol: market.symbol,
-      lastPrice: bar.close,
-      // Rolling 24h volume from the replayed window, so the liquidity filter
-      // behaves the way it would have at the time.
-      quoteVolume24h: volume,
-      changeRate24h: prior.close ? (bar.close - prior.close) / prior.close : 0,
-      // Funding is not available historically — treated as neutral rather than
-      // guessed, so the backtest never credits a signal it could not have had.
-      fundingRate: 0,
-    };
-    return buildSignal(ticker, candles, higher);
+    const ticker = ticker24hFromCandles(
+      market.symbol,
+      market.candles,
+      index,
+      time,
+      INTERVAL_SECONDS[this.config.interval] || 900
+    );
+    if (!ticker) return null;
+    return buildSignal(ticker, candles, higher, this.timing15mAt(market, time) ?? []);
+  }
+
+  /** Closed 15m evidence available by replay time; Min15 entry candles are real evidence. */
+  private timing15mAt(market: MarketHistory, time: number): Candle[] | undefined {
+    const source = market.timing15m ?? this.exactTimingSeries(market, 'Min15');
+    return timingEvidenceAt(source, time, 900, 15).candles ?? undefined;
+  }
+
+  /** Closed 5m evidence available by replay time; Min5 entry candles are real evidence. */
+  private timing5mAt(market: MarketHistory, time: number): Candle[] | undefined {
+    const source = market.timing5m ?? this.exactTimingSeries(market, 'Min5');
+    return timingEvidenceAt(source, time, 300, 2).candles ?? undefined;
+  }
+
+  /** Only reuse a series when its declared API interval exactly matches the timing interval. */
+  private exactTimingSeries(market: MarketHistory, interval: 'Min5' | 'Min15'): Candle[] | undefined {
+    if (this.config.interval === interval) return market.candles;
+    if (this.config.higherInterval === interval) return market.higher;
+    return undefined;
   }
 
   /**
@@ -486,9 +699,11 @@ export class Backtest {
    * series on every bar.
    */
   private higherUpTo(market: MarketHistory, time: number): Candle[] {
-    const cutoff = time - this.higherSeconds();
     let end = this.higherCursor.get(market.symbol) ?? 0;
-    while (end < market.higher.length && market.higher[end].time <= cutoff) end += 1;
+    while (
+      end < market.higher.length &&
+      market.higher[end].time + this.higherSeconds() <= time
+    ) end += 1;
     this.higherCursor.set(market.symbol, end);
     return market.higher.slice(Math.max(0, end - LOOKBACK), end);
   }
@@ -655,6 +870,56 @@ export class Backtest {
     const barsPerYear = (365 * 86_400) / (INTERVAL_SECONDS[this.config.interval] || 900);
     return round((mean / sd) * Math.sqrt(barsPerYear), 2);
   }
+}
+
+/** Build honest 24h ticker metadata only from a complete, contiguous candle window. */
+export function ticker24hFromCandles(
+  symbol: string,
+  candles: Candle[],
+  index: number,
+  time: number,
+  intervalSeconds: number
+): Ticker | null {
+  if (
+    !Number.isInteger(intervalSeconds) || intervalSeconds <= 0 || DAY_SECONDS % intervalSeconds !== 0 ||
+    !Number.isInteger(index) || index < 0 || index >= candles.length
+  ) return null;
+
+  const bars = DAY_SECONDS / intervalSeconds;
+  const first = index - bars + 1;
+  if (first < 1) return null;
+  const window = candles.slice(first, index + 1);
+  const prior = candles[first - 1];
+  const current = candles[index];
+  const startTime = time - DAY_SECONDS;
+  if (
+    window.length !== bars || current.time + intervalSeconds !== time ||
+    window[0].time !== startTime || prior.time + intervalSeconds !== startTime ||
+    !Number.isFinite(prior.close) || prior.close <= 0
+  ) return null;
+
+  let quoteVolume24h = 0;
+  for (let i = 0; i < window.length; i += 1) {
+    const candle = window[i];
+    if (
+      (i > 0 && candle.time - window[i - 1].time !== intervalSeconds) ||
+      !Number.isFinite(candle.volume) || candle.volume < 0 ||
+      !Number.isFinite(candle.close) || candle.close <= 0
+    ) return null;
+    quoteVolume24h += candle.volume * candle.close;
+  }
+  if (!Number.isFinite(quoteVolume24h)) return null;
+
+  return {
+    symbol,
+    lastPrice: current.close,
+    quoteVolume24h,
+    changeRate24h: (current.close - prior.close) / prior.close,
+    // No historical funding series is loaded. NaN marks it unavailable; the
+    // current strategy treats unavailable funding as neutral, so funding gates
+    // remain an explicit live/replay parity limitation.
+    fundingRate: Number.NaN,
+  };
 }
 
 function round(value: number, decimals: number): number {

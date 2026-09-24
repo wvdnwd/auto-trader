@@ -20,24 +20,16 @@ export type ExitTuning = {
   /** Move the stop to entry once the first target fills. */
   breakEvenAfterFirst: boolean;
   /**
-   * Extra room, as a fraction of the trade's risk distance (R), given to the
-   * break-even stop after TP1 fills. `0` moves the stop to exactly
-   * entry+fees, which a normal post-target consolidation wobble can trigger
-   * almost immediately. A positive value lets price pull back that much
-   * further before the break-even stop takes over, at the cost of giving back
-   * a little of the profit already banked at TP1 if the pullback turns into a
-   * full reversal.
+   * Additional profit locked beyond exact round-trip fee coverage after TP1,
+   * as a fraction of initial risk. The stop only ratchets in the protective
+   * direction, so this cannot loosen an existing stop or permit a net loss.
    */
   breakEvenBufferR: number;
 };
 
 /**
- * Extra room given to the break-even stop after TP1, as a fraction of the
- * trade's risk distance. Per user request: the old behaviour moved the stop
- * to exactly entry+fees the instant TP1 filled, so a normal one-tick
- * consolidation right after the target closed the runner for a near-zero
- * gain instead of letting it continue. 0.3R gives the runner room to breathe
- * through that wobble.
+ * Extra profit locked beyond exact fee coverage after TP1, as a fraction of
+ * initial risk. This is applied monotonically and never lowers net break-even.
  */
 export const BREAK_EVEN_BUFFER_R = 0.3;
 
@@ -71,6 +63,13 @@ export function riskUnit(position: Position): number {
  */
 export function direction(position: Pick<Position, 'side'>): 1 | -1 {
   return position.side === 'LONG' ? 1 : -1;
+}
+
+function feeCoveredStop(entry: number, dir: 1 | -1, feeRate: number): number | null {
+  if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(feeRate) || feeRate < 0 || feeRate >= 1) {
+    return null;
+  }
+  return entry * (dir === 1 ? (1 + feeRate) / (1 - feeRate) : (1 - feeRate) / (1 + feeRate));
 }
 
 /**
@@ -143,6 +142,14 @@ export function fillTakeProfits(
   price: number,
   feeRate = FEE
 ): PartialFill | null {
+  if (
+    !Number.isFinite(price) || price <= 0 ||
+    !Number.isFinite(feeRate) || feeRate < 0 ||
+    !Number.isFinite(position.entry) || position.entry <= 0 ||
+    !Number.isFinite(position.quantity) || position.quantity <= 0 ||
+    !Number.isFinite(position.remainingQuantity) || position.remainingQuantity <= 0
+  ) return null;
+
   const dir = direction(position);
   const levels = position.takeProfits || [];
   const updated = levels.map((t) => ({ ...t }));
@@ -152,11 +159,17 @@ export function fillTakeProfits(
 
   for (const level of updated) {
     if (level.hit) continue;
+    if (!Number.isFinite(level.price) || level.price <= 0 || !Number.isFinite(level.portion) || level.portion <= 0) {
+      return null;
+    }
     if (dir === 1 ? price < level.price : price > level.price) continue;
-    const qty = position.quantity * level.portion;
+    const available = Math.max(0, position.remainingQuantity - bookedQty);
+    if (available <= 0) break;
+    const qty = Math.min(position.quantity * level.portion, available);
     const gross = dir * (level.price - position.entry) * qty;
     const fee = qty * level.price * feeRate;
     const net = gross - fee;
+    if (!Number.isFinite(qty) || !Number.isFinite(net) || qty <= 0) return null;
     level.hit = true;
     level.hitAt = Date.now();
     level.realised = net;
@@ -179,29 +192,48 @@ export function fillTakeProfits(
  *
  * @param position the position before the fill.
  * @param fill the fill produced by {@link fillTakeProfits}.
+ * @param tuning exit tuning, including the monotonic additional-profit buffer.
+ * @param feeRate per-side taker fee used for exact round-trip coverage (defaults to {@link FEE}).
  * @returns the patch to apply and the collateral released by the closed tranche.
  */
 export function partialFillPatch(
   position: Position,
   fill: PartialFill,
-  tuning: ExitTuning = DEFAULT_EXITS
+  tuning: ExitTuning = DEFAULT_EXITS,
+  feeRate = FEE
 ): { patch: Partial<Position>; freedMargin: number } {
-  const freedMargin = position.margin * (fill.bookedQty / position.quantity);
+  const preFillRemaining = position.remainingQuantity ?? position.quantity;
+  const closedFraction = Number.isFinite(preFillRemaining) && preFillRemaining > 0 && Number.isFinite(fill.bookedQty)
+    ? Math.max(0, Math.min(1, fill.bookedQty / preFillRemaining))
+    : 0;
+  const remainingFraction = Number.isFinite(preFillRemaining) && preFillRemaining > 0 && Number.isFinite(fill.remaining)
+    ? Math.max(0, Math.min(1, fill.remaining / preFillRemaining))
+    : 1;
+  const freedMargin = position.margin * closedFraction;
   const patch: Partial<Position> = {
     takeProfits: fill.levels,
     remainingQuantity: fill.remaining,
     realisedPnl: position.realisedPnl + fill.bookedPnl,
     margin: position.margin - freedMargin,
-    notional: position.notional * (fill.remaining / position.quantity),
+    notional: position.notional * remainingFraction,
   };
-  if (tuning.breakEvenAfterFirst && !position.breakEven) {
-    patch.breakEven = true;
-    // Cover the exit fee, plus a buffer of `breakEvenBufferR` risk units so a
-    // normal post-target consolidation wobble does not immediately stop the
-    // runner out for a near-zero gain — see `breakEvenBufferR` doc comment.
-    const riskDistance = riskUnit(position);
-    const buffer = riskDistance * (tuning.breakEvenBufferR || 0);
-    patch.stopLoss = position.entry + direction(position) * (position.entry * FEE * 2 - buffer);
+  if (tuning.breakEvenAfterFirst) {
+    const dir = direction(position);
+    const coveredStop = feeCoveredStop(position.entry, dir, feeRate);
+    if (coveredStop !== null) {
+      const riskDistance = Number.isFinite(position.initialRisk) && position.initialRisk > 0
+        ? position.initialRisk
+        : Math.abs(position.entry - position.stopLoss);
+      const bufferR = Number.isFinite(tuning.breakEvenBufferR) ? Math.max(0, tuning.breakEvenBufferR) : 0;
+      const bufferedStop = coveredStop + dir * riskDistance * bufferR;
+      const candidate = dir === 1
+        ? Math.max(position.stopLoss, bufferedStop)
+        : Math.min(position.stopLoss, bufferedStop);
+      if (Number.isFinite(candidate)) {
+        patch.stopLoss = candidate;
+        patch.breakEven = dir === 1 ? candidate >= coveredStop : candidate <= coveredStop;
+      }
+    }
   }
   return { patch, freedMargin };
 }
@@ -282,6 +314,24 @@ export type TrimResult = {
   remaining: number;
 };
 
+function validTrimPosition(position: Position): number | null {
+  const remaining = position.remainingQuantity ?? position.quantity;
+  if (
+    (position.side !== 'LONG' && position.side !== 'SHORT') ||
+    !Number.isFinite(position.entry) || position.entry <= 0 ||
+    !Number.isFinite(position.quantity) || position.quantity <= 0 ||
+    !Number.isFinite(remaining) || remaining <= 0 || remaining > position.quantity ||
+    !Number.isFinite(position.stopLoss) || position.stopLoss <= 0 ||
+    !Number.isFinite(position.margin) || position.margin <= 0 ||
+    !Number.isFinite(position.notional) || position.notional <= 0 ||
+    !Number.isFinite(position.realisedPnl) ||
+    !Number.isFinite(position.entryFee) || position.entryFee < 0 ||
+    !Number.isFinite(position.leverage) || position.leverage <= 0 ||
+    !Number.isFinite(position.initialRisk) || position.initialRisk <= 0
+  ) return null;
+  return remaining;
+}
+
 /**
  * Trim part of an open position when the market regime has genuinely turned
  * against it — e.g. a LONG held while the regime now reads TREND_DOWN.
@@ -303,15 +353,27 @@ export function trimForRegimeFlip(
   portion: number,
   feeRate = FEE
 ): TrimResult | null {
-  const remaining = position.remainingQuantity ?? position.quantity;
+  const remaining = validTrimPosition(position);
+  if (
+    remaining === null ||
+    !Number.isFinite(price) || price <= 0 ||
+    !Number.isFinite(portion) || portion <= 0 || portion >= 1 ||
+    !Number.isFinite(feeRate) || feeRate < 0 || feeRate >= 1
+  ) return null;
+
   const trimmedQty = remaining * Math.max(0.05, Math.min(0.95, portion));
-  if (!(trimmedQty > 0) || trimmedQty >= remaining) return null;
+  if (!Number.isFinite(trimmedQty) || trimmedQty <= 0 || trimmedQty >= remaining) return null;
   const gross = direction(position) * (price - position.entry) * trimmedQty;
   const fee = trimmedQty * price * feeRate;
+  const bookedPnl = gross - fee;
+  const remainingAfterTrim = remaining - trimmedQty;
+  if (!Number.isFinite(gross) || !Number.isFinite(fee) || !Number.isFinite(bookedPnl) || !Number.isFinite(remainingAfterTrim)) {
+    return null;
+  }
   return {
     trimmedQty,
-    bookedPnl: gross - fee,
-    remaining: remaining - trimmedQty,
+    bookedPnl,
+    remaining: remainingAfterTrim,
   };
 }
 
@@ -327,13 +389,33 @@ export function regimeTrimPatch(
   position: Position,
   trim: TrimResult
 ): { patch: Partial<Position>; freedMargin: number } {
-  const remaining = position.remainingQuantity ?? position.quantity;
+  const remaining = validTrimPosition(position);
+  if (
+    remaining === null ||
+    !Number.isFinite(trim.trimmedQty) || trim.trimmedQty <= 0 || trim.trimmedQty >= remaining ||
+    !Number.isFinite(trim.bookedPnl) ||
+    !Number.isFinite(trim.remaining) || trim.remaining <= 0 || trim.remaining >= remaining
+  ) return { patch: {}, freedMargin: 0 };
+
+  const expectedRemaining = remaining - trim.trimmedQty;
+  const tolerance = Math.max(1e-12, remaining * 1e-12);
+  if (Math.abs(trim.remaining - expectedRemaining) > tolerance) return { patch: {}, freedMargin: 0 };
+
   const freedMargin = position.margin * (trim.trimmedQty / remaining);
+  const remainingNotional = position.notional * (trim.remaining / remaining);
+  const realisedPnl = position.realisedPnl + trim.bookedPnl;
+  const margin = position.margin - freedMargin;
+  if (
+    !Number.isFinite(freedMargin) || freedMargin <= 0 || freedMargin > position.margin ||
+    !Number.isFinite(remainingNotional) || remainingNotional <= 0 ||
+    !Number.isFinite(realisedPnl) || !Number.isFinite(margin) || margin < 0
+  ) return { patch: {}, freedMargin: 0 };
+
   const patch: Partial<Position> = {
     remainingQuantity: trim.remaining,
-    realisedPnl: position.realisedPnl + trim.bookedPnl,
-    margin: position.margin - freedMargin,
-    notional: position.notional * (trim.remaining / remaining),
+    realisedPnl,
+    margin,
+    notional: remainingNotional,
     regimeTrimmed: true,
   };
   return { patch, freedMargin };
@@ -438,22 +520,25 @@ export function chandelierStop(
  * @param position open position.
  * @param price current mark price.
  * @param thresholdR R multiple to trigger early protection (default 1.2R).
+ * @param feeRate per-side taker fee used for exact round-trip coverage (defaults to {@link FEE}).
  * @returns new stop price or null if not triggered.
  */
 export function earlyProfitProtect(
   position: Position,
   price: number,
-  thresholdR = 1.2
+  thresholdR = 1.2,
+  feeRate = FEE
 ): { stopLoss: number } | null {
   if (position.breakEven) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
   const rUnit = riskUnit(position);
   if (!(rUnit > 0)) return null;
   const dir = direction(position);
   const currentR = (dir * (price - position.entry)) / rUnit;
   if (currentR < thresholdR) return null;
 
-  // Set stop to cover round-trip taker fees
-  const targetStop = position.entry + dir * (position.entry * FEE * 2);
+  const targetStop = feeCoveredStop(position.entry, dir, feeRate);
+  if (targetStop === null) return null;
   const isBetter = dir === 1 ? targetStop > position.stopLoss : targetStop < position.stopLoss;
   if (!isBetter) return null;
   return { stopLoss: targetStop };

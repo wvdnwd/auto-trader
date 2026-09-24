@@ -56,25 +56,28 @@ export const GOLDEN_ZONE: [number, number] = [0.382, 0.618];
  * @param price reference price to measure confluence against, defaults to the last close.
  * @param lookback number of trailing candles that define the swing, defaults to 60.
  * @returns the computed levels, or null when there is not enough data or the
- *   swing has zero range (a flat market has no meaningful Fibonacci levels).
+ *   lookback is invalid, the swing has zero range, or the latest high and low
+ *   are on the same candle so swing direction cannot be inferred.
  */
 export function computeFibLevels(
   candles: Candle[],
   price?: number,
   lookback = 100
 ): FibLevels | null {
-  if (candles.length < 5) return null;
+  if (!Number.isInteger(lookback) || lookback <= 0 || candles.length < 5) return null;
   const window = candles.slice(-lookback);
+  if (window.length < 5) return null;
   let highIdx = 0;
   let lowIdx = 0;
   for (let i = 1; i < window.length; i += 1) {
-    if (window[i].high > window[highIdx].high) highIdx = i;
-    if (window[i].low < window[lowIdx].low) lowIdx = i;
+    // On equal extremes, use the latest occurrence to identify the latest leg.
+    if (window[i].high >= window[highIdx].high) highIdx = i;
+    if (window[i].low <= window[lowIdx].low) lowIdx = i;
   }
   const swingHigh = window[highIdx].high;
   const swingLow = window[lowIdx].low;
   const range = swingHigh - swingLow;
-  if (!Number.isFinite(range) || range <= 0) return null;
+  if (!Number.isFinite(range) || range <= 0 || highIdx === lowIdx) return null;
 
   // The swing that happened LAST defines the active leg: if the low is the more
   // recent extreme, price impulsed down and any recovery is a retracement UP
@@ -133,20 +136,48 @@ function goldenZoneBand(fib: FibLevels): [number | null, number | null] {
 }
 
 /**
- * Whether price has WICKED into the golden zone within the last few candles,
- * even if it closed back outside it. A brief intrabar poke into the zone that
- * immediately reverses is the same "tag and reject" behaviour traders watch
- * for on a chart — checking only the closing price misses it entirely, since
- * a fast reclaim can close a 15m candle right back outside the band.
+ * Whether a recent candle wicked into and then directionally rejected the
+ * golden zone without a close invalidating the swing beyond the 0.786 level.
+ * Freshness is expressed in supplied bars because Candle has no timeframe.
  *
  * @param fib levels computed by {@link computeFibLevels}.
  * @param candles OHLCV candles, oldest first — only the trailing `lookback` are checked.
  * @param lookback how many of the most recent candles to check, defaults to 5.
- * @returns true when any of the recent candles' high/low range overlaps the golden zone band.
+ * @returns true when an ordered recent candle touches and rejects the zone and
+ *   no candle in that window closes beyond the 0.786 invalidation level.
  */
 export function goldenZoneWickTouch(fib: FibLevels, candles: Candle[], lookback = 5): boolean {
   const [lo, hi] = goldenZoneBand(fib);
-  if (lo === null || hi === null) return false;
+  const invalidation = fib.retracements.find((level) => level.ratio === 0.786);
+  if (
+    lo === null ||
+    hi === null ||
+    !invalidation ||
+    !Number.isInteger(lookback) ||
+    lookback < 1 ||
+    candles.length === 0 ||
+    candles.some(
+      (c, index) =>
+        !Number.isFinite(c.time) ||
+        !Number.isFinite(c.open) ||
+        !Number.isFinite(c.high) ||
+        !Number.isFinite(c.low) ||
+        !Number.isFinite(c.close) ||
+        c.low > c.high ||
+        (index > 0 && candles[index - 1].time >= c.time)
+    )
+  ) {
+    return false;
+  }
   const recent = candles.slice(-lookback);
-  return recent.some((c) => c.high >= lo && c.low <= hi);
+  const invalidated = recent.some((c) =>
+    fib.direction === 'UP' ? c.close <= invalidation.price : c.close >= invalidation.price
+  );
+  if (invalidated) return false;
+
+  return recent.some((c) => {
+    const touched = c.high >= lo && c.low <= hi;
+    const rejected = fib.direction === 'UP' ? c.close > hi : c.close < lo;
+    return touched && rejected;
+  });
 }

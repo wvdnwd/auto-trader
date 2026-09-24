@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MexcExchangeAdapter,
+  LIVE_EXECUTION_DISABLED_REASON,
   hasExchangeCredentials,
   isLiveTradingEnabled,
   sanitizeExternalOid,
@@ -65,25 +66,16 @@ describe('signRequest', () => {
 });
 
 describe('credential and go-live gating', () => {
-  it('reports not configured when no env vars are set', () => {
-    delete process.env.MEXC_API_KEY;
-    delete process.env.MEXC_API_SECRET;
-    delete process.env.LIVE_TRADING_ENABLED;
-    expect(hasExchangeCredentials()).toBe(false);
-    expect(isLiveTradingEnabled()).toBe(false);
+  it('recognizes supplied credentials without allowing live execution', () => {
+    const supplied = { apiKey: 'test-key', apiSecret: 'test-secret' };
+    expect(hasExchangeCredentials(supplied)).toBe(true);
+    expect(isLiveTradingEnabled(supplied)).toBe(false);
   });
 
-  it('requires the explicit go-live flag on top of credentials', () => {
-    process.env.MEXC_API_KEY = 'k';
-    process.env.MEXC_API_SECRET = 's';
-    expect(hasExchangeCredentials()).toBe(true);
-    // Credentials alone must never be enough to arm live trading.
+  it('does not configure itself without explicit credentials', () => {
+    const adapter = new MexcExchangeAdapter('', '');
+    expect(adapter.isConfigured()).toBe(false);
     expect(isLiveTradingEnabled()).toBe(false);
-    process.env.LIVE_TRADING_ENABLED = 'true';
-    expect(isLiveTradingEnabled()).toBe(true);
-    delete process.env.MEXC_API_KEY;
-    delete process.env.MEXC_API_SECRET;
-    delete process.env.LIVE_TRADING_ENABLED;
   });
 });
 
@@ -95,22 +87,44 @@ describe('MexcExchangeAdapter', () => {
       configured: false,
       enabled: false,
       baseUrl: adapter.status().baseUrl,
+      executionDisabledReason: LIVE_EXECUTION_DISABLED_REASON,
+      venue: 'mexc',
     });
   });
 
-  it('refuses to sign a request without credentials', async () => {
+  it('fails closed before signing or sending a request without credentials', async () => {
     const adapter = new MexcExchangeAdapter('', '');
     await expect(
       adapter.placeMarketOrder({ symbol: 'BTC_USDT', intent: 'OPEN_LONG', vol: 1, leverage: 5 })
-    ).rejects.toThrow(/niet geconfigureerd/);
+    ).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
   });
 
-  it('reports enabled only once both credentials and the go-live flag are set', () => {
+  it('reports configured but never enabled even with supplied credentials', () => {
     const adapter = new MexcExchangeAdapter('key', 'secret');
     expect(adapter.status().configured).toBe(true);
     expect(adapter.status().enabled).toBe(false);
-    process.env.LIVE_TRADING_ENABLED = 'true';
-    expect(adapter.status().enabled).toBe(true);
-    delete process.env.LIVE_TRADING_ENABLED;
+    expect(adapter.status().executionDisabledReason).toBe(LIVE_EXECUTION_DISABLED_REASON);
+  });
+
+  it('rejects all order, protection, cancellation, and leverage mutations before network I/O', async () => {
+    const adapter = new MexcExchangeAdapter('key', 'secret');
+    await expect(adapter.placeMarketOrder({
+      symbol: 'BTC_USDT', intent: 'OPEN_LONG', vol: 1, leverage: 5,
+    })).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.closePosition({ symbol: 'BTC_USDT', side: 'LONG', vol: 1 }))
+      .rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.placeStopOrder({
+      symbol: 'BTC_USDT', side: 'LONG', vol: 1, triggerPrice: 1,
+    })).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.placeTakeProfitOrder({
+      symbol: 'BTC_USDT', side: 'LONG', vol: 1, triggerPrice: 1,
+    })).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.cancelOrder('order-id')).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.cancelStopOrder('stop-id', 'BTC_USDT'))
+      .rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.cancelPlanOrders([])).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.cancelAllPlanOrders('BTC_USDT')).rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
+    await expect(adapter.setLeverage('BTC_USDT', 5, 'LONG'))
+      .rejects.toThrow(LIVE_EXECUTION_DISABLED_REASON);
   });
 });

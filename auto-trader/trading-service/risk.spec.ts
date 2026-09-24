@@ -2,7 +2,9 @@ import {
   DEFAULT_RISK,
   concentrationBlock,
   correlationGroup,
+  isPositionDerisked,
   planTrade,
+  previewLeverage,
   tradingBlockedReason,
 } from './risk.js';
 import type { Account, Signal } from './types.js';
@@ -64,19 +66,23 @@ describe('trade sizing', () => {
     const plan = planTrade(highConviction, account, DEFAULT_RISK);
     expect(plan).not.toBeNull();
     const expectedStakePct = (DEFAULT_RISK.targetStakePct as number) * Math.min(1, 8 / plan!.leverage);
-    expect(plan!.margin).toBeCloseTo(account.equity * expectedStakePct, 0);
+    expect(plan!.margin).toBeLessThanOrEqual(account.equity * expectedStakePct);
     // Per-trade cap is `targetStakePct` of equity (20%) directly, not the
     // margin budget split evenly across all slots — see doc comment in
     // planTrade on `perTradeCap`.
     const perTradeCap = account.equity * (DEFAULT_RISK.targetStakePct as number);
     expect(plan!.margin).toBeLessThanOrEqual(perTradeCap + 0.01);
     expect(plan!.leverage).toBeLessThanOrEqual(DEFAULT_RISK.maxLeverage);
+    const stopLossFraction =
+      Math.abs(plan!.entry - plan!.stopLoss) / plan!.entry +
+      0.0006 * (plan!.entry + plan!.stopLoss) / plan!.entry;
+    expect(plan!.notional * stopLossFraction).toBeLessThanOrEqual(account.equity * DEFAULT_RISK.maxRiskPct);
 
-    // A signal barely past minConfidence stakes much less than one at
-    // highConvictionConfidence.
+    // A signal barely past minConfidence receives a smaller risk budget than
+    // one at highConvictionConfidence, even if its lower leverage changes margin.
     const barelyIn = { ...signal, confidence: DEFAULT_RISK.minConfidence + 0.001 };
     const lowPlan = planTrade(barelyIn, account, DEFAULT_RISK)!;
-    expect(lowPlan.margin).toBeLessThan(plan!.margin);
+    expect(lowPlan.riskPct).toBeLessThan(plan!.riskPct);
   });
 
   it('keeps the stop loss inside the liquidation price', () => {
@@ -101,6 +107,97 @@ describe('trade sizing', () => {
     expect(planTrade(signal, { ...account, balance: 1, equity: 1 }, DEFAULT_RISK)).toBeNull();
     expect(planTrade({ ...signal, price: 0 }, account, DEFAULT_RISK)).toBeNull();
     expect(planTrade({ ...signal, atrPct: NaN }, account, DEFAULT_RISK)).toBeNull();
+    expect(planTrade(signal, { ...account, balance: NaN }, DEFAULT_RISK)).toBeNull();
+    expect(planTrade(signal, account, { ...DEFAULT_RISK, maxRiskPct: NaN })).toBeNull();
+  });
+
+  it('keeps fee-inclusive realized stop loss under the risk cap after cent rounding', () => {
+    const plan = planTrade({ ...signal, atrPct: 0.0137, confidence: 0.84 }, account, DEFAULT_RISK)!;
+    const stopLossFraction =
+      Math.abs(plan.entry - plan.stopLoss) / plan.entry +
+      0.0006 * (plan.entry + plan.stopLoss) / plan.entry;
+
+    expect(plan.margin * 100).toBeCloseTo(Math.round(plan.margin * 100), 8);
+    expect(plan.notional * stopLossFraction).toBeLessThanOrEqual(account.equity * DEFAULT_RISK.maxRiskPct);
+    expect(plan.riskPct).toBeLessThanOrEqual(DEFAULT_RISK.maxRiskPct);
+  });
+
+  it('includes a configured higher entry-and-stop fee inside the risk cap for both sides', () => {
+    const feeRate = 0.003;
+    for (const side of ['LONG', 'SHORT'] as const) {
+      const plan = planTrade({ ...signal, side }, account, DEFAULT_RISK, feeRate);
+      expect(plan).not.toBeNull();
+      const stopLossFraction =
+        Math.abs(plan!.entry - plan!.stopLoss) / plan!.entry +
+        feeRate * (plan!.entry + plan!.stopLoss) / plan!.entry;
+      expect(plan!.notional * stopLossFraction).toBeLessThanOrEqual(account.equity * DEFAULT_RISK.maxRiskPct);
+      expect(plan!.riskPct).toBeLessThanOrEqual(DEFAULT_RISK.maxRiskPct);
+    }
+  });
+
+  it('falls back to ATR for wrong-side swing anchors', () => {
+    const atrLong = planTrade(signal, account, DEFAULT_RISK)!;
+    const wrongLong = planTrade({ ...signal, swingLow: signal.price * 1.01 }, account, DEFAULT_RISK)!;
+    const atrShort = planTrade({ ...signal, side: 'SHORT' }, account, DEFAULT_RISK)!;
+    const wrongShort = planTrade(
+      { ...signal, side: 'SHORT', swingHigh: signal.price * 0.99 },
+      account,
+      DEFAULT_RISK
+    )!;
+
+    expect(wrongLong.stopLoss).toBe(atrLong.stopLoss);
+    expect(wrongShort.stopLoss).toBe(atrShort.stopLoss);
+  });
+
+  it('uses the same validated scalp stop geometry for long and short previews', () => {
+    for (const side of ['LONG', 'SHORT'] as const) {
+      const entry = signal.price;
+      const scalp = {
+        eligible: true,
+        side,
+        targetPrice: entry * (side === 'LONG' ? 1.025 : 0.975),
+        targetReason: 'test',
+        stopLoss: entry * (side === 'LONG' ? 0.99 : 1.01),
+        rrEstimate: 2.5,
+      };
+      const marketStructure: NonNullable<Signal['marketStructure']> = {
+        trend: side === 'LONG' ? 'BULLISH' : 'BEARISH',
+        recentPivots: [],
+        activeFVGs: [],
+        imbalanceScalp: scalp,
+      };
+      const scalpSignal = { ...signal, side, marketStructure };
+      const scalpPlan = planTrade(scalpSignal, account, DEFAULT_RISK)!;
+      const atrPlan = planTrade({ ...scalpSignal, marketStructure: null }, account, DEFAULT_RISK)!;
+
+      expect(scalpPlan.stopLoss).toBe(scalp.stopLoss);
+      expect(scalpPlan.stopLoss).not.toBe(atrPlan.stopLoss);
+      expect(previewLeverage(scalpSignal, DEFAULT_RISK)).toBe(scalpPlan.leverage);
+    }
+  });
+
+  it('rejects eligible scalps with a wrong-side stop or target in both plan and preview', () => {
+    for (const side of ['LONG', 'SHORT'] as const) {
+      const entry = signal.price;
+      const direction = side === 'LONG' ? 1 : -1;
+      const scalpSignal = (stopLoss: number, targetPrice: number) => ({
+        ...signal,
+        side,
+        marketStructure: {
+          trend: side === 'LONG' ? 'BULLISH' as const : 'BEARISH' as const,
+          recentPivots: [],
+          activeFVGs: [],
+          imbalanceScalp: { eligible: true, side, targetPrice, targetReason: 'test', stopLoss, rrEstimate: 1 },
+        },
+      });
+      const invalidStop = scalpSignal(entry + direction * 100, entry + direction * 200);
+      const invalidTarget = scalpSignal(entry - direction * 100, entry - direction * 200);
+
+      for (const invalid of [invalidStop, invalidTarget]) {
+        expect(planTrade(invalid, account, DEFAULT_RISK)).toBeNull();
+        expect(previewLeverage(invalid, DEFAULT_RISK)).toBeNull();
+      }
+    }
   });
 
   it('halves the risk budget while in drawdown', () => {
@@ -293,5 +390,52 @@ describe('concentration limits', () => {
 
   it('allows the first position in an empty book', () => {
     expect(concentrationBlock({ symbol: 'BTC_USDT', side: 'LONG' }, [], DEFAULT_RISK)).toBeNull();
+  });
+});
+
+describe('position derisking', () => {
+  const openLong = {
+    quantity: 100,
+    remainingQuantity: 50,
+    entry: 100,
+    stopLoss: 95,
+    side: 'LONG' as const,
+  };
+
+  it('does not treat a loss trim alone as derisking', () => {
+    expect(isPositionDerisked(openLong)).toBe(false);
+  });
+
+  it('does not release capacity on a TP flag while the remaining stop is adverse', () => {
+    expect(
+      isPositionDerisked({
+        ...openLong,
+        takeProfits: [{ hit: true }],
+      })
+    ).toBe(false);
+  });
+
+  it('requires a valid position and a fee-covered stop rather than trusting flags', () => {
+    expect(isPositionDerisked({ ...openLong, stopLoss: 100 })).toBe(false);
+    expect(isPositionDerisked({ ...openLong, stopLoss: 100, breakEven: true })).toBe(false);
+    expect(isPositionDerisked({ ...openLong, stopLoss: 101, trailingArmed: true })).toBe(true);
+    expect(isPositionDerisked({ ...openLong, quantity: NaN, stopLoss: 101 })).toBe(false);
+    expect(isPositionDerisked({ ...openLong, remainingQuantity: 101, stopLoss: 101 })).toBe(false);
+
+    const openShort = { ...openLong, side: 'SHORT' as const, stopLoss: 101 };
+    expect(isPositionDerisked(openShort)).toBe(false);
+    expect(isPositionDerisked({ ...openShort, stopLoss: 99.8 })).toBe(true);
+  });
+
+  it('uses the configured fee rate when deciding whether either side is derisked', () => {
+    const feeRate = 0.003;
+    const longCovered = 100 * ((1 + feeRate) / (1 - feeRate));
+    const shortCovered = 100 * ((1 - feeRate) / (1 + feeRate));
+    expect(isPositionDerisked({ ...openLong, stopLoss: longCovered }, feeRate)).toBe(true);
+    expect(isPositionDerisked({ ...openLong, stopLoss: 100.1 }, feeRate)).toBe(false);
+    expect(
+      isPositionDerisked({ ...openLong, side: 'SHORT', stopLoss: shortCovered }, feeRate)
+    ).toBe(true);
+    expect(isPositionDerisked({ ...openLong, side: 'SHORT', stopLoss: 99.9 }, feeRate)).toBe(false);
   });
 });

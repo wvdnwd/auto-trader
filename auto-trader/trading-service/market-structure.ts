@@ -323,7 +323,7 @@ export function detectLiquiditySweep(
  *
  * Crucial SMC distinction:
  * - A wick past a level is a liquidity sweep.
- * - A candle BODY CLOSE past the structural level confirms a true BOS or MSS/CHoCH.
+ * - A candle CLOSE past the structural level confirms a true BOS or MSS/CHoCH.
  *
  * @param candles OHLCV series.
  * @param pivots confirmed swing points.
@@ -360,22 +360,37 @@ export function detectMarketStructureBreaks(
   let lastBreak: StructureBreak | null = null;
   const recentWindow = candles.slice(-20);
 
-  // Scan recent candles for structure breaks with candle body close
+  // Only a close-to-close crossing is a new break. Staying beyond a level must
+  // not keep emitting the same event on every subsequent candle.
   for (let idx = 0; idx < recentWindow.length; idx += 1) {
     const c = recentWindow[idx];
-    const candleBodyHigh = Math.max(c.open, c.close);
-    const candleBodyLow = Math.min(c.open, c.close);
+    const absoluteIndex = candles.length - recentWindow.length + idx;
+    const previousClose = candles[absoluteIndex - 1]?.close;
     const candleRange = Math.abs(c.close - c.open);
+    const bullishCross =
+      c.time > lastHigh.time &&
+      Number.isFinite(previousClose) &&
+      previousClose <= lastHigh.price &&
+      c.close > lastHigh.price;
+    const bearishCross =
+      c.time > lastLow.time &&
+      Number.isFinite(previousClose) &&
+      previousClose >= lastLow.price &&
+      c.close < lastLow.price;
+
+    // Corrupt/overlapping levels can make one close appear to break both sides.
+    // Do not invent a direction in that case.
+    if (bullishCross && bearishCross) continue;
 
     // Bullish breaks
-    if (c.time > lastHigh.time && candleBodyHigh > lastHigh.price) {
+    if (bullishCross) {
       const isCHoCH = trend === 'BEARISH' || lastHigh.type === 'LH';
       const displacement = candleRange > (c.high - c.low) * 0.6;
       lastBreak = {
         type: isCHoCH ? 'CHoCH' : 'BOS',
         direction: 'BULLISH',
         brokenLevel: lastHigh.price,
-        candleIndex: candles.length - recentWindow.length + idx,
+        candleIndex: absoluteIndex,
         time: c.time,
         displacement,
       };
@@ -383,14 +398,14 @@ export function detectMarketStructureBreaks(
     }
 
     // Bearish breaks
-    if (c.time > lastLow.time && candleBodyLow < lastLow.price) {
+    if (bearishCross) {
       const isCHoCH = trend === 'BULLISH' || lastLow.type === 'HL';
       const displacement = candleRange > (c.high - c.low) * 0.6;
       lastBreak = {
         type: isCHoCH ? 'CHoCH' : 'BOS',
         direction: 'BEARISH',
         brokenLevel: lastLow.price,
-        candleIndex: candles.length - recentWindow.length + idx,
+        candleIndex: absoluteIndex,
         time: c.time,
         displacement,
       };
@@ -404,9 +419,9 @@ export function detectMarketStructureBreaks(
 /**
  * Plan an Imbalance / Golden Zone Retracement Scalp.
  *
- * When a sweep of liquidity (BSL/SSL) occurs and is confirmed by an opposing micro-shift,
- * the market has high probability of retracing to fill the active Fair Value Gap or
- * retest the Fibonacci 0.618 Golden Zone.
+ * After a liquidity sweep (BSL/SSL), estimate a target at an opposing active
+ * Fair Value Gap or Fibonacci retracement. This API receives no micro-shift
+ * confirmation, so an eligible result does not imply that such a shift occurred.
  */
 export function planImbalanceScalp(
   candles: Candle[],
@@ -440,8 +455,10 @@ export function planImbalanceScalp(
       targetPrice = fvgBelow.midpoint;
       targetReason = `Fair Value Gap midpoint ($${fvgBelow.midpoint.toFixed(4)})`;
     } else if (fib && fib.direction === 'UP') {
-      const gZone = fib.retracements.find((r) => r.ratio === 0.618 || r.ratio === 0.5);
-      if (gZone && gZone.price < currentPrice) {
+      const gZone =
+        fib.retracements.find((r) => r.ratio === 0.618 && r.price < currentPrice) ??
+        fib.retracements.find((r) => r.ratio === 0.5 && r.price < currentPrice);
+      if (gZone) {
         targetPrice = gZone.price;
         targetReason = `Fibonacci Golden Zone ${(gZone.ratio * 100).toFixed(1)}% ($${gZone.price.toFixed(4)})`;
       }
@@ -481,8 +498,10 @@ export function planImbalanceScalp(
       targetPrice = fvgAbove.midpoint;
       targetReason = `Fair Value Gap midpoint ($${fvgAbove.midpoint.toFixed(4)})`;
     } else if (fib && fib.direction === 'DOWN') {
-      const gZone = fib.retracements.find((r) => r.ratio === 0.618 || r.ratio === 0.5);
-      if (gZone && gZone.price > currentPrice) {
+      const gZone =
+        fib.retracements.find((r) => r.ratio === 0.618 && r.price > currentPrice) ??
+        fib.retracements.find((r) => r.ratio === 0.5 && r.price > currentPrice);
+      if (gZone) {
         targetPrice = gZone.price;
         targetReason = `Fibonacci Golden Zone ${(gZone.ratio * 100).toFixed(1)}% ($${gZone.price.toFixed(4)})`;
       }
@@ -520,6 +539,12 @@ export function computeVolumeProfile(
   lookback = 100,
   bins = 40
 ): { poc: number; vah: number; val: number } | null {
+  if (!Number.isSafeInteger(lookback) || lookback <= 0) {
+    throw new RangeError('volume profile lookback must be a positive safe integer');
+  }
+  if (!Number.isSafeInteger(bins) || bins <= 0) {
+    throw new RangeError('volume profile bins must be a positive safe integer');
+  }
   if (candles.length < 10) return null;
   const slice = candles.slice(-lookback);
   let minPrice = Infinity;
@@ -587,9 +612,9 @@ export function computeVolumeProfile(
   const vah = minPrice + (upperIdx + 1) * binStep;
 
   return {
-    poc: Number(poc.toFixed(6)),
-    vah: Number(vah.toFixed(6)),
-    val: Number(val.toFixed(6)),
+    poc,
+    vah,
+    val,
   };
 }
 
@@ -611,80 +636,134 @@ export function detectSmtDivergence(
   lookback = 50,
   benchmarkSymbol = 'BTC_USDT'
 ): { type: 'BULLISH' | 'BEARISH'; reason: string; benchmarkSymbol: string } | null {
-  if (assetCandles.length < 20 || benchmarkCandles.length < 20) return null;
+  if (
+    assetCandles.length < 20 ||
+    benchmarkCandles.length < 20 ||
+    !Number.isInteger(lookback) ||
+    lookback < 20
+  ) {
+    return null;
+  }
 
-  const assetSlice = assetCandles.slice(-lookback);
-  const benchSlice = benchmarkCandles.slice(-lookback);
+  const hasStrictTimes = (candles: Candle[]) =>
+    candles.every(
+      (c, index) =>
+        Number.isFinite(c.time) && (index === 0 || candles[index - 1].time < c.time)
+    );
+  if (!hasStrictTimes(assetCandles) || !hasStrictTimes(benchmarkCandles)) return null;
+
+  const medianSpacing = (candles: Candle[]) => {
+    const gaps = candles.slice(1).map((c, i) => c.time - candles[i].time).sort((a, b) => a - b);
+    return gaps[Math.floor(gaps.length / 2)];
+  };
+  const assetSpacing = medianSpacing(assetCandles);
+  const benchmarkSpacing = medianSpacing(benchmarkCandles);
+  if (!assetSpacing || assetSpacing !== benchmarkSpacing) return null;
+
+  // Pair candles by their open timestamp before comparing pivots. Equal array
+  // indices are not evidence that two feeds describe the same market interval.
+  const benchmarkByTime = new Map(benchmarkCandles.map((c) => [c.time, c]));
+  const matched = assetCandles
+    .filter((c) => benchmarkByTime.has(c.time))
+    .map((asset) => ({ asset, benchmark: benchmarkByTime.get(asset.time)! }));
+  const latestMatchedTime = matched[matched.length - 1]?.asset.time;
+  const assetTailTime = assetCandles[assetCandles.length - 1].time;
+  const benchmarkTailTime = benchmarkCandles[benchmarkCandles.length - 1].time;
+  if (
+    latestMatchedTime === undefined ||
+    assetTailTime - latestMatchedTime > assetSpacing ||
+    benchmarkTailTime - latestMatchedTime > benchmarkSpacing
+  ) {
+    return null;
+  }
+
+  const aligned = matched.slice(-lookback);
+  if (aligned.length < 20) return null;
+
+  const assetSlice = aligned.map(({ asset }) => asset);
+  const benchSlice = aligned.map(({ benchmark }) => benchmark);
 
   const assetPivots = findPivots(assetSlice, 2);
   const benchPivots = findPivots(benchSlice, 2);
 
-  const assetLows = assetPivots.filter((p) => p.type === 'LL' || p.type === 'HL');
-  const benchLows = benchPivots.filter((p) => p.type === 'LL' || p.type === 'HL');
+  const alignedPivots = (assetType: 'low' | 'high') => {
+    const relevant = (p: PivotPoint) =>
+      assetType === 'low' ? p.type === 'LL' || p.type === 'HL' : p.type === 'HH' || p.type === 'LH';
+    const benchmarkPivotsByTime = new Map(
+      benchPivots.filter(relevant).map((p) => [p.time, p])
+    );
+    return assetPivots
+      .filter(relevant)
+      .flatMap((asset) => {
+        const benchmark = benchmarkPivotsByTime.get(asset.time);
+        return benchmark ? [{ asset, benchmark }] : [];
+      });
+  };
+
+  const freshPair = (pair: { asset: PivotPoint; benchmark: PivotPoint }[]) => {
+    const latest = pair[pair.length - 1];
+    const latestAlignedTime = aligned[aligned.length - 1]?.asset.time;
+    return (
+      pair.length >= 2 &&
+      !!latest &&
+      latest.asset.index >= assetSlice.length - 20 &&
+      latestAlignedTime !== undefined &&
+      latestAlignedTime - latest.asset.time <= assetSpacing * 20
+    );
+  };
+  const lows = alignedPivots('low');
+  const highs = alignedPivots('high');
+  const freshLows = freshPair(lows);
+  const freshHighs = freshPair(highs);
+
+  let bullishReason: string | null = null;
+  let bearishReason: string | null = null;
 
   // Check Bullish SMT at swing lows
-  if (assetLows.length >= 2 && benchLows.length >= 2) {
-    const aPrev = assetLows[assetLows.length - 2];
-    const aLast = assetLows[assetLows.length - 1];
-    const bPrev = benchLows[benchLows.length - 2];
-    const bLast = benchLows[benchLows.length - 1];
+  if (freshLows) {
+    const { asset: aPrev, benchmark: bPrev } = lows[lows.length - 2];
+    const { asset: aLast, benchmark: bLast } = lows[lows.length - 1];
 
     const benchLowerLow = bLast.price < bPrev.price;
     const assetHigherLow = aLast.price >= aPrev.price;
 
     if (benchLowerLow && assetHigherLow) {
-      return {
-        type: 'BULLISH',
-        reason: `${benchmarkSymbol} maakte Lower Low (${bLast.price.toFixed(2)} < ${bPrev.price.toFixed(2)}) terwijl asset Higher Low vasthield (${aLast.price.toFixed(4)} >= ${aPrev.price.toFixed(4)}) — institutionele accumulatie`,
-        benchmarkSymbol,
-      };
+      bullishReason = `${benchmarkSymbol} Lower Low (${bLast.price.toFixed(2)} < ${bPrev.price.toFixed(2)}) terwijl het asset een Higher Low hield (${aLast.price.toFixed(4)} >= ${aPrev.price.toFixed(4)})`;
     }
 
     const assetLowerLow = aLast.price < aPrev.price;
     const benchHigherLow = bLast.price >= bPrev.price;
 
     if (assetLowerLow && benchHigherLow) {
-      return {
-        type: 'BULLISH',
-        reason: `Asset sweepte low (${aLast.price.toFixed(4)} < ${aPrev.price.toFixed(4)}) terwijl ${benchmarkSymbol} Higher Low noteerde (${bLast.price.toFixed(2)} >= ${bPrev.price.toFixed(2)}) — Bullish SMT liquiditeitsgraai`,
-        benchmarkSymbol,
-      };
+      bullishReason = `Asset Lower Low (${aLast.price.toFixed(4)} < ${aPrev.price.toFixed(4)}) terwijl ${benchmarkSymbol} een Higher Low hield (${bLast.price.toFixed(2)} >= ${bPrev.price.toFixed(2)})`;
     }
   }
 
-  const assetHighs = assetPivots.filter((p) => p.type === 'HH' || p.type === 'LH');
-  const benchHighs = benchPivots.filter((p) => p.type === 'HH' || p.type === 'LH');
-
   // Check Bearish SMT at swing highs
-  if (assetHighs.length >= 2 && benchHighs.length >= 2) {
-    const aPrev = assetHighs[assetHighs.length - 2];
-    const aLast = assetHighs[assetHighs.length - 1];
-    const bPrev = benchHighs[benchHighs.length - 2];
-    const bLast = benchHighs[benchHighs.length - 1];
+  if (freshHighs) {
+    const { asset: aPrev, benchmark: bPrev } = highs[highs.length - 2];
+    const { asset: aLast, benchmark: bLast } = highs[highs.length - 1];
 
     const benchHigherHigh = bLast.price > bPrev.price;
     const assetLowerHigh = aLast.price <= aPrev.price;
 
     if (benchHigherHigh && assetLowerHigh) {
-      return {
-        type: 'BEARISH',
-        reason: `${benchmarkSymbol} maakte Higher High (${bLast.price.toFixed(2)} > ${bPrev.price.toFixed(2)}) terwijl asset achterbleef met Lower High (${aLast.price.toFixed(4)} <= ${aPrev.price.toFixed(4)}) — institutionele distributie`,
-        benchmarkSymbol,
-      };
+      bearishReason = `${benchmarkSymbol} Higher High (${bLast.price.toFixed(2)} > ${bPrev.price.toFixed(2)}) terwijl het asset een Lower High maakte (${aLast.price.toFixed(4)} <= ${aPrev.price.toFixed(4)})`;
     }
 
     const assetHigherHigh = aLast.price > aPrev.price;
     const benchLowerHigh = bLast.price <= bPrev.price;
 
     if (assetHigherHigh && benchLowerHigh) {
-      return {
-        type: 'BEARISH',
-        reason: `Asset sweepte high (${aLast.price.toFixed(4)} > ${aPrev.price.toFixed(4)}) terwijl ${benchmarkSymbol} Lower High noteerde (${bLast.price.toFixed(2)} <= ${bPrev.price.toFixed(2)}) — Bearish SMT divergentie`,
-        benchmarkSymbol,
-      };
+      bearishReason = `Asset Higher High (${aLast.price.toFixed(4)} > ${aPrev.price.toFixed(4)}) terwijl ${benchmarkSymbol} een Lower High maakte (${bLast.price.toFixed(2)} <= ${bPrev.price.toFixed(2)})`;
     }
   }
 
+  // Do not pick whichever pivot family happened to be checked first when the
+  // same timestamp-aligned data produces opposing divergence directions.
+  if (bullishReason && bearishReason) return null;
+  if (bullishReason) return { type: 'BULLISH', reason: bullishReason, benchmarkSymbol };
+  if (bearishReason) return { type: 'BEARISH', reason: bearishReason, benchmarkSymbol };
   return null;
 }
 

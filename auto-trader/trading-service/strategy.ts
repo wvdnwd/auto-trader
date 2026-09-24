@@ -14,8 +14,47 @@ import {
   volumeRatio,
 } from './indicators.js';
 import { analyzeMarketStructure } from './market-structure.js';
-import { computeAsianRange, getMarketSession, sessionWeightModifiers } from './sessions.js';
+import { computeAsianRange, getMarketSession } from './sessions.js';
 import type { Candle, FactorStat, LearningState, Regime, Side, Signal, SignalCheck, Ticker } from './types.js';
+
+const PULLBACK_MAX_EMA_DISTANCE_ATR = 1.3;
+const ENTRY_CANDLE_SECONDS = 60 * 60;
+const MICRO_CANDLE_SECONDS = 15 * 60;
+const MAX_MICRO_CANDLE_LAG_SECONDS = 2 * MICRO_CANDLE_SECONDS;
+
+function hasValidCandles(candles: Candle[], minimum: number): boolean {
+  if (!Array.isArray(candles) || candles.length < minimum) return false;
+  return candles.every((candle, index) =>
+    !!candle && typeof candle === 'object' &&
+    Number.isFinite(candle.time) &&
+    Number.isFinite(candle.open) && candle.open > 0 &&
+    Number.isFinite(candle.high) && candle.high > 0 &&
+    Number.isFinite(candle.low) && candle.low > 0 &&
+    Number.isFinite(candle.close) && candle.close > 0 &&
+    Number.isFinite(candle.volume) && candle.volume >= 0 &&
+    candle.high >= Math.max(candle.open, candle.close, candle.low) &&
+    candle.low <= Math.min(candle.open, candle.close) &&
+    (index === 0 || candles[index - 1].time < candle.time)
+  );
+}
+
+function hasFreshMicroCandles(candles: Candle[], minimum: number, entryCandleTime: number): boolean {
+  if (!hasValidCandles(candles, minimum) || !Number.isFinite(entryCandleTime)) return false;
+  const latestTime = candles[candles.length - 1].time;
+  // Candle.time is the open time in unix seconds. A closed 15m feed may trail
+  // the hourly candle's open by at most two micro bars.
+  return (
+    latestTime >= entryCandleTime - MAX_MICRO_CANDLE_LAG_SECONDS &&
+    latestTime <= entryCandleTime + ENTRY_CANDLE_SECONDS
+  );
+}
+
+function isFreshForWallClock(candles: Candle[], intervalSeconds: number): boolean {
+  const latest = candles[candles.length - 1]?.time;
+  if (!latest || latest < 1_000_000_000) return true;
+  const age = Math.floor(Date.now() / 1000) - latest;
+  return age >= -intervalSeconds && age <= intervalSeconds * 4;
+}
 
 /**
  * Classify the market regime from trend strength and moving average slope.
@@ -95,7 +134,7 @@ function scoreTrend(closes: number[]): Scored[] {
 function scoreMeanReversion(closes: number[], candles: Candle[]): Scored[] {
   const out: Scored[] = [];
   const r = rsi(closes, 14);
-  if (Number.isFinite(r)) {
+  if (Number.isFinite(r) && r !== 50) {
     // Oversold -> bullish, overbought -> bearish.
     out.push({ score: clamp((50 - r) / 22), weight: 1.2, reason: `RSI ${r.toFixed(1)}` });
   }
@@ -142,6 +181,7 @@ export function buildSignal(
   benchmarkCandles?: Candle[],
   benchmarkSymbol = 'BTC_USDT'
 ): Signal | null {
+  if (!Number.isFinite(ticker.lastPrice) || ticker.lastPrice <= 0) return null;
   if (candles.length < 60) return null;
   const closes = candles.map((c) => c.close);
   if (closes.some((c) => !Number.isFinite(c) || c <= 0)) return null;
@@ -375,8 +415,7 @@ export function buildSignal(
   const inPullback =
     !isTrending ||
     fibConfluence ||
-    emaDistanceAtr <= 1.3 ||
-    (side === 'LONG' ? price <= fastEma : price >= fastEma);
+    emaDistanceAtr <= PULLBACK_MAX_EMA_DISTANCE_ATR;
   checks.push({
     name: 'Sniper Pullback',
     passed: inPullback,
@@ -384,7 +423,7 @@ export function buildSignal(
       ? inPullback
         ? fibConfluence
           ? 'Instap in Fibonacci Golden Zone pullback'
-          : `Gezonde pullback nabij EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
+          : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
         : `Koers te ver uitgelopen van EMA21 (${emaDistanceAtr.toFixed(1)} ATR) — wacht op dip`
       : 'Geen trendregime — pullback-toets neutraal',
   });
@@ -470,7 +509,20 @@ export function buildSignal(
       price >= f.bottom &&
       price <= f.top
   );
-  const nearOB = !!marketStructure.nearestOrderBlock;
+  const orderBlock = marketStructure.nearestOrderBlock;
+  const orderBlockMatchesSide =
+    !!orderBlock && orderBlock.direction === (side === 'LONG' ? 'BULLISH' : 'BEARISH');
+  const orderBlockOnRelevantSide =
+    !!orderBlock && (side === 'LONG' ? orderBlock.bottom <= price : orderBlock.top >= price);
+  const orderBlockDistance = orderBlock
+    ? price < orderBlock.bottom
+      ? orderBlock.bottom - price
+      : price > orderBlock.top
+        ? price - orderBlock.top
+        : 0
+    : Infinity;
+  const nearOB =
+    orderBlockMatchesSide && orderBlockOnRelevantSide && orderBlockDistance <= atr;
   const smcConfluence = inFVG || nearOB;
 
   checks.push({
@@ -479,7 +531,9 @@ export function buildSignal(
     detail: inFVG
       ? 'Instap valt binnen actieve Fair Value Gap'
       : nearOB
-        ? `Nabij institutioneel Order Block ($${marketStructure.nearestOrderBlock!.top.toFixed(4)})`
+        ? `Nabij ${orderBlock!.direction} Order Block ($${orderBlock!.bottom.toFixed(4)} - $${orderBlock!.top.toFixed(4)}, ${(
+            orderBlockDistance / atr
+          ).toFixed(2)} ATR)`
         : 'Geen actieve FVG of Order Block confluentie op dit niveau',
   });
 
@@ -585,6 +639,9 @@ export function buildSignal(
   const structureBonus = structureAgrees ? 1.08 : 1;
   const smtBonus = smtAgrees ? adaptiveFactorMultiplier('SMT Divergentie', 1.12, stats) : 1;
   const pocBonus = nearPoc ? adaptiveFactorMultiplier('Volume Profile (POC)', 1.06, stats) : 1;
+  // Correlated observations within one family contribute only their strongest bonus.
+  const pullbackFamilyBonus = Math.max(fibBonus, sniperBonus);
+  const liquidityFamilyBonus = Math.max(sweepBonus, asianSweepBonus);
 
   const confidence = Math.min(
     1,
@@ -593,12 +650,10 @@ export function buildSignal(
       regimePenalty *
       checkPenalty *
       alignmentBonus *
-      fibBonus *
-      sweepBonus *
-      sniperBonus *
+      pullbackFamilyBonus *
+      liquidityFamilyBonus *
       rsiDivBonus *
       volumeSpurtBonus *
-      asianSweepBonus *
       smcBonus *
       structureBonus *
       smtBonus *
@@ -667,10 +722,17 @@ export function buildSignal(
     // Filled in by the engine once it has the active risk config — `buildSignal`
     plannedLeverage: null,
     reversalConfirmed: (() => {
-      if (!lowerCandles || lowerCandles.length < 2) return true;
+      if (
+        lowerCandles &&
+        lowerCandles.length === candles.length &&
+        lowerCandles[0]?.time === candles[0]?.time &&
+        lowerCandles[lowerCandles.length - 1]?.time === candles[candles.length - 1]?.time
+      ) {
+        return true;
+      }
+      if (!hasFreshMicroCandles(lowerCandles, 2, lastCandle.time)) return false;
       const last = lowerCandles[lowerCandles.length - 1];
       const prev = lowerCandles[lowerCandles.length - 2];
-      if (!last || !prev) return true;
       const lastRange = Math.max(0.0000001, last.high - last.low);
       if (side === 'LONG') {
         const lowerWick = Math.min(last.open, last.close) - last.low;
@@ -683,19 +745,18 @@ export function buildSignal(
       }
     })(),
     timingReady: (() => {
-      if (!lowerCandles || lowerCandles.length < 15) return true;
-      // If lowerCandles has identical timestamps/length to entry candles (like in single-series test stubs),
-      // don't treat it as a distinct micro timeframe.
       if (
+        lowerCandles &&
         lowerCandles.length === candles.length &&
         lowerCandles[0]?.time === candles[0]?.time &&
         lowerCandles[lowerCandles.length - 1]?.time === candles[candles.length - 1]?.time
       ) {
         return true;
       }
+      if (!hasFreshMicroCandles(lowerCandles, 15, lastCandle.time)) return false;
       const lowerCloses = lowerCandles.map((c) => c.close);
       const rsi15m = rsi(lowerCloses, 14);
-      if (!Number.isFinite(rsi15m)) return true;
+      if (!Number.isFinite(rsi15m)) return false;
       if (side === 'LONG' && rsi15m > 78) return false;
       if (side === 'SHORT' && rsi15m < 22) return false;
 
@@ -787,28 +848,30 @@ export function checkLtfReversal(
   candles: Candle[],
   side: Side
 ): { ready: boolean; reason?: string } {
-  if (!candles || candles.length < 2) {
-    return { ready: true };
+  if (!hasValidCandles(candles, 2)) {
+    return { ready: false, reason: '5m candles ontbreken, zijn ongeldig of onvoldoende (minimaal 2)' };
+  }
+  if (!isFreshForWallClock(candles, 5 * 60)) {
+    return { ready: false, reason: '5m candles zijn verouderd of hebben een toekomstige timestamp' };
   }
 
   // 1. RSI check if sufficient bars exist
   if (candles.length >= 15) {
     const closes = candles.map((c) => c.close);
     const rsiVal = rsi(closes, 14);
-    if (Number.isFinite(rsiVal)) {
-      if (side === 'LONG' && rsiVal > 78) {
-        return { ready: false, reason: `5m RSI overbought (${rsiVal.toFixed(0)} > 78)` };
-      }
-      if (side === 'SHORT' && rsiVal < 22) {
-        return { ready: false, reason: `5m RSI oversold (${rsiVal.toFixed(0)} < 22)` };
-      }
+    if (!Number.isFinite(rsiVal)) {
+      return { ready: false, reason: '5m RSI-data is ongeldig' };
+    }
+    if (side === 'LONG' && rsiVal > 78) {
+      return { ready: false, reason: `5m RSI overbought (${rsiVal.toFixed(0)} > 78)` };
+    }
+    if (side === 'SHORT' && rsiVal < 22) {
+      return { ready: false, reason: `5m RSI oversold (${rsiVal.toFixed(0)} < 22)` };
     }
   }
 
   const last = candles[candles.length - 1];
   const prev = candles[candles.length - 2];
-  if (!last || !prev) return { ready: true };
-
   const lastRange = Math.max(0.0000001, last.high - last.low);
 
   if (side === 'LONG') {

@@ -4,84 +4,68 @@ import mongoose from 'mongoose';
 import { AccountModel, EventModel, ExchangeCredentialsModel, PositionModel, ScoutModel } from './models.js';
 import type { EngineEvent, LearningState, Position, Side } from './types.js';
 
-export function getCredentialsFilePath(): string {
-  const candidates = [
-    path.resolve(process.cwd(), '.mexc-credentials.json'),
-    path.resolve('c:/Users/Gebruiker/Desktop/traderr', '.mexc-credentials.json'),
-  ];
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return c;
-    } catch {
-      // ignore
-    }
-  }
-  return candidates[0];
-}
-
-export function readStoredCredentialsFile(): { apiKey: string; apiSecret: string; liveTrading?: boolean } {
-  try {
-    const p = getCredentialsFilePath();
-    if (fs.existsSync(p)) {
-      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
-      if (data && typeof data === 'object') {
-        return {
-          apiKey: String(data.apiKey || ''),
-          apiSecret: String(data.apiSecret || ''),
-          liveTrading: Boolean(data.liveTrading),
-        };
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return { apiKey: '', apiSecret: '', liveTrading: false };
-}
-
-export function writeStoredCredentialsFile(data: { apiKey: string; apiSecret: string; liveTrading?: boolean }): void {
-  const pathsToTry = [
-    path.resolve('c:/Users/Gebruiker/Desktop/traderr', '.mexc-credentials.json'),
-    path.resolve(process.cwd(), '.mexc-credentials.json'),
-  ];
-  for (const p of pathsToTry) {
-    try {
-      fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
-      break;
-    } catch {
-      // try next
-    }
-  }
-}
-
 const STARTING_BALANCE = Number(process.env.PAPER_START_BALANCE || 10_000);
 
-export function getStoreStateFilePath(tenantId = 'main'): string {
+export function getStoreStateFilePath(): string {
   const dir = path.resolve(process.cwd(), 'data');
-  try {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  } catch {}
-  return path.resolve(dir, `store-${tenantId}.json`);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return path.resolve(dir, 'store-main.json');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
  * Persistence layer for the paper trading engine.
  *
- * All data access goes through this repository so the engine never touches
- * the database models directly. Every document is scoped by `tenantId` —
- * `'main'` for the deployment owner, or a per-browser client id for anyone
- * else using a shared link — so multiple people can use the same deployment
- * with fully independent paper accounts, MEXC connections and history.
+ * All data access goes through this repository. The service deliberately uses
+ * one fixed `main` account; request headers cannot select a storage namespace.
  */
 export class Store {
+  private readonly tenantId = 'main';
   private connected = false;
+  private storageFailed = false;
+  private failureHandler?: () => void;
 
   private eventsSincePrune = 0;
 
-  constructor(private readonly tenantId: string = 'main') {
+  isHealthy(): boolean {
+    return !this.storageFailed;
+  }
+
+  onFailure(handler: () => void): void {
+    this.failureHandler = handler;
+    if (this.storageFailed) handler();
+  }
+
+  private assertHealthy(): void {
+    if (this.storageFailed) throw new Error('Trading storage is unavailable');
+  }
+
+  private async storageOperation<T>(operation: () => PromiseLike<T>): Promise<T> {
+    this.assertHealthy();
+    try {
+      return await operation();
+    } catch {
+      this.storageFailed = true;
+      this.failureHandler?.();
+      throw new Error('Trading storage operation failed');
+    }
+  }
+
+  private async migrateLegacyPositions(): Promise<void> {
+    await this.storageOperation(() => PositionModel.updateMany(
+      { tenantId: { $exists: false } },
+      { $set: { tenantId: this.tenantId } }
+    ));
+  }
+
+  constructor() {
     this.loadMemoryState();
   }
 
-  /** In-memory fallback used when no database is reachable. */
+  /** Runtime state used only for explicitly enabled non-live local development. */
   private memory: {
     positions: Position[];
     events: EngineEvent[];
@@ -107,59 +91,114 @@ export class Store {
 
   private loadMemoryState(): void {
     if (process.env.NODE_ENV === 'test' || process.env.VITEST) return;
-    try {
-      const p = getStoreStateFilePath(this.tenantId);
-      if (fs.existsSync(p)) {
-        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-        if (raw && typeof raw === 'object') {
-          if (Array.isArray(raw.positions)) this.memory.positions = raw.positions;
-          if (Array.isArray(raw.events)) this.memory.events = raw.events;
-          if (raw.account && typeof raw.account === 'object') {
-            this.memory.account = { ...this.memory.account, ...raw.account };
-          }
-          if (raw.scout && typeof raw.scout === 'object') {
-            this.memory.scout = { ...this.memory.scout, ...raw.scout };
-          }
-          if (raw.learning && typeof raw.learning === 'object') {
-            this.memory.learning = {
-              factorStats: { ...this.memory.learning.factorStats, ...(raw.learning.factorStats || {}) },
-              penalties: { ...this.memory.learning.penalties, ...(raw.learning.penalties || {}) },
-            };
-          }
-        }
+    const p = getStoreStateFilePath();
+    if (!fs.existsSync(p)) return;
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown>;
+    if (!isRecord(raw)) {
+      throw new Error('Stored trading state is invalid');
+    }
+    if (raw.positions !== undefined && !Array.isArray(raw.positions)) throw new Error('Stored positions are invalid');
+    if (raw.events !== undefined && !Array.isArray(raw.events)) throw new Error('Stored events are invalid');
+    for (const position of (raw.positions || []) as unknown[]) {
+      if (!isRecord(position) ||
+          typeof position.id !== 'string' ||
+          typeof position.symbol !== 'string' ||
+          !['LONG', 'SHORT'].includes(String(position.side)) ||
+          !['OPEN', 'CLOSED'].includes(String(position.status)) ||
+          !['entry', 'quantity', 'leverage', 'margin', 'notional', 'stopLoss', 'takeProfit', 'openedAt']
+            .every((field) => Number.isFinite(position[field]))) {
+        throw new Error('Stored position data is invalid');
       }
-    } catch {
-      // Non-fatal
+    }
+    for (const event of (raw.events || []) as unknown[]) {
+      if (!isRecord(event) || !Number.isFinite(event.at) || typeof event.message !== 'string') {
+        throw new Error('Stored event data is invalid');
+      }
+    }
+    for (const field of ['account', 'scout', 'learning']) {
+      const value = raw[field];
+      if (value !== undefined && !isRecord(value)) {
+        throw new Error(`Stored ${field} state is invalid`);
+      }
+    }
+    if (isRecord(raw.account) &&
+        !['balance', 'startingBalance', 'realisedPnl', 'peakEquity']
+          .every((field) => Number.isFinite(raw.account![field]))) {
+      throw new Error('Stored account balances are invalid');
+    }
+    if (isRecord(raw.scout) &&
+        (raw.scout.universeExtras !== undefined && !Array.isArray(raw.scout.universeExtras) ||
+          raw.scout.cooldowns !== undefined && !isRecord(raw.scout.cooldowns))) {
+      throw new Error('Stored scout state is invalid');
+    }
+    if (isRecord(raw.learning) &&
+        (raw.learning.factorStats !== undefined && !isRecord(raw.learning.factorStats) ||
+          raw.learning.penalties !== undefined && !isRecord(raw.learning.penalties))) {
+      throw new Error('Stored learning state is invalid');
+    }
+    if (Array.isArray(raw.positions)) {
+      this.memory.positions = (raw.positions as Position[]).map((position) => ({
+        ...position,
+        // Old records cannot prove whether a scale-in happened; keep their R neutral.
+        scaleInCount: position.scaleInCount ?? 1,
+      }));
+    }
+    if (Array.isArray(raw.events)) this.memory.events = raw.events as EngineEvent[];
+    if (raw.account && typeof raw.account === 'object') {
+      this.memory.account = { ...this.memory.account, ...raw.account } as AccountState;
+    }
+    if (raw.scout && typeof raw.scout === 'object') {
+      this.memory.scout = { ...this.memory.scout, ...raw.scout } as ScoutState;
+    }
+    if (raw.learning && typeof raw.learning === 'object') {
+      const learning = raw.learning as Partial<LearningState>;
+      this.memory.learning = {
+        factorStats: { ...this.memory.learning.factorStats, ...(learning.factorStats || {}) },
+        penalties: { ...this.memory.learning.penalties, ...(learning.penalties || {}) },
+      };
     }
   }
 
   private persistMemoryState(): void {
     if (this.connected || process.env.NODE_ENV === 'test' || process.env.VITEST) return;
+    this.assertHealthy();
     try {
-      const p = getStoreStateFilePath(this.tenantId);
-      fs.writeFileSync(p, JSON.stringify(this.memory, null, 2), 'utf8');
+      const p = getStoreStateFilePath();
+      fs.writeFileSync(p, JSON.stringify({
+        positions: this.memory.positions,
+        events: this.memory.events,
+        account: this.memory.account,
+        scout: this.memory.scout,
+        learning: this.memory.learning,
+      }, null, 2), 'utf8');
     } catch {
-      // Non-fatal
+      this.storageFailed = true;
+      this.failureHandler?.();
+      throw new Error('Trading storage write failed');
     }
   }
 
   /**
-   * Connect to the built-in MongoDB. Falls back to in-memory state when the
-   * database is unavailable so the engine keeps running.
-   *
-   * @returns true when connected to MongoDB.
+   * Connect to MongoDB. In-memory operation is allowed only when the service
+   * explicitly opts in for non-live local development.
    */
   async connect(): Promise<boolean> {
     const url = process.env.MONGO_URL;
-    if (!url) return false;
+    if (!url) {
+      if (process.env.ALLOW_IN_MEMORY_STORE === 'true') this.persistMemoryState();
+      return false;
+    }
     try {
       await mongoose.connect(url, { serverSelectionTimeoutMS: 5_000 });
       this.connected = true;
+      await this.migrateLegacyPositions();
       await this.account();
       return true;
     } catch {
       this.connected = false;
-      return false;
+      this.storageFailed = true;
+      this.failureHandler?.();
+      throw new Error('Persistent storage connection failed');
     }
   }
 
@@ -169,8 +208,9 @@ export class Store {
    * @returns the persisted account state.
    */
   async account(): Promise<AccountState> {
+    this.assertHealthy();
     if (!this.connected) return this.memory.account;
-    const existing = await AccountModel.findOne({ key: this.tenantId }).lean();
+    const existing = await this.storageOperation(() => AccountModel.findOne({ key: this.tenantId }).lean());
     if (existing) {
       return {
         balance: existing.balance,
@@ -189,7 +229,7 @@ export class Store {
       dayStartEquity: STARTING_BALANCE,
       dayKey: new Date().toISOString().slice(0, 10),
     };
-    await AccountModel.create({ key: this.tenantId, ...seeded });
+    await this.storageOperation(() => AccountModel.create({ key: this.tenantId, ...seeded }));
     return seeded;
   }
 
@@ -199,12 +239,13 @@ export class Store {
    * @param state the new account state.
    */
   async saveAccount(state: AccountState): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       this.memory.account = state;
       this.persistMemoryState();
       return;
     }
-    await AccountModel.updateOne({ key: this.tenantId }, { $set: state }, { upsert: true });
+    await this.storageOperation(() => AccountModel.updateOne({ key: this.tenantId }, { $set: state }, { upsert: true }));
   }
 
   /**
@@ -225,6 +266,7 @@ export class Store {
    * @returns the account state after the delta is applied.
    */
   async applyBalanceDelta(delta: { balance?: number; realisedPnl?: number }): Promise<AccountState> {
+    this.assertHealthy();
     if (!this.connected) {
       if (delta.balance) this.memory.account.balance += delta.balance;
       if (delta.realisedPnl) this.memory.account.realisedPnl += delta.realisedPnl;
@@ -235,11 +277,11 @@ export class Store {
     const inc: Record<string, number> = {};
     if (delta.balance) inc.balance = delta.balance;
     if (delta.realisedPnl) inc.realisedPnl = delta.realisedPnl;
-    const doc = await AccountModel.findOneAndUpdate(
+    const doc = await this.storageOperation(() => AccountModel.findOneAndUpdate(
       { key: this.tenantId },
       { $inc: inc },
       { new: true, upsert: true }
-    ).lean();
+    ).lean());
     return {
       balance: doc!.balance,
       startingBalance: doc!.startingBalance,
@@ -261,13 +303,14 @@ export class Store {
    * @param equity current equity to consider as the new peak.
    */
   async applyPeakEquity(equity: number): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       const prev = this.memory.account.peakEquity;
       this.memory.account.peakEquity = Math.max(this.memory.account.peakEquity, equity);
       if (this.memory.account.peakEquity !== prev) this.persistMemoryState();
       return;
     }
-    await AccountModel.updateOne({ key: this.tenantId }, { $max: { peakEquity: equity } }, { upsert: true });
+    await this.storageOperation(() => AccountModel.updateOne({ key: this.tenantId }, { $max: { peakEquity: equity } }, { upsert: true }));
   }
 
   /**
@@ -281,6 +324,7 @@ export class Store {
    * @param dayStartEquity equity to baseline the new day against.
    */
   async rollDay(dayKey: string, dayStartEquity: number): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       if (this.memory.account.dayKey === dayKey) return;
       this.memory.account.dayKey = dayKey;
@@ -288,11 +332,11 @@ export class Store {
       this.persistMemoryState();
       return;
     }
-    await AccountModel.updateOne(
+    await this.storageOperation(() => AccountModel.updateOne(
       { key: this.tenantId, dayKey: { $ne: dayKey } },
       { $set: { dayKey, dayStartEquity } },
       { upsert: true }
-    );
+    ));
   }
 
   /**
@@ -303,17 +347,16 @@ export class Store {
    * @returns matching positions, newest first for closed trades.
    */
   async positions(status: 'OPEN' | 'CLOSED', limit = 200): Promise<Position[]> {
+    this.assertHealthy();
     if (!this.connected) {
-      return this.memory.positions
+      const matching = this.memory.positions
         .filter((p) => p.status === status)
-        .sort((a, b) => (b.closedAt || b.openedAt) - (a.closedAt || a.openedAt))
-        .slice(0, limit)
-        .map((p) => ({ ...p }));
+        .sort((a, b) => (b.closedAt || b.openedAt) - (a.closedAt || a.openedAt));
+      return (limit > 0 ? matching.slice(0, limit) : matching).map((p) => ({ ...p }));
     }
-    const docs = await PositionModel.find({ status, tenantId: this.tenantId })
-      .sort({ openedAt: -1 })
-      .limit(limit)
-      .lean();
+    let query = PositionModel.find({ status, tenantId: this.tenantId }).sort({ openedAt: -1 });
+    if (limit > 0) query = query.limit(limit);
+    const docs = await this.storageOperation(() => query.lean());
     return docs.map((doc) => toPosition(doc as unknown as Record<string, unknown>));
   }
 
@@ -324,11 +367,12 @@ export class Store {
    * @returns the position, or null when it does not exist.
    */
   async position(id: string): Promise<Position | null> {
+    this.assertHealthy();
     if (!this.connected) {
       const found = this.memory.positions.find((p) => p.id === id);
       return found ? { ...found } : null;
     }
-    const doc = await PositionModel.findOne({ id, tenantId: this.tenantId }).lean();
+    const doc = await this.storageOperation(() => PositionModel.findOne({ id, tenantId: this.tenantId }).lean());
     return doc ? toPosition(doc as unknown as Record<string, unknown>) : null;
   }
 
@@ -336,6 +380,7 @@ export class Store {
    * Get the current adaptive self-learning state.
    */
   async learning(): Promise<LearningState> {
+    this.assertHealthy();
     return this.memory.learning || { factorStats: {}, penalties: {} };
   }
 
@@ -343,6 +388,7 @@ export class Store {
    * Update the adaptive self-learning state and persist it.
    */
   async updateLearning(patch: Partial<LearningState>): Promise<void> {
+    this.assertHealthy();
     this.memory.learning = {
       factorStats: { ...this.memory.learning.factorStats, ...(patch.factorStats || {}) },
       penalties: { ...this.memory.learning.penalties, ...(patch.penalties || {}) },
@@ -356,12 +402,13 @@ export class Store {
    * @param position the position to store.
    */
   async insertPosition(position: Position): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       this.memory.positions.push(position);
       this.persistMemoryState();
       return;
     }
-    await PositionModel.create({ ...position, tenantId: this.tenantId });
+    await this.storageOperation(() => PositionModel.create({ ...position, tenantId: this.tenantId }));
   }
 
   /**
@@ -371,6 +418,7 @@ export class Store {
    * @param patch fields to update.
    */
   async updatePosition(id: string, patch: Partial<Position>): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       const idx = this.memory.positions.findIndex((p) => p.id === id);
       if (idx >= 0) {
@@ -379,7 +427,7 @@ export class Store {
       }
       return;
     }
-    await PositionModel.updateOne({ id, tenantId: this.tenantId }, { $set: patch });
+    await this.storageOperation(() => PositionModel.updateOne({ id, tenantId: this.tenantId }, { $set: patch }));
   }
 
   /**
@@ -393,6 +441,7 @@ export class Store {
    * @returns true when this caller won the race and the position was closed.
    */
   async settlePosition(id: string, patch: Partial<Position>): Promise<boolean> {
+    this.assertHealthy();
     if (!this.connected) {
       const idx = this.memory.positions.findIndex((p) => p.id === id && p.status === 'OPEN');
       if (idx < 0) return false;
@@ -400,10 +449,10 @@ export class Store {
       this.persistMemoryState();
       return true;
     }
-    const res = await PositionModel.updateOne(
+    const res = await this.storageOperation(() => PositionModel.updateOne(
       { id, status: 'OPEN', tenantId: this.tenantId },
       { $set: { ...patch, status: 'CLOSED' } }
-    );
+    ));
     return res.modifiedCount === 1;
   }
 
@@ -413,19 +462,20 @@ export class Store {
    * @param event the event to store.
    */
   async addEvent(event: EngineEvent): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       this.memory.events.unshift(event);
       this.memory.events = this.memory.events.slice(0, 300);
       return;
     }
-    await EventModel.create({ ...event, tenantId: this.tenantId });
+    await this.storageOperation(() => EventModel.create({ ...event, tenantId: this.tenantId }));
     this.eventsSincePrune += 1;
     // Keep the log bounded so it cannot grow without limit over a long run.
     if (this.eventsSincePrune >= 200) {
       this.eventsSincePrune = 0;
-      const cutoff = await EventModel.find({ tenantId: this.tenantId }).sort({ at: -1 }).skip(1000).limit(1).lean();
+      const cutoff = await this.storageOperation(() => EventModel.find({ tenantId: this.tenantId }).sort({ at: -1 }).skip(1000).limit(1).lean());
       if (cutoff.length)
-        await EventModel.deleteMany({ tenantId: this.tenantId, at: { $lt: cutoff[0].at } });
+        await this.storageOperation(() => EventModel.deleteMany({ tenantId: this.tenantId, at: { $lt: cutoff[0].at } }));
     }
   }
 
@@ -436,8 +486,9 @@ export class Store {
    * @returns events, newest first.
    */
   async events(limit = 80): Promise<EngineEvent[]> {
+    this.assertHealthy();
     if (!this.connected) return this.memory.events.slice(0, limit);
-    const docs = await EventModel.find({ tenantId: this.tenantId }).sort({ at: -1 }).limit(limit).lean();
+    const docs = await this.storageOperation(() => EventModel.find({ tenantId: this.tenantId }).sort({ at: -1 }).limit(limit).lean());
     return docs.map((d) => ({ at: d.at, level: d.level as EngineEvent['level'], message: d.message }));
   }
 
@@ -445,6 +496,7 @@ export class Store {
    * Wipe all trading history and reset the account to its starting balance.
    */
   async reset(): Promise<void> {
+    this.assertHealthy();
     const fresh: AccountState = {
       balance: STARTING_BALANCE,
       startingBalance: STARTING_BALANCE,
@@ -462,12 +514,13 @@ export class Store {
         exchangeCredentials: this.memory.exchangeCredentials,
         learning: { factorStats: {}, penalties: {} },
       };
+      this.persistMemoryState();
       return;
     }
-    await Promise.all([
+    await this.storageOperation(() => Promise.all([
       PositionModel.deleteMany({ tenantId: this.tenantId }),
       EventModel.deleteMany({ tenantId: this.tenantId }),
-    ]);
+    ]));
     await this.saveAccount(fresh);
   }
 
@@ -477,8 +530,9 @@ export class Store {
    * @returns admitted extra symbols and active cooldowns.
    */
   async scoutState(): Promise<ScoutState> {
+    this.assertHealthy();
     if (!this.connected) return { ...this.memory.scout };
-    const existing = await ScoutModel.findOne({ key: this.tenantId }).lean();
+    const existing = await this.storageOperation(() => ScoutModel.findOne({ key: this.tenantId }).lean());
     if (existing) {
       return {
         universeExtras: existing.universeExtras || [],
@@ -486,7 +540,7 @@ export class Store {
         lastRunAt: existing.lastRunAt ?? null,
       };
     }
-    await ScoutModel.create({ key: this.tenantId, universeExtras: [], cooldowns: {} });
+    await this.storageOperation(() => ScoutModel.create({ key: this.tenantId, universeExtras: [], cooldowns: {} }));
     return { universeExtras: [], cooldowns: {}, lastRunAt: null };
   }
 
@@ -499,11 +553,13 @@ export class Store {
    * @param symbol contract symbol that cleared the scout's backtest bar.
    */
   async addScoutUniverseSymbol(symbol: string): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       if (!this.memory.scout.universeExtras.includes(symbol)) this.memory.scout.universeExtras.push(symbol);
+      this.persistMemoryState();
       return;
     }
-    await ScoutModel.updateOne({ key: this.tenantId }, { $addToSet: { universeExtras: symbol } }, { upsert: true });
+    await this.storageOperation(() => ScoutModel.updateOne({ key: this.tenantId }, { $addToSet: { universeExtras: symbol } }, { upsert: true }));
   }
 
   /**
@@ -514,15 +570,17 @@ export class Store {
    * @param until unix ms timestamp after which it may be retested.
    */
   async setScoutCooldown(symbol: string, until: number): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       this.memory.scout.cooldowns[symbol] = until;
+      this.persistMemoryState();
       return;
     }
-    await ScoutModel.updateOne(
+    await this.storageOperation(() => ScoutModel.updateOne(
       { key: this.tenantId },
       { $set: { [`cooldowns.${symbol}`]: until } },
       { upsert: true }
-    );
+    ));
   }
 
   /**
@@ -531,45 +589,36 @@ export class Store {
    * @param at unix ms timestamp.
    */
   async setScoutLastRun(at: number): Promise<void> {
+    this.assertHealthy();
     if (!this.connected) {
       this.memory.scout.lastRunAt = at;
+      this.persistMemoryState();
       return;
     }
-    await ScoutModel.updateOne({ key: this.tenantId }, { $set: { lastRunAt: at } }, { upsert: true });
+    await this.storageOperation(() => ScoutModel.updateOne({ key: this.tenantId }, { $set: { lastRunAt: at } }, { upsert: true }));
   }
 
   /**
-   * Read the MEXC API credentials entered from the dashboard, if any.
-   *
-   * These take priority over the `MEXC_API_KEY` / `MEXC_API_SECRET` environment
-   * variables so a shared deployment can be handed to someone else and they
-   * connect their own MEXC account from the UI, without needing access to the
-   * hosting environment's configuration.
+   * Read credentials for the single service, falling back only to its process
+   * environment when no stored main-instance credentials exist.
    *
    * @returns the stored credentials, or empty strings when none are set.
    */
   async exchangeCredentials(): Promise<ExchangeCredentials> {
-    if (!this.connected) {
-      if (this.memory.exchangeCredentials.apiKey && this.memory.exchangeCredentials.apiSecret) {
-        return { ...this.memory.exchangeCredentials };
+    this.assertHealthy();
+    if (this.connected) {
+      const doc = await this.storageOperation(() => ExchangeCredentialsModel.findOne({ key: this.tenantId }).lean());
+      if (doc?.apiKey && doc?.apiSecret) {
+        return { apiKey: doc.apiKey, apiSecret: doc.apiSecret };
       }
-      const disk = readStoredCredentialsFile();
-      if (disk.apiKey && disk.apiSecret) {
-        this.memory.exchangeCredentials = { apiKey: disk.apiKey, apiSecret: disk.apiSecret };
-        if (disk.liveTrading) process.env.LIVE_TRADING_ENABLED = 'true';
-        return { ...this.memory.exchangeCredentials };
-      }
-      if (process.env.MEXC_API_KEY && process.env.MEXC_API_SECRET) {
-        return { apiKey: process.env.MEXC_API_KEY, apiSecret: process.env.MEXC_API_SECRET };
-      }
+    }
+    if (this.memory.exchangeCredentials.apiKey && this.memory.exchangeCredentials.apiSecret) {
       return { ...this.memory.exchangeCredentials };
     }
-    const doc = await ExchangeCredentialsModel.findOne({ key: this.tenantId }).lean();
-    if (doc?.apiKey && doc?.apiSecret) {
-      return { apiKey: doc.apiKey, apiSecret: doc.apiSecret };
-    }
-    const disk = readStoredCredentialsFile();
-    return { apiKey: disk.apiKey || '', apiSecret: disk.apiSecret || '' };
+    return {
+      apiKey: process.env.MEXC_API_KEY || '',
+      apiSecret: process.env.MEXC_API_SECRET || '',
+    };
   }
 
   /**
@@ -579,23 +628,11 @@ export class Store {
    * @param credentials the API key and secret to store.
    */
   async saveExchangeCredentials(credentials: ExchangeCredentials): Promise<void> {
-    this.memory.exchangeCredentials = { ...credentials };
-    writeStoredCredentialsFile({
-      apiKey: credentials.apiKey,
-      apiSecret: credentials.apiSecret,
-      liveTrading: Boolean(credentials.apiKey && credentials.apiSecret && process.env.LIVE_TRADING_ENABLED === 'true'),
-    });
-    if (credentials.apiKey && credentials.apiSecret) {
-      process.env.MEXC_API_KEY = credentials.apiKey;
-      process.env.MEXC_API_SECRET = credentials.apiSecret;
-    } else {
-      delete process.env.MEXC_API_KEY;
-      delete process.env.MEXC_API_SECRET;
-      process.env.LIVE_TRADING_ENABLED = 'false';
-    }
+    this.assertHealthy();
     if (this.connected) {
-      await ExchangeCredentialsModel.updateOne({ key: this.tenantId }, { $set: credentials }, { upsert: true });
+      await this.storageOperation(() => ExchangeCredentialsModel.updateOne({ key: this.tenantId }, { $set: credentials }, { upsert: true }));
     }
+    this.memory.exchangeCredentials = { ...credentials };
   }
 }
 
@@ -622,7 +659,7 @@ export type ScoutState = {
 };
 
 /**
- * MEXC API credentials entered from the dashboard and persisted by the store.
+   * MEXC API credentials persisted for the single service instance.
  */
 export type ExchangeCredentials = {
   apiKey: string;
@@ -659,6 +696,11 @@ function toPosition(doc: Record<string, unknown>): Position {
     extreme: Number(doc.extreme),
     trailingArmed: Boolean(doc.trailingArmed),
     regimeTrimmed: Boolean(doc.regimeTrimmed),
+    scaleInCount: doc.scaleInCount === undefined ? 1 : Number(doc.scaleInCount),
+    scaledInAt: doc.scaledInAt === undefined ? undefined : Number(doc.scaledInAt),
+    scaleInMargin: doc.scaleInMargin === undefined ? undefined : Number(doc.scaleInMargin),
+    profitLockR: doc.profitLockR === undefined ? undefined : Number(doc.profitLockR),
+    climaxTrimmed: Boolean(doc.climaxTrimmed),
     openedAt: Number(doc.openedAt),
     closedAt: doc.closedAt ? Number(doc.closedAt) : undefined,
     exit: doc.exit ? Number(doc.exit) : undefined,

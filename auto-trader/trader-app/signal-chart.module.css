@@ -452,6 +452,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+.overflowBadgeBg {
+  fill: #27272a;
+  stroke: #a1a1aa;
+  stroke-width: 1;
+}
+
+.overflowBadgeText {
+  fill: #e4e4e7;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
 .trajectoryLabelBg {
   fill: #080c16;
   stroke: rgba(255, 255, 255, 0.18);

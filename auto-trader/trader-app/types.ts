@@ -597,6 +597,7 @@ export type LiveTradingStatus = {
   configured: boolean;
   enabled: boolean;
   baseUrl: string;
+  venue?: 'mexc' | 'hyperliquid';
 };
 
 /** Planned trade with TP ladder and SL. */

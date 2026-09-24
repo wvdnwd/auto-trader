@@ -1,21 +1,13 @@
 import { type MarketHistory } from './backtest.js';
 import { MarketData } from './market-data.js';
+import {
+  intervalSeconds,
+  loadReplayTimingHistory,
+  replayWarmupStarts,
+  REPLAY_WARMUP_BARS,
+} from './replay-warmup.js';
 import { runWorkerJob } from './worker-runner.js';
 import type { BacktestConfig, BacktestStatus } from './types.js';
-
-/** Bars of history loaded before the window so indicators are warmed up. */
-const WARMUP_BARS = 80;
-
-/** Interval lengths in seconds. */
-const INTERVAL_SECONDS: Record<string, number> = {
-  Min1: 60,
-  Min5: 300,
-  Min15: 900,
-  Min30: 1800,
-  Min60: 3600,
-  Hour4: 14_400,
-  Day1: 86_400,
-};
 
 /**
  * Loads historical data and runs backtests in the background.
@@ -61,8 +53,11 @@ export class BacktestRunner {
 
   private async execute(config: BacktestConfig): Promise<void> {
     try {
-      const step = INTERVAL_SECONDS[config.interval] || 900;
-      const warmupFrom = config.from - step * WARMUP_BARS;
+      const { entryFrom, higherFrom } = replayWarmupStarts(
+        config.from,
+        config.interval,
+        config.higherInterval
+      );
       const markets: MarketHistory[] = [];
 
       for (let i = 0; i < config.symbols.length; i += 1) {
@@ -73,15 +68,25 @@ export class BacktestRunner {
           progress: (i / config.symbols.length) * 0.8,
         };
         const [candles, higher] = await Promise.all([
-          this.market.history(symbol, config.interval, warmupFrom, config.to),
+          this.market.history(symbol, config.interval, entryFrom, config.to),
           this.market
-            .history(symbol, config.higherInterval, warmupFrom, config.to)
+            .history(symbol, config.higherInterval, higherFrom, config.to)
             .catch(() => []),
         ]);
         // A market without enough history would silently contribute nothing,
         // so it is dropped with a visible reason instead.
-        if (candles.length < WARMUP_BARS + 10) continue;
-        markets.push({ symbol, candles, higher });
+        if (candles.length < REPLAY_WARMUP_BARS + 10) continue;
+        const timing = await loadReplayTimingHistory(
+          this.market.history.bind(this.market),
+          symbol,
+          config.from,
+          config.to,
+          [
+            { interval: config.interval, from: entryFrom, to: config.to, candles },
+            { interval: config.higherInterval, from: higherFrom, to: config.to, candles: higher },
+          ]
+        );
+        markets.push({ symbol, candles, higher, ...timing });
       }
 
       if (!markets.length) {
@@ -133,8 +138,9 @@ export function normaliseConfig(config: Partial<BacktestConfig>): BacktestConfig
   if (!symbols.length) throw new Error('kies minstens één markt');
 
   const interval = config.interval || 'Min15';
-  const step = INTERVAL_SECONDS[interval];
-  if (!step) throw new Error(`onbekend interval ${interval}`);
+  const step = intervalSeconds(interval);
+  const higherInterval = config.higherInterval || 'Min60';
+  intervalSeconds(higherInterval);
 
   const now = Math.floor(Date.now() / 1000);
   const to = Math.min(config.to || now, now);
@@ -147,7 +153,7 @@ export function normaliseConfig(config: Partial<BacktestConfig>): BacktestConfig
   return {
     symbols,
     interval,
-    higherInterval: config.higherInterval || 'Min60',
+    higherInterval,
     from: Math.floor(from),
     to: Math.floor(to),
     startingBalance: Number.isFinite(balance) && balance > 0 ? balance : 10_000,

@@ -4,25 +4,27 @@ import { dateTime, price as fmtPrice, pct, qty, signed, since, usd } from './for
 import type { LiveExchangePosition, Position } from './types.js';
 
 export type LivePositionRowProps = {
-  /** The position as reported directly by MEXC. */
+  /** The position as reported directly by MEXC or Hyperliquid. */
   position: LiveExchangePosition;
   /** The matching strategy plan with SL, TP targets, and sizing. */
   plan?: Position;
   /** Called when the user force-closes an open position. */
   onClose?: (id: string) => void;
+  /** Called when the user partially closes an open position (e.g. 50%). */
+  onReduce?: (id: string, fraction?: number) => void;
   /** Opens the candlestick chart for this position's symbol, with entry/stop/target overlays. */
   onOpenChart?: (symbol: string) => void;
 };
 
 /**
- * An open position on MEXC with full visibility into the strategy's planned
+ * An open position on MEXC/Hyperliquid with full visibility into the strategy's planned
  * Take-Profit targets (with expected dollar profit per rung) and Stop-Loss point
  * (with maximum risk in dollars), as well as liquidation distance and live PnL.
  *
  * @param props position data and actions.
  * @returns the rendered row.
  */
-export function LivePositionRow({ position, plan, onClose, onOpenChart }: LivePositionRowProps) {
+export function LivePositionRow({ position, plan, onClose, onReduce, onOpenChart }: LivePositionRowProps) {
   const coin = splitSymbol(position.symbol).base;
   const info = coinInfo(position.symbol);
   const dir = position.side === 'LONG' ? 1 : -1;
@@ -304,6 +306,17 @@ export function LivePositionRow({ position, plan, onClose, onOpenChart }: LivePo
               onClick={() => onOpenChart(position.symbol)}
             >
               Grafiek
+            </button>
+          )}
+          {onReduce && plan && (
+            <button
+              type="button"
+              className={styles.miniBtn}
+              onClick={() => onReduce(plan.id, 0.5)}
+              title="50% van deze live positie direct met winst verzilveren"
+              style={{ background: 'rgba(56, 189, 248, 0.15)', borderColor: '#38bdf8', color: '#38bdf8' }}
+            >
+              ✂️ 50% Winst
             </button>
           )}
           {onClose && plan && (

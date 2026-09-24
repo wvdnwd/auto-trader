@@ -64,13 +64,13 @@ export function rsiSeries(values: number[], period = 14): number[] {
   }
   gain /= period;
   loss /= period;
-  out.push(loss === 0 ? 100 : 100 - 100 / (1 + gain / loss));
+  out.push(loss === 0 ? (gain === 0 ? 50 : 100) : 100 - 100 / (1 + gain / loss));
 
   for (let i = period + 1; i < values.length; i += 1) {
     const diff = values[i] - values[i - 1];
     gain = (gain * (period - 1) + Math.max(diff, 0)) / period;
     loss = (loss * (period - 1) + Math.max(-diff, 0)) / period;
-    out.push(loss === 0 ? 100 : 100 - 100 / (1 + gain / loss));
+    out.push(loss === 0 ? (gain === 0 ? 50 : 100) : 100 - 100 / (1 + gain / loss));
   }
   return out;
 }
@@ -221,7 +221,8 @@ export function atrPct(candles: Candle[], period = 14): number {
  * @returns ADX value (roughly 0..100), or NaN when there is not enough data.
  */
 export function adx(candles: Candle[], period = 14): number {
-  if (candles.length < period * 2) return NaN;
+  // This implementation needs `period` true ranges, then `period` DX samples.
+  if (period < 1 || candles.length < period * 2 + 1) return NaN;
   const plusDm: number[] = [];
   const minusDm: number[] = [];
   const trs: number[] = [];
@@ -362,17 +363,25 @@ export function nearestSwingHigh(candles: Candle[], price: number, strength = 3)
  *
  * @param candles OHLCV candles, oldest first.
  * @param period lookback for the average, defaults to 20.
- * @returns ratio where 1 means average volume, 2 means double.
+ * @returns ratio where 1 means average volume, 2 means double, or NaN when
+ *   there are not enough valid closed candles to calculate the ratio.
  */
 export function volumeRatio(candles: Candle[], period = 20): number {
   // The final candle is still forming, so its volume is only a fraction of what
   // it will end up being. Comparing it to completed candles would make every
   // market look thin. Measure the last CLOSED candle instead.
-  if (candles.length < period + 2) return 1;
+  if (period < 1 || candles.length < period + 2) return NaN;
   const last = candles[candles.length - 2];
   const slice = candles.slice(-period - 2, -2);
+  if (
+    !Number.isFinite(last.volume) ||
+    last.volume < 0 ||
+    slice.some((c) => !Number.isFinite(c.volume) || c.volume < 0)
+  ) {
+    return NaN;
+  }
   const avg = slice.reduce((a, c) => a + c.volume, 0) / slice.length;
-  if (!avg) return 1;
+  if (!avg) return NaN;
   return last.volume / avg;
 }
 

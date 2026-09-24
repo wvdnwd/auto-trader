@@ -11,6 +11,8 @@ export type PositionRowProps = {
   mark?: number;
   /** Called when the user force-closes an open position. */
   onClose?: (id: string) => void;
+  /** Called when the user partially closes an open position (e.g. 50%). */
+  onReduce?: (id: string, fraction?: number) => void;
   /** Opens the candlestick chart for this position's symbol, with entry/stop/target overlays. */
   onOpenChart?: (symbol: string) => void;
 };
@@ -52,7 +54,7 @@ const GROUP_LABELS: Record<string, string> = {
  * For open positions it renders a stop/entry/target bar with a marker at the
  * current price so the risk picture is readable at a glance.
  */
-export function PositionRow({ position, mark, onClose, onOpenChart }: PositionRowProps) {
+export function PositionRow({ position, mark, onClose, onReduce, onOpenChart }: PositionRowProps) {
   const [showAnalysis, setShowAnalysis] = useState(false);
   const open = position.status === 'OPEN';
   const current = open ? mark ?? position.entry : position.exit ?? position.entry;
@@ -316,6 +318,17 @@ export function PositionRow({ position, mark, onClose, onOpenChart }: PositionRo
               onClick={() => onOpenChart(position.symbol)}
             >
               Grafiek
+            </button>
+          )}
+          {onReduce && (
+            <button
+              type="button"
+              className={styles.miniBtn}
+              onClick={() => onReduce(position.id, 0.5)}
+              title="50% van deze positie direct met winst verzilveren"
+              style={{ background: 'rgba(56, 189, 248, 0.15)', borderColor: '#38bdf8', color: '#38bdf8' }}
+            >
+              ✂️ 50% Winst
             </button>
           )}
           {onClose && (

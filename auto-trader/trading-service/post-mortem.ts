@@ -1,4 +1,5 @@
 import type { Position, TradePostMortem } from './types.js';
+import { FEE } from './exits.js';
 
 function round(val: number, decimals = 2): number {
   const factor = 10 ** decimals;
@@ -21,55 +22,66 @@ export function analyzeClosedTrade(
   const durationMinutes = Math.max(1, Math.round((closedAt - position.openedAt) / 60_000));
   const dir = position.side === 'LONG' ? 1 : -1;
 
-  // Calculate R-multiple
-  const riskDistance = position.initialRisk || Math.abs(position.entry - position.stopLoss);
-  let rMultiple = 0;
-  if (riskDistance > 0 && position.entry > 0) {
-    const initialRiskAmount = (position.margin * (position.leverage || 1) * riskDistance) / position.entry;
-    rMultiple = initialRiskAmount > 0 ? round(netPnl / initialRiskAmount, 2) : (netPnl >= 0 ? 1 : -1);
-  } else {
-    rMultiple = netPnl >= 0 ? 1 : -1;
-  }
+  // Keep R anchored to entry-time quantity and stop distance, not margin or
+  // stop/quantity fields that can change after exits. Scale-ins do not retain
+  // per-tranche initial risk, so report neutral R rather than invent a basis.
+  const riskDistance = position.initialRisk;
+  const initialStop = position.entry - dir * riskDistance;
+  const initialRiskPerUnit = riskDistance + FEE * (position.entry + initialStop);
+  const initialRiskAmount = position.quantity * initialRiskPerUnit;
+  const rMultiple =
+    !position.scaleInCount &&
+    Number.isFinite(position.entry) && position.entry > 0 &&
+    Number.isFinite(riskDistance) && riskDistance > 0 && initialStop > 0 &&
+    Number.isFinite(position.quantity) && position.quantity > 0 &&
+    Number.isFinite(initialRiskAmount) && initialRiskAmount > 0 && Number.isFinite(netPnl)
+      ? round(netPnl / initialRiskAmount, 2)
+      : 0;
+  const realisedNet = Number.isFinite(netPnl) ? netPnl : 0;
 
   // Determine verdict
   const verdict: TradePostMortem['verdict'] =
-    exitReason === 'BREAK_EVEN' || exitReason === 'STAGNATION'
-      ? 'BREAK_EVEN'
-      : netPnl > 0.05
-        ? 'WIN'
-        : netPnl < -0.05
-          ? 'LOSS'
-          : 'BREAK_EVEN';
+    realisedNet > 0.05 ? 'WIN' : realisedNet < -0.05 ? 'LOSS' : 'BREAK_EVEN';
 
-  // Identify entry factors from reasons and checks
+  // Passed checks are authoritative; reason parsing is a positive-only fallback.
   const entryFactors: string[] = [];
-  const allReasonText = [...(position.reasons || []), ...(position.entryChecks?.map((c) => c.name) || [])].join(' ');
+  const reasons = position.reasons || [];
+  const checks = position.entryChecks || [];
+  const isNegativeReason = (reason: string): boolean =>
+    /\b(?:N\/A|false|unconfirmed|absent|not active|not passed|not detected|not confirmed|failed|disabled|no qualifying|no (?:volume spurt|coin in play|fibonacci|golden zone|pullback|rsi|asian|reversal))\b/i.test(reason);
+  const hasActiveFactor = (checkPattern: RegExp, reasonPattern: RegExp): boolean => {
+    const matchingChecks = checks.filter((check) => checkPattern.test(check.name));
+    if (matchingChecks.length > 0) return matchingChecks.some((check) => check.passed);
+    return reasons.some((reason) => reasonPattern.test(reason) && !isNegativeReason(reason));
+  };
+  const fifteenMinuteReversal = /\b15[- ]?(?:m|min(?:ute)?s?)\b[^\n]*(?:reversal|ommekeer)|(?:reversal|ommekeer)[^\n]*\b15[- ]?(?:m|min(?:ute)?s?)\b/i;
+  const hasActive15mReversal = (): boolean => {
+    const matchingChecks = checks.filter((check) => fifteenMinuteReversal.test(`${check.name} ${check.detail}`));
+    if (matchingChecks.length > 0) return matchingChecks.some((check) => check.passed);
+    return reasons.some((reason) => fifteenMinuteReversal.test(reason) && !isNegativeReason(reason));
+  };
 
-  if (/volume spurt|coin in play/i.test(allReasonText) || position.entryChecks?.some((c) => c.name === 'Volume Spurt' && c.passed)) {
+  if (hasActiveFactor(/volume spurt|coin in play/i, /volume spurt|coin in play/i)) {
     entryFactors.push('Volume Spurt (Coin in Play)');
   }
-  if (/golden zone|fibonacci/i.test(allReasonText) || position.entryChecks?.some((c) => c.name.includes('Fib') && c.passed)) {
+  if (hasActiveFactor(/fib/i, /golden zone|fibonacci/i)) {
     entryFactors.push('Fibonacci Golden Zone');
   }
-  if (/sniper pullback|pullback/i.test(allReasonText) || position.entryChecks?.some((c) => c.name === 'Sniper Pullback' && c.passed)) {
+  if (hasActiveFactor(/sniper pullback/i, /sniper pullback|pullback/i)) {
     entryFactors.push('Sniper Pullback');
   }
-  if (/divergentie|rsi div/i.test(allReasonText) || position.entryChecks?.some((c) => c.name.includes('RSI') && c.passed)) {
+  if (hasActiveFactor(/rsi/i, /divergentie|rsi div/i)) {
     entryFactors.push('RSI Divergentie');
   }
-  if (/asian.*sweep/i.test(allReasonText) || position.entryChecks?.some((c) => c.name.includes('Asian') && c.passed)) {
+  if (hasActiveFactor(/asian/i, /asian.*sweep/i)) {
     entryFactors.push('Asian Session Sweep');
   }
-  if (/15m.*ommekeer|reversal/i.test(allReasonText)) {
+  if (hasActive15mReversal()) {
     entryFactors.push('15m Ommekeer-bevestiging');
   }
   if (position.scaleInCount && position.scaleInCount > 0) {
     entryFactors.push('Smart Pyramiding (2e tranche)');
   }
-  if (entryFactors.length === 0) {
-    entryFactors.push('Trend & Momentum setup');
-  }
-
   // Analyze what went well
   const whatWentWell: string[] = [];
   const tpLevels = position.takeProfits || [];
@@ -90,10 +102,10 @@ export function analyzeClosedTrade(
     whatWentWell.push(`Progressive profit-lock heeft minimaal +${position.profitLockR}R winst gegarandeerd.`);
   }
   if (verdict === 'WIN') {
-    whatWentWell.push(`Positief netto resultaat: +${netPnl.toFixed(2)} USDT (${rMultiple > 0 ? '+' : ''}${rMultiple}R).`);
+    whatWentWell.push(`Positief netto resultaat: +${realisedNet.toFixed(2)} USDT (${rMultiple > 0 ? '+' : ''}${rMultiple}R).`);
   }
   if (whatWentWell.length === 0 && verdict === 'BREAK_EVEN') {
-    whatWentWell.push('Positie zonder verlies afgesloten; inleg intact gebleven.');
+    whatWentWell.push('Nettoresultaat lag rond break-even na kosten.');
   } else if (whatWentWell.length === 0) {
     whatWentWell.push('Stop-loss heeft het maximale risico netjes begrensd conform risicoplan.');
   }
@@ -103,7 +115,7 @@ export function analyzeClosedTrade(
   const isStopExit = exitReason === 'STOP_LOSS' || (exitReason === 'TRAILING_STOP' && verdict === 'LOSS');
 
   if (isStopExit) {
-    whatWentWrong.push(`Stop-loss geraakt op ${exitPrice} (${netPnl.toFixed(2)} USDT).`);
+    whatWentWrong.push(`Stop-loss geraakt op ${exitPrice} (${realisedNet.toFixed(2)} USDT).`);
     if (durationMinutes <= 20) {
       whatWentWrong.push(`Snelle stop-out binnen ${durationMinutes} min — duidt op een valse uitbraak (fakeout) of plotse wick.`);
     }
@@ -134,11 +146,10 @@ export function analyzeClosedTrade(
     } else {
       lesson = 'Solide trendvolgende trade; staged take-profits hebben de winst systematisch veiliggesteld.';
     }
-  } else if (verdict === 'BREAK_EVEN' || exitReason === 'STAGNATION') {
-    lesson =
-      exitReason === 'STAGNATION'
-        ? 'Positie tijdig gesloten wegens stagnatie (dead money). Kapitaal werd beschermd en direct vrijgemaakt voor betere kansen.'
-        : 'Eerste doel werd behaald waarna de stop naar break-even ging. De markt keerde om, maar het saldo bleef 100% beschermd.';
+  } else if (verdict === 'BREAK_EVEN') {
+    lesson = exitReason === 'STAGNATION'
+      ? 'Positie gesloten wegens stagnatie (dead money); nettoresultaat bepaalt of de trade werkelijk winstgevend was.'
+      : 'Trade sloot netto rond break-even na kosten.';
   } else {
     // LOSS
     if (durationMinutes <= 20) {
@@ -155,7 +166,7 @@ export function analyzeClosedTrade(
   return {
     verdict,
     rMultiple,
-    netPnl: round(netPnl, 2),
+    netPnl: round(realisedNet, 2),
     durationMinutes,
     entryFactors,
     whatWentWell,

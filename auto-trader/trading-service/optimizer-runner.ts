@@ -2,11 +2,9 @@ import type { MarketHistory } from './backtest.js';
 import { MarketData } from './market-data.js';
 import { buildGrid, type Trial } from './optimizer.js';
 import { normaliseConfig } from './backtest-runner.js';
+import { loadReplayTimingHistory, replayWarmupStarts, REPLAY_WARMUP_BARS } from './replay-warmup.js';
 import { runWorkerJob } from './worker-runner.js';
 import type { BacktestConfig, OptimizeStatus, RiskConfig } from './types.js';
-
-/** Bars of warmup loaded before the window. */
-const WARMUP_BARS = 80;
 
 /**
  * Ceiling on total replay work per search, in bar-evaluations.
@@ -20,16 +18,6 @@ const MAX_WORK = 120_000_000;
 
 /** Never thin the grid below this — fewer candidates is not a search. */
 const MIN_CANDIDATES = 24;
-
-const INTERVAL_SECONDS: Record<string, number> = {
-  Min1: 60,
-  Min5: 300,
-  Min15: 900,
-  Min30: 1800,
-  Min60: 3600,
-  Hour4: 14_400,
-  Day1: 86_400,
-};
 
 /**
  * Loads history once, then searches parameter combinations against it.
@@ -78,8 +66,11 @@ export class OptimizerRunner {
 
   private async execute(config: BacktestConfig, candidateLimit: number): Promise<void> {
     try {
-      const step = INTERVAL_SECONDS[config.interval] || 900;
-      const warmupFrom = config.from - step * WARMUP_BARS;
+      const { entryFrom, higherFrom } = replayWarmupStarts(
+        config.from,
+        config.interval,
+        config.higherInterval
+      );
       const markets: MarketHistory[] = [];
 
       for (let i = 0; i < config.symbols.length; i += 1) {
@@ -90,11 +81,21 @@ export class OptimizerRunner {
           progress: (i / config.symbols.length) * 0.25,
         };
         const [candles, higher] = await Promise.all([
-          this.market.history(symbol, config.interval, warmupFrom, config.to),
-          this.market.history(symbol, config.higherInterval, warmupFrom, config.to).catch(() => []),
+          this.market.history(symbol, config.interval, entryFrom, config.to),
+          this.market.history(symbol, config.higherInterval, higherFrom, config.to).catch(() => []),
         ]);
-        if (candles.length < WARMUP_BARS + 10) continue;
-        markets.push({ symbol, candles, higher });
+        if (candles.length < REPLAY_WARMUP_BARS + 10) continue;
+        const timing = await loadReplayTimingHistory(
+          this.market.history.bind(this.market),
+          symbol,
+          config.from,
+          config.to,
+          [
+            { interval: config.interval, from: entryFrom, to: config.to, candles },
+            { interval: config.higherInterval, from: higherFrom, to: config.to, candles: higher },
+          ]
+        );
+        markets.push({ symbol, candles, higher, ...timing });
       }
 
       if (!markets.length) {

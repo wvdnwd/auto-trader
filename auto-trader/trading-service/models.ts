@@ -29,9 +29,7 @@ export class TakeProfitDoc {
 @modelOptions({ schemaOptions: { collection: 'positions', timestamps: true } })
 export class PositionDoc {
   /**
-   * Owner of this position — `'main'` for the deployment owner, or a per-browser
-   * client id for anyone else using a shared link. Keeps every visitor's paper
-   * account (and mirrored live orders) fully isolated from everyone else's.
+   * Fixed service namespace. The HTTP API does not accept tenant selection.
    */
   @prop({ type: () => String, required: true, default: 'main', index: true })
   public tenantId!: string;
@@ -94,6 +92,21 @@ export class PositionDoc {
   @prop({ type: () => Boolean, default: false })
   public regimeTrimmed?: boolean;
 
+  @prop({ type: () => Number, default: 0 })
+  public scaleInCount?: number;
+
+  @prop({ type: () => Number })
+  public scaledInAt?: number;
+
+  @prop({ type: () => Number })
+  public scaleInMargin?: number;
+
+  @prop({ type: () => Number })
+  public profitLockR?: number;
+
+  @prop({ type: () => Boolean, default: false })
+  public climaxTrimmed?: boolean;
+
   @prop({ type: () => Number, required: true })
   public openedAt!: number;
 
@@ -150,7 +163,7 @@ export class PositionDoc {
  */
 @modelOptions({ schemaOptions: { collection: 'account', timestamps: true } })
 export class AccountDoc {
-  /** Tenant id — `'main'` for the deployment owner, otherwise a per-browser client id. */
+  /** Fixed service namespace; request headers cannot select an account. */
   @prop({ type: () => String, required: true, unique: true, default: 'main' })
   public key!: string;
 
@@ -178,7 +191,7 @@ export class AccountDoc {
  */
 @modelOptions({ schemaOptions: { collection: 'events' } })
 export class EventDoc {
-  /** Tenant id — `'main'` for the deployment owner, otherwise a per-browser client id. */
+  /** Fixed service namespace; request headers cannot select an account. */
   @prop({ type: () => String, required: true, default: 'main', index: true })
   public tenantId!: string;
 
@@ -201,7 +214,7 @@ export class EventDoc {
  */
 @modelOptions({ schemaOptions: { collection: 'scout', timestamps: true } })
 export class ScoutDoc {
-  /** Tenant id — `'main'` for the deployment owner, otherwise a per-browser client id. */
+  /** Fixed service namespace; request headers cannot select an account. */
   @prop({ type: () => String, required: true, unique: true, default: 'main' })
   public key!: string;
 
@@ -219,15 +232,12 @@ export class ScoutDoc {
 /**
  * Persisted MEXC API credentials — a single singleton document.
  *
- * Storing these in the database (rather than requiring `MEXC_API_KEY` /
- * `MEXC_API_SECRET` environment variables) lets whoever runs this deployment
- * paste in their own MEXC key from the dashboard, so the same build can be
- * handed to someone else and they connect their own account without needing
- * access to the hosting environment's configuration.
+ * Credentials belong to the one explicitly authenticated service instance.
+ * Live execution remains disarmed independently of whether keys are present.
  */
 @modelOptions({ schemaOptions: { collection: 'exchange_credentials', timestamps: true } })
 export class ExchangeCredentialsDoc {
-  /** Tenant id — `'main'` for the deployment owner, otherwise a per-browser client id. */
+  /** Fixed service namespace; request headers cannot select an account. */
   @prop({ type: () => String, required: true, unique: true, default: 'main' })
   public key!: string;
 

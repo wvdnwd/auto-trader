@@ -16,6 +16,27 @@ export type Trial = {
   testResult: Pick<BacktestResult, 'totalReturnPct' | 'expectancyR' | 'maxDrawdownPct' | 'trades'>;
 };
 
+type TrainingTrial = Pick<Trial, 'params' | 'trainScore' | 'trainResult'>;
+
+const WARMUP_BARS = 80;
+
+const INTERVAL_SECONDS: Record<string, number> = {
+  Min1: 60,
+  Min5: 300,
+  Min15: 900,
+  Min30: 1800,
+  Min60: 3600,
+  Hour4: 14_400,
+  Day1: 86_400,
+};
+
+function timingSlice(candles: MarketHistory['timing15m'], from: number, to: number, intervalSeconds: number) {
+  return candles?.filter((candle) => {
+    const closedAt = candle.time + intervalSeconds;
+    return closedAt >= from - intervalSeconds * WARMUP_BARS && closedAt <= to;
+  });
+}
+
 /**
  * Score a backtest result as a single number.
  *
@@ -65,8 +86,10 @@ export class Optimizer {
   /** Training slice, computed once and reused for every candidate. */
   private trainSet: MarketHistory[] | null = null;
 
-  /** Held-out slice, computed once and reused for every candidate. */
+  /** Held-out slice, evaluated only after training selection is complete. */
   private testSet: MarketHistory[] | null = null;
+
+  private splitAt = 0;
 
   /**
    * Split the history into a training and a held-out window.
@@ -77,37 +100,48 @@ export class Optimizer {
    * @param splitAt unix seconds separating training from test data.
    */
   prepare(splitAt: number): void {
-    this.trainSet = this.slice(0, splitAt);
-    this.testSet = this.slice(splitAt, Number.MAX_SAFE_INTEGER);
+    this.splitAt = splitAt;
+    this.trainSet = this.slice(this.base.from, splitAt - 1);
+    this.testSet = this.slice(splitAt, this.base.to);
   }
 
   /**
-   * Evaluate a single candidate against both windows.
+   * Evaluate a candidate on training data only.
    *
    * @param params the parameter set to score.
-   * @returns the trial, or null when the candidate produced no usable run.
+   * @returns its training-only result, or null when the candidate has no usable run.
    */
-  evaluateCandidate(params: Candidate): Trial | null {
+  evaluateCandidate(params: Candidate): TrainingTrial | null {
     if (!this.trainSet || !this.testSet) throw new Error('prepare() moet eerst aangeroepen worden');
-    const trainResult = this.evaluate(this.trainSet, params);
-    const testResult = this.evaluate(this.testSet, params);
-    if (!trainResult || !testResult) return null;
+    const trainResult = this.evaluate(this.trainSet, params, this.base.from, this.splitAt - 1);
+    if (!trainResult) return null;
     return {
       params,
       trainScore: score(trainResult),
-      testScore: score(testResult),
       trainResult: summarise(trainResult),
+    };
+  }
+
+  /** Evaluate the selected candidate once against held-out history. */
+  private validateCandidate(candidate: TrainingTrial): Trial | null {
+    if (!this.testSet) throw new Error('prepare() moet eerst aangeroepen worden');
+    const testResult = this.evaluate(this.testSet, candidate.params, this.splitAt, this.base.to);
+    if (!testResult) return null;
+    return {
+      ...candidate,
+      testScore: score(testResult),
       testResult: summarise(testResult),
     };
   }
 
   /**
-   * Evaluate every candidate and return them ranked by out-of-sample score.
+   * Rank candidates on training data, then validate the winner once.
    *
    * @param candidates parameter sets to try.
    * @param splitAt unix seconds separating training from test data.
    * @param onProgress called after each candidate, for UI progress.
-   * @returns trials sorted best-first by test score.
+   * @returns the selected candidate with its single held-out evaluation.
+   * @throws when the selected candidate cannot be validated or scores below zero out-of-sample.
    */
   run(
     candidates: Candidate[],
@@ -115,21 +149,33 @@ export class Optimizer {
     onProgress?: (done: number, total: number) => void
   ): Trial[] {
     this.prepare(splitAt);
-    const trials: Trial[] = [];
+    const training: TrainingTrial[] = [];
     for (let i = 0; i < candidates.length; i += 1) {
       const trial = this.evaluateCandidate(candidates[i]);
-      if (trial) trials.push(trial);
+      if (trial) training.push(trial);
       onProgress?.(i + 1, candidates.length);
     }
-    return rank(trials);
+    const selected = rank(training)[0];
+    if (!selected) return [];
+    const validated = this.validateCandidate(selected);
+    if (!validated) throw new Error('Geselecteerde combinatie kon niet out-of-sample worden gevalideerd');
+    if (validated.testScore < 0) {
+      throw new Error('Geselecteerde combinatie afgewezen: negatieve out-of-sample score');
+    }
+    return [validated];
   }
 
-  private evaluate(markets: MarketHistory[], params: Candidate): BacktestResult | null {
+  private evaluate(
+    markets: MarketHistory[],
+    params: Candidate,
+    from: number,
+    to: number
+  ): BacktestResult | null {
     if (!markets.length) return null;
     try {
       return new Backtest(
         markets,
-        { ...this.base, risk: { ...this.base.risk, ...params } },
+        { ...this.base, from, to, risk: { ...this.base.risk, ...params } },
         // Lean: hundreds of runs, and only the statistics are read.
         true
       ).run();
@@ -140,40 +186,36 @@ export class Optimizer {
   }
 
   private slice(from: number, to: number): MarketHistory[] {
+    const entryWarmupFrom = from - (INTERVAL_SECONDS[this.base.interval] || 900) * WARMUP_BARS;
+    const higherWarmupFrom = from - (INTERVAL_SECONDS[this.base.higherInterval] || 3600) * WARMUP_BARS;
     return this.markets
       .map((m) => ({
         symbol: m.symbol,
-        // Indicators need history, so the training warmup is carried into the
-        // test slice — otherwise the test window would start blind.
-        candles: m.candles.filter((c) => c.time < to && (c.time >= from || from === 0)),
-        higher: m.higher.filter((c) => c.time < to),
+        // Keep a warm-up tail, but let Backtest enforce the scoring window.
+        candles: m.candles.filter((c) => {
+          const closedAt = c.time + (INTERVAL_SECONDS[this.base.interval] || 900);
+          return closedAt >= entryWarmupFrom && closedAt <= to;
+        }),
+        higher: m.higher.filter((c) => {
+          const closedAt = c.time + (INTERVAL_SECONDS[this.base.higherInterval] || 3600);
+          return closedAt >= higherWarmupFrom && closedAt <= to;
+        }),
+        timing15m: timingSlice(m.timing15m, from, to, 900),
+        timing5m: timingSlice(m.timing5m, from, to, 300),
       }))
-      .filter((m) => m.candles.length > 80);
+      .filter((m) => m.candles.length > WARMUP_BARS);
   }
+
 }
 
 /**
- * Rank trials by out-of-sample score.
+ * Rank candidates by training score only.
  *
- * When two candidates land within noise of each other on the test window, the
- * tiebreak is how closely train and test agree — a parameter set that performs
- * the same on both is more likely to keep working than one that was brilliant
- * only on the data it was selected on.
- *
- * @param trials the trials to rank.
+ * @param trials the training-only candidates to rank.
  * @returns the trials sorted best-first.
  */
-export function rank(trials: Trial[]): Trial[] {
-  return [...trials].sort((a, b) => {
-    const byTest = b.testScore - a.testScore;
-    if (Math.abs(byTest) > 0.3) return byTest;
-    return consistency(b) - consistency(a);
-  });
-}
-
-/** How closely train and test agree — high means the result generalises. */
-function consistency(trial: Trial): number {
-  return -Math.abs(trial.trainScore - trial.testScore);
+export function rank<T extends Pick<TrainingTrial, 'trainScore'>>(trials: T[]): T[] {
+  return [...trials].sort((a, b) => b.trainScore - a.trainScore);
 }
 
 function summarise(

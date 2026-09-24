@@ -1,43 +1,53 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { MarketData } from './market-data.js';
-import { TradingService } from './trading-service.js';
+import type { TradingService } from './trading-service.js';
 
-function loadEnv() {
+function loadEnv(): void {
   try {
     const envPath = path.resolve(process.cwd(), '.env');
-    if (fs.existsSync(envPath)) {
-      const lines = fs.readFileSync(envPath, 'utf8').split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
-          const [k, ...v] = trimmed.split('=');
-          const val = v.join('=').trim().replace(/^["'](.*)["']$/, '$1');
-          if (k && !process.env[k.trim()]) {
-            process.env[k.trim()] = val;
-          }
-        }
-      }
+    if (!fs.existsSync(envPath)) return;
+    for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) continue;
+      const [key, ...parts] = trimmed.split('=');
+      const value = parts.join('=').trim().replace(/^["'](.*)["']$/, '$1');
+      if (key && !process.env[key.trim()]) process.env[key.trim()] = value;
     }
   } catch {
-    // ignore
+    // Missing configuration fails closed at the protected-route boundary.
   }
 }
 
-loadEnv();
+/** Require a fixed-length, constant-time comparison for the configured token. */
+export function createApiAuthMiddleware(token: string | undefined) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (req.method === 'GET' && req.path === '/health') {
+      next();
+      return;
+    }
+    if (!token) {
+      res.status(503).json({ error: 'API authentication is not configured' });
+      return;
+    }
+    const match = /^Bearer ([^\s]+)$/.exec(req.get('authorization') || '');
+    if (!match) {
+      res.status(401).json({ error: 'Bearer token required' });
+      return;
+    }
+    const expected = createHash('sha256').update(token, 'utf8').digest();
+    const supplied = createHash('sha256').update(match[1], 'utf8').digest();
+    if (!timingSafeEqual(expected, supplied)) {
+      res.status(401).json({ error: 'Invalid bearer token' });
+      return;
+    }
+    next();
+  };
+}
 
-/** Header a client sends to identify itself as a specific tenant. */
-const TENANT_HEADER = 'x-client-id';
-
-/**
- * Read the tenant-scoped {@link TradingService} attached to this request by
- * the tenant-resolution middleware below. Kept as a small helper (reading
- * from `res.locals`, already loosely typed by Express) rather than a global
- * `Request` type augmentation, which needs `@types/express-serve-static-core`
- * resolvable at the type-checker's module resolution root.
- */
 function serviceFor(res: Response): TradingService {
   return res.locals.service as TradingService;
 }
@@ -45,58 +55,56 @@ function serviceFor(res: Response): TradingService {
 /**
  * Start the trading service HTTP API.
  *
- * Exposes a small REST surface consumed by the dashboard app. Every request
- * is routed to a tenant-scoped {@link TradingService} — identified by the
- * `x-client-id` header the dashboard sends automatically — so a deployment
- * can be shared with anyone: each visitor gets their own paper account,
- * their own MEXC connection, and their own history, completely independent
- * from the deployment owner's (`'main'`) and from each other. Requests with
- * no header (e.g. a raw curl call) fall back to `'main'` for compatibility.
+ * Exposes a single-instance API protected by `TRADER_API_TOKEN`.
  *
  * @returns the running server handle.
  */
 export function run() {
-  const app = express();
-  app.use(express.json());
-
-  // Market data (tickers, candles, contract specs) carries no user-specific
-  // state, so it is fetched once and shared across every tenant — avoids
-  // duplicating API calls and caches per visitor for no reason.
-  const sharedMarket = new MarketData();
-  const services = new Map<string, Promise<TradingService>>();
-
-  function getService(tenantId: string): Promise<TradingService> {
-    let pending = services.get(tenantId);
-    if (!pending) {
-      const service = TradingService.from(tenantId, sharedMarket);
-      // The deployment owner's engine autostarts per AUTOSTART like before;
-      // a freshly-created tenant for a shared visitor also autostarts by
-      // default so their scanner is live immediately, matching what the
-      // owner sees.
-      pending = service.init(process.env.AUTOSTART !== 'false').then(() => service);
-      services.set(tenantId, pending);
-    }
-    return pending;
+  loadEnv();
+  if (process.env.LIVE_TRADING_ENABLED !== 'true') {
+    process.env.LIVE_TRADING_ENABLED = 'false';
   }
+  const app = express();
 
-  // Pre-warm the deployment owner's service so the engine autostarts
-  // immediately on boot (e.g. on a headless Raspberry Pi) without waiting
-  // for an incoming browser HTTP request.
-  void getService('main');
-
-  app.use(async (req: Request, res: Response, next: NextFunction) => {
-    const header = req.header(TENANT_HEADER);
-    const tenantId = header && header.trim() ? header.trim().slice(0, 128) : 'main';
-    try {
-      res.locals.service = await getService(tenantId);
-      next();
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method === 'GET' && req.path === '/health') {
+      res.json({ ok: true });
+      return;
     }
+    next();
   });
 
-  app.get('/health', (_req, res) => {
-    res.json({ ok: true });
+  const apiToken = process.env.TRADER_API_TOKEN?.trim() || undefined;
+  app.use(createApiAuthMiddleware(apiToken));
+  app.use(express.json());
+  let serviceReady: Promise<TradingService> | undefined;
+  if (apiToken) {
+    serviceReady = import('./trading-service.js').then(async ({ TradingService: Service }) => {
+      const service = Service.from(new MarketData());
+      await service.init(false);
+      return service;
+    });
+    void serviceReady.catch((err: unknown) => {
+      console.error('[trading-service] initialization failed; API remains unavailable:',
+        err instanceof Error ? err.name : 'unknown error');
+    });
+  }
+  app.use(async (_req: Request, res: Response, next: NextFunction) => {
+    if (!serviceReady) {
+      res.status(503).json({ error: 'Trading service is unavailable' });
+      return;
+    }
+    try {
+      const service = await serviceReady;
+      if (!service.isStorageHealthy()) {
+        res.status(503).json({ error: 'Trading storage is unavailable' });
+        return;
+      }
+      res.locals.service = service;
+      next();
+    } catch {
+      res.status(503).json({ error: 'Trading service is unavailable' });
+    }
   });
 
   app.get('/snapshot', async (_req, res) => {
@@ -108,8 +116,12 @@ export function run() {
   });
 
   app.post('/engine/start', (_req, res) => {
-    serviceFor(res).start();
-    res.json({ running: true });
+    try {
+      serviceFor(res).start();
+      res.json({ running: true });
+    } catch (err) {
+      res.status(409).json({ error: (err as Error).message });
+    }
   });
 
   app.post('/engine/stop', (_req, res) => {
@@ -122,7 +134,7 @@ export function run() {
       await serviceFor(res).runOnce();
       res.json({ ok: true });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(409).json({ error: (err as Error).message });
     }
   });
 
@@ -140,7 +152,17 @@ export function run() {
       const closed = await serviceFor(res).closePosition(req.params.id);
       res.status(closed ? 200 : 404).json({ closed });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(409).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/positions/:id/reduce', async (req, res) => {
+    try {
+      const fraction = typeof req.body?.fraction === 'number' ? req.body.fraction : 0.5;
+      const reduced = await serviceFor(res).reducePosition(req.params.id, fraction);
+      res.status(reduced ? 200 : 404).json({ reduced });
+    } catch (err) {
+      res.status(409).json({ error: (err as Error).message });
     }
   });
 
@@ -165,7 +187,7 @@ export function run() {
     try {
       res.json(await serviceFor(res).setLiveTrading(armed));
     } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
+      res.status(409).json({ error: (err as Error).message });
     }
   });
 
@@ -177,47 +199,17 @@ export function run() {
     }
     try {
       res.json(await serviceFor(res).saveExchangeCredentials(apiKey.trim(), apiSecret.trim()));
-    } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
+    } catch {
+      res.status(503).json({ error: 'Credential storage is unavailable' });
     }
   });
 
-  // Manual connectivity check: places (and by default immediately closes) a
-  // tiny real order on MEXC so a pasted API key can be proven to work before
-  // the autonomous engine is armed.
-  app.post('/exchange/test-order', async (req, res) => {
-    const { symbol, side, usdtAmount, leverage, keepOpen, tpPct, slPct } = req.body || {};
-    if (typeof symbol !== 'string' || !symbol) {
-      res.status(400).json({ error: 'symbol (string) required' });
-      return;
-    }
-    try {
-      const result = await serviceFor(res).placeTestOrder(
-        symbol,
-        side === 'SHORT' ? 'SHORT' : 'LONG',
-        typeof usdtAmount === 'number' ? usdtAmount : 1,
-        typeof leverage === 'number' ? leverage : 5,
-        Boolean(keepOpen),
-        typeof tpPct === 'number' && tpPct > 0 ? tpPct : 3,
-        typeof slPct === 'number' && slPct > 0 ? slPct : 2
-      );
-      res.json(result);
-    } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
-    }
+  app.post('/exchange/test-order', (_req, res) => {
+    res.status(409).json({ error: 'Exchange order probes are disabled' });
   });
 
-  app.post('/exchange/positions/:symbol/close', async (req, res) => {
-    try {
-      const result = await serviceFor(res).flattenExchangePosition(req.params.symbol);
-      if (!result) {
-        res.status(404).json({ error: `Geen open positie gevonden op MEXC voor ${req.params.symbol}` });
-        return;
-      }
-      res.json(result);
-    } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
-    }
+  app.post('/exchange/positions/:symbol/close', (_req, res) => {
+    res.status(409).json({ error: 'Exchange position mutations are disabled' });
   });
 
   app.get('/chart/:symbol', async (req, res) => {
@@ -282,18 +274,8 @@ export function run() {
     }
   });
 
-  // Testing aid: move a market to a given price and run exit management.
-  app.post('/simulate', async (req, res) => {
-    const { symbol, price } = req.body || {};
-    if (typeof symbol !== 'string' || typeof price !== 'number') {
-      res.status(400).json({ error: 'symbol (string) and price (number) required' });
-      return;
-    }
-    try {
-      res.json({ open: await serviceFor(res).simulatePrice(symbol, price) });
-    } catch (err) {
-      res.status(400).json({ error: (err as Error).message });
-    }
+  app.post('/simulate', (_req, res) => {
+    res.status(409).json({ error: 'Price simulation is disabled on the trading service' });
   });
 
   app.post('/scout/:symbol/approve', async (req, res) => {
@@ -319,7 +301,7 @@ export function run() {
       await serviceFor(res).reset();
       res.json({ ok: true });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status(409).json({ error: (err as Error).message });
     }
   });
 
@@ -332,10 +314,8 @@ export function run() {
   return {
     port,
     stop: async () => {
-      for (const pending of services.values()) {
-        const service = await pending.catch(() => null);
-        service?.stop();
-      }
+      const service = await serviceReady?.catch(() => null);
+      service?.shutdown();
       server.closeAllConnections();
       server.close();
     },

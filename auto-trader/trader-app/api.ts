@@ -30,46 +30,60 @@ const BASE = resolveBase();
 /** Requests time out rather than hanging the dashboard forever. */
 const TIMEOUT_MS = 20_000;
 
-/** Where the per-browser client id is persisted. */
-const CLIENT_ID_KEY = 'trader-app-client-id';
+/** The API token is kept only for the lifetime of this browser tab. */
+const API_TOKEN_KEY = 'trader-app-api-token';
 
-/**
- * Get (or create) a stable id for this browser, sent as `x-client-id` on
- * every request so the backend can give this visitor their own isolated
- * paper account, MEXC connection and history — letting the dashboard be
- * shared with anyone without touching the deployment owner's account.
- *
- * @returns a persistent client id, unique per browser.
- */
-function clientId(): string {
-  if (typeof window === 'undefined') return 'main';
+/** Set or clear the tab-scoped API token. The token is never put in a URL or body. */
+export function setApiToken(token: string): boolean {
+  if (typeof window === 'undefined') return false;
   try {
-    const urlParam = new URLSearchParams(window.location.search).get('client');
-    if (urlParam && urlParam.trim()) return urlParam.trim();
+    if (token.trim()) window.sessionStorage.setItem(API_TOKEN_KEY, token.trim());
+    else window.sessionStorage.removeItem(API_TOKEN_KEY);
+    return true;
   } catch {
-    // Ignore URL parse errors
+    return false;
   }
-  let id = window.localStorage.getItem(CLIENT_ID_KEY);
-  if (!id) {
-    id = 'main';
-    window.localStorage.setItem(CLIENT_ID_KEY, id);
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
   }
-  return id;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!import.meta.env?.DEV && typeof window !== 'undefined') {
+    const localHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(window.location.hostname);
+    if (window.location.protocol !== 'https:' && !localHost) {
+      throw new Error('Insecure HTTP dashboard blocked. Serve the dashboard over HTTPS before entering the API token.');
+    }
+  }
+  if (!import.meta.env?.DEV && /^http:\/\//i.test(BASE)) {
+    throw new Error('Insecure HTTP API URL blocked. Configure HTTPS for BACKEND_URL.');
+  }
+  let token = '';
+  try {
+    token = typeof window === 'undefined' ? '' : window.sessionStorage.getItem(API_TOKEN_KEY) || '';
+  } catch {
+    // Continue without a token so the server can return its actionable auth status.
+  }
+  const headers = new Headers(init?.headers);
+  headers.set('content-type', 'application/json');
+  if (token) headers.set('authorization', `Bearer ${token}`);
+  else headers.delete('authorization');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}${path}`, {
-      credentials: 'include',
-      headers: { 'content-type': 'application/json', 'x-client-id': clientId() },
-      signal: controller.signal,
       ...init,
+      credentials: 'omit',
+      headers,
+      signal: controller.signal,
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(detail ? `${res.status}: ${detail.slice(0, 200)}` : `${res.status} ${res.statusText}`);
+      throw new ApiError(detail ? `${res.status}: ${detail.slice(0, 200)}` : `${res.status} ${res.statusText}`, res.status);
     }
     return (await res.json()) as T;
   } catch (err) {
@@ -120,6 +134,16 @@ export function updateRisk(patch: Partial<RiskConfig>): Promise<RiskConfig> {
  */
 export function closePosition(id: string): Promise<{ closed: boolean }> {
   return request(`/positions/${id}/close`, { method: 'POST' });
+}
+
+/**
+ * Reduce an open position by a fraction (e.g. 0.5 = 50% partial take-profit).
+ *
+ * @param id position id.
+ * @param fraction fraction to close (defaults to 0.5).
+ */
+export function reducePosition(id: string, fraction = 0.5): Promise<{ reduced: boolean }> {
+  return request(`/positions/${id}/reduce`, { method: 'POST', body: JSON.stringify({ fraction }) });
 }
 
 /** Reset the paper account and wipe history. */
