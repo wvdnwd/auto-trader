@@ -19,12 +19,24 @@ function Invoke-Native {
 
 if (-not $PiHost) {
     Write-Host "Voer de gebruikersnaam en het IP-adres van je Raspberry Pi in." -ForegroundColor Cyan
-    Write-Host "Bijvoorbeeld: pi@192.168.1.150 of pi@raspberrypi.local" -ForegroundColor DarkGray
-    $PiHost = Read-Host "Raspberry Pi host"
+    Write-Host "Bijvoorbeeld: wesleyvd23@192.168.1.91 of wesleyvd23@100.72.8.116" -ForegroundColor DarkGray
+    $PiHost = Read-Host "Raspberry Pi host (druk op Enter voor wesleyvd23@192.168.1.91)"
+    if (-not $PiHost) {
+        $PiHost = "wesleyvd23@192.168.1.91"
+    }
+}
+
+if ($PiHost -and $PiHost -notmatch '@') {
+    if ($PiHost -match '^[0-9.]+$') {
+        $PiHost = "wesleyvd23@$PiHost"
+    } else {
+        $PiHost = "${PiHost}@192.168.1.91"
+    }
+    Write-Host "Host automatisch aangevuld tot: $PiHost" -ForegroundColor Yellow
 }
 
 if (-not $PiHost -or $PiHost -notmatch '^[A-Za-z0-9._@:-]+$') {
-    Write-Error "Ongeldige of ontbrekende host; verwacht bijvoorbeeld pi@192.168.1.150."
+    Write-Error "Ongeldige of ontbrekende host; verwacht bijvoorbeeld wesleyvd23@192.168.1.91."
     exit 1
 }
 
