@@ -527,38 +527,64 @@ export class MexcExchangeAdapter implements IExchangeAdapter {
     );
   }
 
+  private cachedPositions: { data: ExchangePosition[]; at: number } | null = null;
+  private pendingPositionsPromise: Promise<ExchangePosition[]> | null = null;
+
+  private cachedAssets: { data: ExchangeAccountAsset[]; at: number } | null = null;
+  private pendingAssetsPromise: Promise<ExchangeAccountAsset[]> | null = null;
+
   /**
    * Fetch every currently open position on the account.
    *
    * @returns open positions, venue-reported.
    */
   async getOpenPositions(): Promise<ExchangePosition[]> {
-    const raw = await this.get<
-      {
-        symbol: string;
-        positionType: 1 | 2;
-        holdVol: number;
-        leverage: number;
-        holdAvgPrice: number;
-        liquidatePrice: number;
-        unRealizedPnl?: number;
-        unrealised?: number;
-        createTime?: number;
-        cTime?: number;
-        openTime?: number;
-        updateTime?: number;
-      }[]
-    >('/position/open_positions', {});
-    return raw.map((p) => ({
-      symbol: p.symbol,
-      side: p.positionType === 1 ? 'LONG' : 'SHORT',
-      vol: p.holdVol,
-      leverage: p.leverage,
-      entryPrice: p.holdAvgPrice,
-      liquidationPrice: p.liquidatePrice,
-      unrealisedPnl: p.unRealizedPnl ?? p.unrealised ?? 0,
-      createTime: p.createTime ?? p.cTime ?? p.openTime ?? p.updateTime,
-    }));
+    const now = Date.now();
+    if (this.cachedPositions && now - this.cachedPositions.at < 2500) {
+      return this.cachedPositions.data;
+    }
+    if (this.pendingPositionsPromise) {
+      return this.pendingPositionsPromise;
+    }
+    this.pendingPositionsPromise = (async () => {
+      try {
+        const raw = await this.get<
+          {
+            symbol: string;
+            positionType: 1 | 2;
+            holdVol: number;
+            leverage: number;
+            holdAvgPrice: number;
+            liquidatePrice: number;
+            unRealizedPnl?: number;
+            unrealised?: number;
+            createTime?: number;
+            cTime?: number;
+            openTime?: number;
+            updateTime?: number;
+          }[]
+        >('/position/open_positions', {});
+        const list = Array.isArray(raw) ? raw : [];
+        const result = list.map((p) => ({
+          symbol: p.symbol,
+          side: p.positionType === 1 ? ('LONG' as const) : ('SHORT' as const),
+          vol: p.holdVol,
+          leverage: p.leverage,
+          entryPrice: p.holdAvgPrice,
+          liquidationPrice: p.liquidatePrice,
+          unrealisedPnl: p.unRealizedPnl ?? p.unrealised ?? 0,
+          createTime: p.createTime ?? p.cTime ?? p.openTime ?? p.updateTime,
+        }));
+        this.cachedPositions = { data: result, at: Date.now() };
+        return result;
+      } catch (err) {
+        if (this.cachedPositions) return this.cachedPositions.data;
+        throw err;
+      } finally {
+        this.pendingPositionsPromise = null;
+      }
+    })();
+    return this.pendingPositionsPromise;
   }
 
   /**
@@ -567,15 +593,35 @@ export class MexcExchangeAdapter implements IExchangeAdapter {
    * @returns per-currency equity, available and frozen balances.
    */
   async getAccountAssets(): Promise<ExchangeAccountAsset[]> {
-    const raw = await this.get<
-      { currency: string; equity: number; availableBalance: number; frozenBalance: number }[]
-    >('/account/assets', {});
-    return raw.map((a) => ({
-      currency: a.currency,
-      equity: a.equity,
-      available: a.availableBalance,
-      frozen: a.frozenBalance,
-    }));
+    const now = Date.now();
+    if (this.cachedAssets && now - this.cachedAssets.at < 2500) {
+      return this.cachedAssets.data;
+    }
+    if (this.pendingAssetsPromise) {
+      return this.pendingAssetsPromise;
+    }
+    this.pendingAssetsPromise = (async () => {
+      try {
+        const raw = await this.get<
+          { currency: string; equity: number; availableBalance: number; frozenBalance: number }[]
+        >('/account/assets', {});
+        const list = Array.isArray(raw) ? raw : [];
+        const result = list.map((a) => ({
+          currency: a.currency,
+          equity: a.equity,
+          available: a.availableBalance,
+          frozen: a.frozenBalance,
+        }));
+        this.cachedAssets = { data: result, at: Date.now() };
+        return result;
+      } catch (err) {
+        if (this.cachedAssets) return this.cachedAssets.data;
+        throw err;
+      } finally {
+        this.pendingAssetsPromise = null;
+      }
+    })();
+    return this.pendingAssetsPromise;
   }
 
   private assertExecutionEnabled(): void {
@@ -618,28 +664,28 @@ export class MexcExchangeAdapter implements IExchangeAdapter {
     requireData = true,
     retries = 1
   ): Promise<T> {
-    const res = await fetch(url, { method, headers, body });
-    const json = (await res.json().catch(() => null)) as
-      | { success?: boolean; code?: number; message?: string; data?: T }
-      | null;
-    if (!res.ok || !json || json.success === false) {
-      const detail = json?.message || `${res.status} ${res.statusText}`;
-      if (retries > 0 && (res.status === 429 || detail.toLowerCase().includes('frequent'))) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        const newTimestamp = Date.now();
-        const payload = method === 'GET' ? (url.split('?')[1] || '') : (body || '');
-        const newHeaders = this.headers(newTimestamp, payload);
-        return this.send<T>(url, method, newHeaders, body, requireData, retries - 1);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    try {
+      const res = await fetch(url, { method, headers, body, signal: controller.signal });
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; code?: number; message?: string; data?: T }
+        | null;
+      if (!res.ok || !json || json.success === false) {
+        const detail = json?.message || `${res.status} ${res.statusText}`;
+        if (retries > 0 && (res.status === 429 || detail.toLowerCase().includes('frequent'))) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const newTimestamp = Date.now();
+          const payload = method === 'GET' ? (url.split('?')[1] || '') : (body || '');
+          const newHeaders = this.headers(newTimestamp, payload);
+          return this.send<T>(url, method, newHeaders, body, requireData, retries - 1);
+        }
+        throw new Error(`MEXC-order mislukt: ${detail}`);
       }
-      throw new Error(`MEXC-order mislukt: ${detail}`);
+      if (requireData && json.data === undefined) throw new Error('MEXC-antwoord bevatte geen data');
+      return json.data as T;
+    } finally {
+      clearTimeout(timeout);
     }
-    // Settings-style endpoints (e.g. change_leverage) confirm success without
-    // echoing a `data` payload back — there is nothing to return for a value
-    // that was just set, so `success: true` alone is the meaningful signal.
-    // Endpoints that DO return a resource (an order id, a position list) still
-    // require `data` to be present, since a missing payload there means the
-    // response cannot be trusted even though the HTTP call itself succeeded.
-    if (requireData && json.data === undefined) throw new Error('MEXC-antwoord bevatte geen data');
-    return json.data as T;
   }
 }

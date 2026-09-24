@@ -585,7 +585,7 @@ export class Engine {
     if (!this.stopped) return;
     this.stopped = false;
     void this.log('info', 'Engine gestart — autonome modus actief');
-    void this.tick();
+    void this.tick().catch(() => {});
   }
 
   /** Stop the autonomous loop. Open positions are left untouched. */
@@ -607,19 +607,26 @@ export class Engine {
    * the next one.
    */
   private async tick(): Promise<void> {
-    await this.cycle();
-    if (this.stopped) return;
-    const wasFast = this.fast;
-    this.fast = await this.nearDecision();
-    if (this.fast !== wasFast) {
-      await this.log(
-        'info',
-        this.fast
-          ? `Sneller scannen (${this.fastIntervalSec}s) — setup dicht bij trigger`
-          : `Terug naar normaal scannen (${this.intervalSec}s)`
-      );
+    try {
+      await this.cycle();
+      if (this.stopped) return;
+      const wasFast = this.fast;
+      this.fast = await this.nearDecision();
+      if (this.fast !== wasFast) {
+        await this.log(
+          'info',
+          this.fast
+            ? `Sneller scannen (${this.fastIntervalSec}s) — setup dicht bij trigger`
+            : `Terug naar normaal scannen (${this.intervalSec}s)`
+        );
+      }
+    } catch (err) {
+      await this.log('error', `Fout in engine tick: ${(err as Error).message}`).catch(() => {});
+    } finally {
+      if (!this.stopped) {
+        this.timer = setTimeout(() => void this.tick().catch(() => {}), this.cadenceSec * 1000);
+      }
     }
-    this.timer = setTimeout(() => void this.tick(), this.cadenceSec * 1000);
   }
 
   /**

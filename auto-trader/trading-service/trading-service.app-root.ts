@@ -209,12 +209,35 @@ export function run() {
     }
   });
 
-  app.post('/exchange/test-order', (_req, res) => {
-    res.status(409).json({ error: 'Exchange order probes are disabled' });
+  app.post('/exchange/test-order', async (req, res) => {
+    const { symbol, side, usdtAmount, leverage, keepOpen, tpPct, slPct } = req.body || {};
+    if (typeof symbol !== 'string') {
+      res.status(400).json({ error: 'symbol (string) required' });
+      return;
+    }
+    try {
+      const result = await serviceFor(res).placeTestOrder(
+        symbol,
+        side,
+        Number(usdtAmount) || 1,
+        Number(leverage) || 5,
+        Boolean(keepOpen),
+        Number(tpPct) || 3,
+        Number(slPct) || 2
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(409).json({ error: (err as Error).message });
+    }
   });
 
-  app.post('/exchange/positions/:symbol/close', (_req, res) => {
-    res.status(409).json({ error: 'Exchange position mutations are disabled' });
+  app.post('/exchange/positions/:symbol/close', async (req, res) => {
+    try {
+      const result = await serviceFor(res).flattenExchangePosition(req.params.symbol);
+      res.json(result || { closed: false });
+    } catch (err) {
+      res.status(409).json({ error: (err as Error).message });
+    }
   });
 
   app.get('/chart/:symbol', async (req, res) => {

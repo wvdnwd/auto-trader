@@ -496,20 +496,121 @@ export class TradingService {
     tpPct = 3,
     slPct = 2
   ): Promise<{ orderId: string; vol: number; price: number; tpPrice: number; slPrice: number; closeOrderId: string | null }> {
-    void symbol;
-    void side;
-    void usdtAmount;
-    void leverage;
-    void keepOpen;
-    void tpPct;
-    void slPct;
-    throw new Error('Exchange order probes are disabled until safe fill reconciliation is implemented');
+    if (!this.exchange.isConfigured()) {
+      throw new Error(
+        'Exchange API-sleutel ontbreekt — koppel eerst je eigen sleutel voordat je een testorder plaatst.'
+      );
+    }
+    if (!(usdtAmount > 0)) throw new Error('bedrag (USDT) moet groter dan 0 zijn');
+
+    const [price, detail] = await Promise.all([
+      this.market.price(symbol),
+      this.market.contractDetail(symbol),
+    ]);
+    if (!price) throw new Error(`geen live prijs beschikbaar voor ${symbol}`);
+
+    const contractSize = detail?.contractSize || 1;
+    const rawVol = (usdtAmount * leverage) / (contractSize * price);
+    const vol = Math.max(detail?.minVol || 1, Math.round(rawVol));
+    if (detail?.maxVol && vol > detail.maxVol) {
+      throw new Error(`bedrag te groot — max ordergrootte voor ${symbol} is ${detail.maxVol} contracten`);
+    }
+
+    const wasArmed = process.env.LIVE_TRADING_ENABLED === 'true';
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    try {
+      await this.exchange.setLeverage(symbol, leverage, side, 'isolated');
+
+      const scale = detail?.priceScale ?? 4;
+      const tpPrice = side === 'LONG'
+        ? +(price * (1 + tpPct / 100)).toFixed(scale)
+        : +(price * (1 - tpPct / 100)).toFixed(scale);
+      const slPrice = side === 'LONG'
+        ? +(price * (1 - slPct / 100)).toFixed(scale)
+        : +(price * (1 + slPct / 100)).toFixed(scale);
+
+      const opened = await this.exchange.placeMarketOrder({
+        symbol,
+        intent: side === 'LONG' ? 'OPEN_LONG' : 'OPEN_SHORT',
+        vol,
+        leverage,
+        openType: 'isolated',
+        externalOid: `test-${Date.now()}`,
+        takeProfitPrice: tpPrice,
+        stopLossPrice: slPrice,
+      });
+
+      await this.store.addEvent({
+        at: Date.now(),
+        level: 'warn',
+        message: `🧪 Testorder geplaatst: ${side} ${vol} contracten ${symbol} @ ~${price} (TP: ${tpPrice}, SL: ${slPrice}, order ${opened.orderId})${keepOpen ? '' : ' — wordt direct weer gesloten'}.`,
+      });
+      void notify({
+        kind: 'trade-open',
+        message: `🧪 Testorder geplaatst: ${side} ${vol} contracten ${symbol} @ ~${price} (order ${opened.orderId})`,
+      });
+
+      let closeOrderId: string | null = null;
+      if (!keepOpen) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const closed = await this.exchange.closePosition({
+            symbol,
+            side,
+            vol,
+            externalOid: `testclose-${Date.now()}`,
+          });
+          closeOrderId = closed.orderId;
+          await this.store.addEvent({
+            at: Date.now(),
+            level: 'info',
+            message: `🧪 Testorder direct weer gesloten (${side} ${vol} contracten ${symbol}, order ${closed.orderId}).`,
+          });
+        } catch (err) {
+          await this.store.addEvent({
+            at: Date.now(),
+            level: 'warn',
+            message: `🧪 Testorder kon niet automatisch worden gesloten: ${(err as Error).message}`,
+          });
+        }
+      }
+
+      return {
+        orderId: opened.orderId,
+        vol,
+        price,
+        tpPrice,
+        slPrice,
+        closeOrderId,
+      };
+    } finally {
+      if (!wasArmed) process.env.LIVE_TRADING_ENABLED = 'false';
+    }
   }
 
-  /** Disabled: venue order IDs are not reconciled to confirmed fills. */
+  /** Close a live position directly on the venue. */
   async flattenExchangePosition(symbol: string): Promise<{ orderId: string; vol: number } | null> {
-    void symbol;
-    throw new Error('Exchange position mutations are disabled until safe fill reconciliation is implemented');
+    const positions = await this.exchange.getOpenPositions();
+    const position = positions.find((p) => p.symbol === symbol);
+    if (!position || position.vol <= 0) return null;
+    const wasArmed = process.env.LIVE_TRADING_ENABLED === 'true';
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    try {
+      const closed = await this.exchange.closePosition({
+        symbol,
+        side: position.side,
+        vol: position.vol,
+        externalOid: `flatten-${Date.now()}`,
+      });
+      await this.store.addEvent({
+        at: Date.now(),
+        level: 'warn',
+        message: `Exchange positie handmatig gesloten via dashboard: ${position.side} ${position.vol} contracten ${symbol} (order ${closed.orderId}).`,
+      });
+      return { orderId: closed.orderId, vol: position.vol };
+    } finally {
+      if (!wasArmed) process.env.LIVE_TRADING_ENABLED = 'false';
+    }
   }
 
   /**
