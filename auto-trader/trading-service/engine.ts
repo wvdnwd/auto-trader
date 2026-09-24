@@ -1854,10 +1854,9 @@ export class Engine {
       // Premium vs. Discount Gatekeeper: never buy in Premium (>50%), never sell in Discount (<50%)
       if (this.risk.premiumDiscountFilterEnabled !== false && signal.marketStructure?.dealingRange) {
         const zone = signal.marketStructure.dealingRange.zone;
-        const hasBreakoutBypass = Boolean(this.risk.breakoutBypassEnabled) && signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
         const inGoldenZone = signal.checks?.some((c) => c.name === 'Fibonacci confluentie' && c.passed);
         const inSniperPullback = signal.checks?.some((c) => c.name === 'Sniper Pullback' && c.passed);
-        const isExempt = hasBreakoutBypass || inGoldenZone || inSniperPullback;
+        const isExempt = inGoldenZone || inSniperPullback;
         if (signal.side === 'LONG' && zone === 'PREMIUM' && !isExempt) {
           await this.logSkip(
             signal.symbol,
@@ -1939,29 +1938,9 @@ export class Engine {
       if (this.risk.pullbackFilterEnabled) {
         const pullbackCheck = signal.checks?.find((c) => c.name === 'Sniper Pullback');
         if (pullbackCheck && !pullbackCheck.passed) {
-          // Breakout Momentum & Range/SMC Bypass: allow immediate entry on abnormal volume surges (>= 1.8x)
-          // or confirmed Range SMC / Asian sweeps with adequate conviction (no trend pullback required in a range)
-          const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
-          const hasSMC = signal.checks?.some((c) => c.name === 'FVG / Order Block Confluentie' && c.passed);
-          const hasAsianSweep = signal.checks?.some((c) => c.name === 'Asian Range' && c.passed);
-          const isRangeBounce = signal.regime === 'RANGE' && (hasSMC || hasAsianSweep);
-          const allowBreakoutBypass =
-            this.risk.breakoutBypassEnabled !== false &&
-            (hasVolumeSpurt || isRangeBounce) &&
-            signal.confidence >= (this.risk.minConfidence ?? 0.54);
-
-          if (allowBreakoutBypass) {
-            const bypassReason = hasVolumeSpurt ? 'Volume Spurt' : 'Range/SMC Confluentie';
-            await this.log(
-              'info',
-              `🚀 Instap Bypass geactiveerd voor ${signal.symbol} (${bypassReason}, Conviction: ${Math.round(
-                signal.confidence * 100
-              )}%) — directe instap zonder klassieke EMA pullback`
-            );
-          } else {
-            await this.logSkip(signal.symbol, pullbackCheck.detail);
-            continue;
-          }
+          // Strictly reject buying overextended breakout candles — wait for the dip / pullback
+          await this.logSkip(signal.symbol, pullbackCheck.detail);
+          continue;
         }
       }
 

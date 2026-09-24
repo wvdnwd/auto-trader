@@ -761,8 +761,8 @@ export function buildSignal(
       const lowerCloses = lowerCandles.map((c) => c.close);
       const rsi15m = rsi(lowerCloses, 14);
       if (!Number.isFinite(rsi15m)) return false;
-      if (side === 'LONG' && rsi15m > 78) return false;
-      if (side === 'SHORT' && rsi15m < 22) return false;
+      if (side === 'LONG' && rsi15m > 70) return false;
+      if (side === 'SHORT' && rsi15m < 30) return false;
 
       // Price action: avoid catching a falling knife during pullbacks
       const last = lowerCandles[lowerCandles.length - 1];
@@ -866,17 +866,45 @@ export function checkLtfReversal(
   }
 
   // 1. RSI check if sufficient bars exist
+  let rsiVal: number | undefined;
   if (candles.length >= 15) {
     const closes = candles.map((c) => c.close);
-    const rsiVal = rsi(closes, 14);
+    rsiVal = rsi(closes, 14);
     if (!Number.isFinite(rsiVal)) {
       return { ready: false, reason: '5m RSI-data is ongeldig' };
     }
-    if (side === 'LONG' && rsiVal > 78) {
-      return { ready: false, reason: `5m RSI overbought (${rsiVal.toFixed(0)} > 78)` };
+    if (side === 'LONG' && rsiVal > 70) {
+      return { ready: false, reason: `5m RSI overbought (${rsiVal.toFixed(0)} > 70) — wachten op afkoeling / pullback` };
     }
-    if (side === 'SHORT' && rsiVal < 22) {
-      return { ready: false, reason: `5m RSI oversold (${rsiVal.toFixed(0)} < 22)` };
+    if (side === 'SHORT' && rsiVal < 30) {
+      return { ready: false, reason: `5m RSI oversold (${rsiVal.toFixed(0)} < 30) — wachten op afkoeling / pullback` };
+    }
+  }
+
+  // Anti-Exhaustion Spike check: don't buy into a vertical series of 3+ green breakout bars
+  if (side === 'LONG' && candles.length >= 3) {
+    const c1 = candles[candles.length - 1];
+    const c2 = candles[candles.length - 2];
+    const c3 = candles[candles.length - 3];
+    const threeGreen = c1.close > c1.open && c2.close > c2.open && c3.close > c3.open;
+    const isExtended = c1.close > c2.close && c2.close > c3.close;
+    if (threeGreen && isExtended && (rsiVal === undefined || rsiVal > 62)) {
+      return {
+        ready: false,
+        reason: '5m vertoont een verticale uitbraak van 3+ opeenvolgende stijgende groene candles (FOMO) — wachten op eerste pullback dip',
+      };
+    }
+  } else if (side === 'SHORT' && candles.length >= 3) {
+    const c1 = candles[candles.length - 1];
+    const c2 = candles[candles.length - 2];
+    const c3 = candles[candles.length - 3];
+    const threeRed = c1.close < c1.open && c2.close < c2.open && c3.close < c3.open;
+    const isExtended = c1.close < c2.close && c2.close < c3.close;
+    if (threeRed && isExtended && (rsiVal === undefined || rsiVal < 38)) {
+      return {
+        ready: false,
+        reason: '5m vertoont een verticale dump van 3+ opeenvolgende dalende rode candles (paniek) — wachten op eerste pullback bounce',
+      };
     }
   }
 

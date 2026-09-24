@@ -167,8 +167,9 @@ export const DEFAULT_RISK: RiskConfig = {
   pullbackFilterEnabled: true,
   // Override for the daily loss halt — reset to false at every daily rollover.
   ignoreDailyLimit: false,
-  // Breakout Momentum Bypass: allow immediate entry on volume-spurt breakouts without waiting for pullback.
-  breakoutBypassEnabled: true,
+  // Breakout Momentum Bypass: disabled — strictly require pullbacks to value (EMA21/Fib Golden Zone).
+  // A volume surge identifies coins in play, but entries must strictly wait for a pullback rather than FOMO into outbreaks.
+  breakoutBypassEnabled: false,
   // Dynamic Altcoin Runners: expand far target to 5.0R on strong breakout runners.
   dynamicRunnersEnabled: true,
   // Stagnation Exit: close trades that stagnate around break-even after 2.5h without progress towards TP1.
@@ -188,7 +189,7 @@ export const DEFAULT_RISK: RiskConfig = {
   pauseNewEntries: false,
   // Market Structure Shift (MSS) protection: protect or exit open positions immediately on adverse structural break.
   mssProtectionEnabled: true,
-  // Premium/Discount filter: block LONGs in Premium (>50%) and SHORTs in Discount (<50%) (off by default, opt-in).
+  // Premium/Discount filter: block LONGs in Premium (>50%) and SHORTs in Discount (<50%) (opt-in).
   premiumDiscountFilterEnabled: false,
   // Imbalance / Golden Zone Scalps: allow high R:R scalps towards FVG / Fib 0.618 after sweeps.
   imbalanceScalpEnabled: true,
