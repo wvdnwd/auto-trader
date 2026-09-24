@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { BacktestRunner } from './backtest-runner.js';
 import { OptimizerRunner } from './optimizer-runner.js';
 import { WalkForwardRunner, type WalkForwardStatus } from './walk-forward-runner.js';
@@ -105,6 +107,67 @@ export type Stats = {
   worstTrade: number;
 };
 
+function getLiveStateFilePath(): string {
+  const dir = path.resolve(process.cwd(), 'data');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return path.resolve(dir, 'live-state.json');
+}
+
+function readPersistedLiveTrading(): boolean | null {
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    return null;
+  }
+  try {
+    const p = getLiveStateFilePath();
+    if (fs.existsSync(p)) {
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (typeof data.liveTradingEnabled === 'boolean') return data.liveTradingEnabled;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const envPath = path.resolve(process.cwd(), '.env');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      const match = /^LIVE_TRADING_ENABLED\s*=\s*(true|false)/m.exec(content);
+      if (match) return match[1] === 'true';
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function writePersistedLiveTrading(enabled: boolean): void {
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') {
+    return;
+  }
+  try {
+    const p = getLiveStateFilePath();
+    fs.writeFileSync(p, JSON.stringify({ liveTradingEnabled: enabled, updatedAt: Date.now() }, null, 2), 'utf8');
+  } catch {
+    // ignore
+  }
+  try {
+    const envPath = path.resolve(process.cwd(), '.env');
+    let content = '';
+    if (fs.existsSync(envPath)) {
+      content = fs.readFileSync(envPath, 'utf8');
+      if (/^LIVE_TRADING_ENABLED\s*=/m.test(content)) {
+        content = content.replace(/^LIVE_TRADING_ENABLED\s*=.*$/m, `LIVE_TRADING_ENABLED=${enabled}`);
+      } else {
+        content = content.trimEnd() + `\nLIVE_TRADING_ENABLED=${enabled}\n`;
+      }
+    } else {
+      content = `LIVE_TRADING_ENABLED=${enabled}\n`;
+    }
+    fs.writeFileSync(envPath, content, 'utf8');
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Facade over the trading engine — the single entry point used by the HTTP layer.
  */
@@ -133,7 +196,6 @@ export class TradingService {
    * @param autoStart whether to start the trading loop immediately.
    */
   async init(autoStart = false): Promise<void> {
-    process.env.LIVE_TRADING_ENABLED = 'false';
     const connected = await this.store.connect();
     if (!connected && process.env.ALLOW_IN_MEMORY_STORE !== 'true') {
       throw new Error('Persistent storage is required; in-memory mode must be explicitly enabled for local development');
@@ -149,6 +211,25 @@ export class TradingService {
     if (stored.apiKey && stored.apiSecret && 'setCredentials' in this.exchange) {
       (this.exchange as MexcExchangeAdapter).setCredentials(stored.apiKey, stored.apiSecret);
     }
+
+    const isConfigured = Boolean(this.exchange?.isConfigured?.());
+    const persistedLive = readPersistedLiveTrading();
+    if (!isConfigured) {
+      process.env.LIVE_TRADING_ENABLED = 'false';
+    } else if (persistedLive !== null) {
+      process.env.LIVE_TRADING_ENABLED = persistedLive ? 'true' : 'false';
+    } else if (process.env.LIVE_TRADING_ENABLED !== 'true') {
+      process.env.LIVE_TRADING_ENABLED = 'false';
+    }
+
+    if (process.env.LIVE_TRADING_ENABLED === 'true') {
+      await this.store.addEvent({
+        at: Date.now(),
+        level: 'warn',
+        message: '🔴 Live trading status bewaard en automatisch hersteld na opstarten — orders worden live geplaatst!',
+      });
+    }
+
     this.hasUnresolvedLivePositions = (await this.store.positions('OPEN', 0)).some((position) => position.live);
     await this.scout.init();
     if (autoStart && (!this.hasUnresolvedLivePositions || this.exchange.status?.()?.enabled)) this.engine.start();
@@ -685,6 +766,7 @@ export class TradingService {
         throw new Error('Kan live trading niet inschakelen: exchange credentials ontbreken');
       }
       process.env.LIVE_TRADING_ENABLED = 'true';
+      writePersistedLiveTrading(true);
       const status = this.exchange.status();
       await this.store.addEvent({
         at: Date.now(),
@@ -698,6 +780,7 @@ export class TradingService {
       return status;
     }
     process.env.LIVE_TRADING_ENABLED = 'false';
+    writePersistedLiveTrading(false);
     const status = this.exchange.status();
     await this.store.addEvent({
       at: Date.now(),

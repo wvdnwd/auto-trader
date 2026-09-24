@@ -1576,3 +1576,134 @@
   padding: 0.3rem 0.6rem;
   min-width: 140px;
 }
+
+/* ---------- 3 Strategy Boxes (Outbreak, Golden Zone, Swing Actieplan) ---------- */
+.strategyTrioGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+@media (max-width: 960px) {
+  .strategyTrioGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.strategyBox {
+  background: rgba(13, 20, 36, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 0.55rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  position: relative;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.strategyBox:hover {
+  border-color: rgba(255, 255, 255, 0.13);
+  background: rgba(18, 28, 50, 0.75);
+}
+
+.strategyBoxHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.strategyBoxTitle {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  letter-spacing: 0.01em;
+}
+
+.strategyBadge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 0.12rem 0.42rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.badgeSuccess {
+  background: rgba(34, 211, 138, 0.16);
+  color: #4ade80;
+  border: 1px solid rgba(34, 211, 138, 0.35);
+}
+
+.badgeWarning {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.badgeTeal {
+  background: rgba(45, 212, 191, 0.14);
+  color: #2dd4bf;
+  border: 1px solid rgba(45, 212, 191, 0.3);
+}
+
+.badgeNeutral {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.strategyBoxBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.72rem;
+}
+
+.strategyMetricRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.strategyMetricLabel {
+  font-size: 0.64rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.strategyMetricVal {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.strategyPlanText {
+  margin-top: 0.2rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--accent);
+  color: #e2e8f0;
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.strategyPlanTextSuccess {
+  border-left-color: var(--green);
+  background: rgba(34, 211, 138, 0.06);
+  color: #86efac;
+}
+
+.strategyPlanTextWarning {
+  border-left-color: var(--amber);
+  background: rgba(245, 158, 11, 0.06);
+  color: #fde68a;
+}
