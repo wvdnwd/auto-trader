@@ -111,7 +111,7 @@ export const DEFAULT_RISK: RiskConfig = {
   requireHigherAlignment: true,
   // Scaled to match maxOpenPositions (6) so the book can take up to 6 aligned trades
   // in the same direction when market conviction is high.
-  maxSameSidePositions: 6,
+  maxSameSidePositions: 3,
   maxPerGroup: 2,
   // Scaled to 10% - 20% for ~€40-€50 trade sizing on ~€300 equity.
   minStakePct: 0.1,
@@ -147,7 +147,7 @@ export const DEFAULT_RISK: RiskConfig = {
   // Bitcoin Gatekeeper: blocks altcoin trades that fight Bitcoin's dominant trend.
   btcFilterEnabled: true,
   // Minimum minutes between consecutive entries to prevent trade clustering on spikes.
-  entryCooldownMinutes: 2,
+  entryCooldownMinutes: 15,
   // Minimum 24h quote volume (USDT) to trade a coin — protects against illiquid tokens.
   minQuoteVolume24h: 5_000_000,
   // Lock this many R beyond exact round-trip fees after TP1; exits clamp monotonically.
@@ -169,7 +169,7 @@ export const DEFAULT_RISK: RiskConfig = {
   ignoreDailyLimit: false,
   // Breakout Momentum Bypass: allow direct market entry on explosive volume surges (>= 1.8x volume)
   // without waiting for an extended pullback to EMA21, catching runners and outlier breakouts in play.
-  breakoutBypassEnabled: true,
+  breakoutBypassEnabled: false,
   // Dynamic Altcoin Runners: expand far target to 5.0R on strong breakout runners.
   dynamicRunnersEnabled: true,
   // Stagnation Exit: close trades that stagnate around break-even after 2.5h without progress towards TP1.

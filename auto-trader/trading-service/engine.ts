@@ -2079,7 +2079,7 @@ export class Engine {
       const isBreakoutBypassActive =
         this.risk.breakoutBypassEnabled !== false &&
         hasVolumeSpurt &&
-        signal.confidence >= (this.risk.minConfidence ?? 0.54);
+        signal.confidence >= Math.max(0.70, (this.risk.minConfidence ?? 0.54));
 
       // 15-Minute Micro-Timing & Reversal Gatekeeper: avoid buying into an intra-hour top or falling knife
       if (this.risk.microTiming15mEnabled !== false && signal.timingReady === false) {
