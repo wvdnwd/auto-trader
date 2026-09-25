@@ -488,12 +488,6 @@ export class Engine {
       allowedSessions: Array.isArray(merged.allowedSessions)
         ? (merged.allowedSessions as MarketSession[])
         : (this.risk.allowedSessions ?? ['ASIA', 'LONDON', 'NEW_YORK']),
-      sessionAdaptiveWeights: merged.sessionAdaptiveWeights !== undefined
-        ? Boolean(merged.sessionAdaptiveWeights)
-        : (this.risk.sessionAdaptiveWeights ?? true),
-      asianRangeSweepEnabled: merged.asianRangeSweepEnabled !== undefined
-        ? Boolean(merged.asianRangeSweepEnabled)
-        : (this.risk.asianRangeSweepEnabled ?? true),
       pyramidingEnabled: merged.pyramidingEnabled !== undefined
         ? Boolean(merged.pyramidingEnabled)
         : (this.risk.pyramidingEnabled ?? true),
@@ -550,9 +544,6 @@ export class Engine {
       imbalanceScalpEnabled: merged.imbalanceScalpEnabled !== undefined
         ? Boolean(merged.imbalanceScalpEnabled)
         : (this.risk.imbalanceScalpEnabled ?? true),
-      fvgFilterEnabled: merged.fvgFilterEnabled !== undefined
-        ? Boolean(merged.fvgFilterEnabled)
-        : (this.risk.fvgFilterEnabled ?? false),
       ltfSniper5mEnabled: merged.ltfSniper5mEnabled !== undefined
         ? Boolean(merged.ltfSniper5mEnabled)
         : (this.risk.ltfSniper5mEnabled ?? true),

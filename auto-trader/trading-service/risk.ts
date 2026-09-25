@@ -156,10 +156,6 @@ export const DEFAULT_RISK: RiskConfig = {
   sessionFilterEnabled: false,
   // Sessions permitted to open trades when sessionFilterEnabled is true.
   allowedSessions: ['ASIA', 'LONDON', 'NEW_YORK'],
-  // Deprecated no-op: session score weights remain disabled until calibrated.
-  sessionAdaptiveWeights: false,
-  // Exploit Asian range high/low liquidity sweeps during London and New York sessions.
-  asianRangeSweepEnabled: true,
   // Smart Pyramiding: allow adding a 2nd tranche to winning, derisked positions on pullback.
   pyramidingEnabled: true,
   pyramidMinConfidence: 0.85,
@@ -193,8 +189,6 @@ export const DEFAULT_RISK: RiskConfig = {
   premiumDiscountFilterEnabled: false,
   // Imbalance / Golden Zone Scalps: allow high R:R scalps towards FVG / Fib 0.618 after sweeps.
   imbalanceScalpEnabled: true,
-  // Require Fair Value Gap or Order Block confluence for pullback entries.
-  fvgFilterEnabled: false,
   // 5m Sniper Trigger: verify 5m micro-reversal (green candle / hammer wick) right before opening order.
   ltfSniper5mEnabled: true,
   // SMT Divergence Filter: detect institutional divergence vs Bitcoin.
