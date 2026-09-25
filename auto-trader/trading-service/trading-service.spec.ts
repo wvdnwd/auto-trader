@@ -32,7 +32,10 @@ class FakeMarket {
     return this.freshPrice$ || this.price$;
   }
 
+  public customCandles: Candle[] | null = null;
+
   async candles(_symbol?: string, _timeframe?: string): Promise<Candle[]> {
+    if (this.customCandles) return this.customCandles;
     // A clean uptrend so the strategy produces a confident LONG.
     return Array.from({ length: 140 }, (_, i) => {
       const close = 40 + i * 0.45;
@@ -1073,5 +1076,33 @@ describe('advanced exit management', () => {
     // Peak at 130, ATR is 4, 1.5x multiplier -> stop is 130 - (4 * 1.5) = 124
     const stop = chandelierStop(position, 130, 4, 1.5);
     expect(stop).toBe(124);
+  });
+
+  it('allows breakout momentum bypass for Volume Spurt when pullback filter is enabled', async () => {
+    const market = new FakeMarket();
+    // Provide candles with a volume spurt on recent bars
+    market.customCandles = Array.from({ length: 140 }, (_, i) => {
+      const close = 40 + i * 0.45;
+      return {
+        time: i * 900,
+        open: close * 0.999,
+        high: close * 1.004,
+        low: close * 0.996,
+        close,
+        volume: i >= 138 ? 5000 : 1000,
+      };
+    });
+    const { store, engine } = engineWith(market);
+    engine.setRisk({
+      pullbackFilterEnabled: true,
+      breakoutBypassEnabled: true,
+      minConfidence: 0.50,
+      entryCooldownMinutes: 0,
+      ltfSniper5mEnabled: false,
+    });
+
+    await engine.cycle();
+    const open = await store.positions('OPEN');
+    expect(open.length).toBeGreaterThan(0);
   });
 });

@@ -262,6 +262,36 @@ describe('trade discovery enhancements', () => {
     expect(sigSpurt.reasons.some((r) => r.includes('Volume spurt'))).toBe(true);
   });
 
+  it('permits wider EMA21 distance in Sniper Pullback check when Volume Spurt is active', () => {
+    const fibSpy = vi.spyOn(fibonacciModule, 'computeFibLevels').mockReturnValue(null);
+    try {
+      const up = series((i) => 100 + i * 0.8);
+      const closes = up.map((c) => c.close);
+      const fastEma = ema(closes, 21);
+      const atr = fastEma * atrPct(up, 14);
+
+      // Normal volume at 2.1 ATR from EMA21: fails Sniper Pullback (2.1 > 1.8)
+      const sigNormal = buildSignal(
+        { ...tickerFor(up), lastPrice: fastEma - atr * 2.1 },
+        up
+      )!;
+      expect(sigNormal.checks.find((c) => c.name === 'Sniper Pullback')?.passed).toBe(false);
+
+      // With volume spurt at 2.1 ATR from EMA21: passes Sniper Pullback (2.1 <= 2.5)
+      const upSpurt = series((i) => 100 + i * 0.8);
+      upSpurt[upSpurt.length - 2].volume = 5000;
+      const sigSpurt = buildSignal(
+        { ...tickerFor(upSpurt), lastPrice: fastEma - atr * 2.1 },
+        upSpurt
+      )!;
+      const sniperSpurt = sigSpurt.checks.find((c) => c.name === 'Sniper Pullback');
+      expect(sniperSpurt?.passed).toBe(true);
+      expect(sniperSpurt?.detail).toContain('Breakout momentum');
+    } finally {
+      fibSpy.mockRestore();
+    }
+  });
+
   it('flags timingReady false when 15m micro-timeframe RSI is overbought', () => {
     const up = series((i) => 100 + i * 0.8);
     // Create distinct lowerCandles with higher resolution and high RSI
@@ -573,6 +603,31 @@ describe('checkLtfReversal', () => {
         'LONG'
       ).ready
     ).toBe(false);
+  });
+
+  it('approves 3 green candles when 5m RSI is within healthy breakout range (<= 76)', () => {
+    const candles: Candle[] = [];
+    for (let i = 0; i < 12; i++) {
+      const close = 100 + (i % 2 === 0 ? 0.3 : -0.3);
+      candles.push(makeCandle(close - 0.1, close + 0.5, close - 0.5, close, recentBase - (14 - i) * 300));
+    }
+    candles.push(makeCandle(100.1, 100.8, 100.0, 100.6, recentBase - 600));
+    candles.push(makeCandle(100.6, 101.3, 100.5, 101.1, recentBase - 300));
+    candles.push(makeCandle(101.1, 101.9, 101.0, 101.7, recentBase));
+
+    const res = checkLtfReversal(candles, 'LONG');
+    expect(res.ready).toBe(true);
+  });
+
+  it('rejects 3 green candles when 5m RSI is severely overbought (> 76)', () => {
+    const candles: Candle[] = [];
+    for (let i = 0; i < 16; i++) {
+      candles.push(makeCandle(100 + i * 3, 100 + i * 3 + 3.5, 100 + i * 3 - 0.2, 100 + i * 3 + 3, recentBase - (15 - i) * 300));
+    }
+
+    const res = checkLtfReversal(candles, 'LONG');
+    expect(res.ready).toBe(false);
+    expect(res.reason).toContain('parabolische uitbraak');
   });
 });
 

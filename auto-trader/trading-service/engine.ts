@@ -2067,10 +2067,24 @@ export class Engine {
         }
       }
 
+      // Breakout check helper for high-momentum outliers
+      const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
+      const isBreakoutBypassActive =
+        this.risk.breakoutBypassEnabled !== false &&
+        hasVolumeSpurt &&
+        signal.confidence >= (this.risk.minConfidence ?? 0.54);
+
       // 15-Minute Micro-Timing & Reversal Gatekeeper: avoid buying into an intra-hour top or falling knife
       if (this.risk.microTiming15mEnabled !== false && signal.timingReady === false) {
-        await this.logSkip(signal.symbol, '15m micro-timing overbought/oversold of dip nog niet gekeerd (wachten op ommekeer)');
-        continue;
+        if (isBreakoutBypassActive) {
+          await this.log(
+            'info',
+            `⚡ Micro-timing bypass voor ${signal.symbol}: Volume Spurt breakout momentum overstemt 15m afkoeling.`
+          );
+        } else {
+          await this.logSkip(signal.symbol, '15m micro-timing overbought/oversold of dip nog niet gekeerd (wachten op ommekeer)');
+          continue;
+        }
       }
       if (this.risk.reversal15mRequired !== false && signal.reversalConfirmed === false) {
         let confirmedBy5m = false;
@@ -2086,8 +2100,15 @@ export class Engine {
           }
         }
         if (!confirmedBy5m) {
-          await this.logSkip(signal.symbol, '15m/5m ommekeer nog niet bevestigd (wachten op groene candle / hammer wick)');
-          continue;
+          if (isBreakoutBypassActive) {
+            await this.log(
+              'info',
+              `⚡ LTF ommekeer bypass voor ${signal.symbol}: Volume Spurt breakout momentum geactiveerd.`
+            );
+          } else {
+            await this.logSkip(signal.symbol, '15m/5m ommekeer nog niet bevestigd (wachten op groene candle / hammer wick)');
+            continue;
+          }
         }
       }
 
@@ -2095,9 +2116,17 @@ export class Engine {
       if (this.risk.pullbackFilterEnabled) {
         const pullbackCheck = signal.checks?.find((c) => c.name === 'Sniper Pullback');
         if (pullbackCheck && !pullbackCheck.passed) {
-          // Strictly reject buying overextended breakout candles — wait for the dip / pullback
-          await this.logSkip(signal.symbol, pullbackCheck.detail);
-          continue;
+          if (isBreakoutBypassActive) {
+            await this.log(
+              'info',
+              `🚀 Breakout Momentum Bypass geactiveerd voor ${signal.symbol} (Volume Spurt, Conviction: ${Math.round(
+                signal.confidence * 100
+              )}%) — directe instap op volume-uitbraak!`
+            );
+          } else {
+            await this.logSkip(signal.symbol, pullbackCheck.detail);
+            continue;
+          }
         }
       }
 

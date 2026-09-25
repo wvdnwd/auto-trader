@@ -122,10 +122,10 @@ export const DEFAULT_RISK: RiskConfig = {
   minTradeMarginUsdt: 35,
   // Relative Strength filter: off by default so altcoin breakouts and dips are not blocked by BTC comparison.
   rsFilterEnabled: false,
-  // Crowding & Squeeze protection: skip longs if funding exceeds +0.05% per 8h.
-  maxFundingRateLong: 0.0005,
-  // Crowding & Squeeze protection: skip shorts if funding falls below -0.05% per 8h.
-  minFundingRateShort: -0.0005,
+  // Crowding & Squeeze protection: skip longs if funding exceeds +0.08% per 8h (allows high-momentum runners while preventing extreme traps).
+  maxFundingRateLong: 0.0008,
+  // Crowding & Squeeze protection: skip shorts if funding falls below -0.08% per 8h.
+  minFundingRateShort: -0.0008,
   // Price action confirmation: require 15m candle reversal before entering pullbacks.
   reversal15mRequired: true,
   // 40 consecutive cycles (~30 mins) with zero tradeable signal across the universe
@@ -167,9 +167,9 @@ export const DEFAULT_RISK: RiskConfig = {
   pullbackFilterEnabled: true,
   // Override for the daily loss halt — reset to false at every daily rollover.
   ignoreDailyLimit: false,
-  // Breakout Momentum Bypass: disabled — strictly require pullbacks to value (EMA21/Fib Golden Zone).
-  // A volume surge identifies coins in play, but entries must strictly wait for a pullback rather than FOMO into outbreaks.
-  breakoutBypassEnabled: false,
+  // Breakout Momentum Bypass: allow direct market entry on explosive volume surges (>= 1.8x volume)
+  // without waiting for an extended pullback to EMA21, catching runners and outlier breakouts in play.
+  breakoutBypassEnabled: true,
   // Dynamic Altcoin Runners: expand far target to 5.0R on strong breakout runners.
   dynamicRunnersEnabled: true,
   // Stagnation Exit: close trades that stagnate around break-even after 2.5h without progress towards TP1.

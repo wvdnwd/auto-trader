@@ -415,15 +415,24 @@ export function buildSignal(
   //    secures a tighter stop-loss, and maximizes Risk/Reward.
   //    A recent wick into the golden zone (tag & reject bounce) also counts as a valid
   //    pullback entry even if the current price has bounced slightly above EMA21 distance.
+  // 9. Sniper Pullback Entry — in a trending regime, entering on a pullback to value
+  //    (near EMA21 or inside the Fibonacci Golden Zone) avoids chasing extended moves,
+  //    secures a tighter stop-loss, and maximizes Risk/Reward.
+  //    A recent wick into the golden zone (tag & reject bounce) also counts as a valid
+  //    pullback entry even if the current price has bounced slightly above EMA21 distance.
+  //    For explosive "Coin in Play" breakouts (Volume Spurt >= 1.8x), allow wider tolerance (up to 2.5 ATR)
+  //    so breakout momentum runners are not locked out while price discovery is active.
+  const hasVolumeSpurt = volume >= 1.8;
   const isTrending = regime === 'TREND_UP' || regime === 'TREND_DOWN';
   const fastEma = ema(closes, 21);
   const emaDistanceAtr = Number.isFinite(fastEma) && atr > 0 ? Math.abs(price - fastEma) / atr : 0;
   const recentGoldenZoneBounce = wickInZone && fibDirectionAgrees;
+  const maxPullbackAtr = hasVolumeSpurt ? 2.5 : PULLBACK_MAX_EMA_DISTANCE_ATR;
   const inPullback =
     !isTrending ||
     fibConfluence ||
     recentGoldenZoneBounce ||
-    emaDistanceAtr <= PULLBACK_MAX_EMA_DISTANCE_ATR;
+    emaDistanceAtr <= maxPullbackAtr;
   checks.push({
     name: 'Sniper Pullback',
     passed: inPullback,
@@ -433,7 +442,9 @@ export function buildSignal(
           ? 'Instap in Fibonacci Golden Zone pullback'
           : recentGoldenZoneBounce
             ? 'Recente golden zone bounce (tag & reject) — instap op de bounce'
-            : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
+            : hasVolumeSpurt && emaDistanceAtr > PULLBACK_MAX_EMA_DISTANCE_ATR
+              ? `Breakout momentum: volume spurt (${volume.toFixed(1)}x) binnen ${emaDistanceAtr.toFixed(1)} ATR van EMA21`
+              : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
         : `Koers te ver uitgelopen van EMA21 (${emaDistanceAtr.toFixed(1)} ATR) — wacht op dip`
       : 'Geen trendregime — pullback-toets neutraal',
   });
@@ -456,7 +467,6 @@ export function buildSignal(
 
   // 11. Volume Spurt / "Coin in Play" — detect sudden volume surges (>= 1.8x
   //     20-period average) signalling fresh institutional interest and momentum.
-  const hasVolumeSpurt = volume >= 1.8;
   checks.push({
     name: 'Volume Spurt',
     passed: hasVolumeSpurt,
@@ -691,8 +701,10 @@ export function buildSignal(
     const lowerCloses = lowerCandles.map((c) => c.close);
     const rsi15m = rsi(lowerCloses, 14);
     if (!Number.isFinite(rsi15m)) return false;
-    if (side === 'LONG' && rsi15m > 70) return false;
-    if (side === 'SHORT' && rsi15m < 30) return false;
+    const maxRsiLong = hasVolumeSpurt ? 78 : 74;
+    const minRsiShort = hasVolumeSpurt ? 22 : 26;
+    if (side === 'LONG' && rsi15m > maxRsiLong) return false;
+    if (side === 'SHORT' && rsi15m < minRsiShort) return false;
 
     // Price action: avoid catching a falling knife during pullbacks
     const last = lowerCandles[lowerCandles.length - 1];
@@ -746,10 +758,10 @@ export function buildSignal(
   // Calibrate confidence so it truth-reflects execution readiness:
   // 1. If an asset is in trend but extended past EMA21 (no pullback), the engine refuses
   //    to FOMO-buy. Cap conviction at 0.68 so it displays as "waiting for dip" rather than
-  //    falsely claiming 100% certainty.
-  if (isTrending && !inPullback) {
+  //    falsely claiming 100% certainty. (Volume spurt breakouts bypass this cap)
+  if (isTrending && !inPullback && !hasVolumeSpurt) {
     rawConfidence = Math.min(rawConfidence, 0.68);
-  } else if (hasMicro && (!timingReady || !reversalConfirmed)) {
+  } else if (hasMicro && (!timingReady || !reversalConfirmed) && !hasVolumeSpurt) {
     // 2. In pullback, but 15m micro-trigger not yet confirmed (wait for hammer/green candle)
     rawConfidence = Math.min(rawConfidence, 0.78);
   }
@@ -895,7 +907,7 @@ export function checkLtfReversal(
     return { ready: false, reason: '5m candles zijn verouderd of hebben een toekomstige timestamp' };
   }
 
-  // 1. RSI check if sufficient bars exist
+  // 1. Calculate RSI if sufficient bars exist
   let rsiVal: number | undefined;
   if (candles.length >= 15) {
     const closes = candles.map((c) => c.close);
@@ -903,25 +915,19 @@ export function checkLtfReversal(
     if (!Number.isFinite(rsiVal)) {
       return { ready: false, reason: '5m RSI-data is ongeldig' };
     }
-    if (side === 'LONG' && rsiVal > 70) {
-      return { ready: false, reason: `5m RSI overbought (${rsiVal.toFixed(0)} > 70) — wachten op afkoeling / pullback` };
-    }
-    if (side === 'SHORT' && rsiVal < 30) {
-      return { ready: false, reason: `5m RSI oversold (${rsiVal.toFixed(0)} < 30) — wachten op afkoeling / pullback` };
-    }
   }
 
-  // Anti-Exhaustion Spike check: don't buy into a vertical series of 3+ green breakout bars
+  // Anti-Exhaustion Spike check: don't buy into a parabolic series of 3+ green breakout bars when severely overbought
   if (side === 'LONG' && candles.length >= 3) {
     const c1 = candles[candles.length - 1];
     const c2 = candles[candles.length - 2];
     const c3 = candles[candles.length - 3];
     const threeGreen = c1.close > c1.open && c2.close > c2.open && c3.close > c3.open;
     const isExtended = c1.close > c2.close && c2.close > c3.close;
-    if (threeGreen && isExtended && (rsiVal === undefined || rsiVal > 62)) {
+    if (threeGreen && isExtended && (rsiVal === undefined || rsiVal > 76)) {
       return {
         ready: false,
-        reason: '5m vertoont een verticale uitbraak van 3+ opeenvolgende stijgende groene candles (FOMO) — wachten op eerste pullback dip',
+        reason: '5m vertoont een parabolische uitbraak van 3+ opeenvolgende stijgende groene candles (overbought RSI > 76) — wachten op eerste pullback dip',
       };
     }
   } else if (side === 'SHORT' && candles.length >= 3) {
@@ -930,11 +936,21 @@ export function checkLtfReversal(
     const c3 = candles[candles.length - 3];
     const threeRed = c1.close < c1.open && c2.close < c2.open && c3.close < c3.open;
     const isExtended = c1.close < c2.close && c2.close < c3.close;
-    if (threeRed && isExtended && (rsiVal === undefined || rsiVal < 38)) {
+    if (threeRed && isExtended && (rsiVal === undefined || rsiVal < 24)) {
       return {
         ready: false,
-        reason: '5m vertoont een verticale dump van 3+ opeenvolgende dalende rode candles (paniek) — wachten op eerste pullback bounce',
+        reason: '5m vertoont een parabolische dump van 3+ opeenvolgende dalende rode candles (oversold RSI < 24) — wachten op eerste pullback bounce',
       };
+    }
+  }
+
+  // Generic RSI ceiling check
+  if (rsiVal !== undefined) {
+    if (side === 'LONG' && rsiVal > 78) {
+      return { ready: false, reason: `5m RSI overbought (${rsiVal.toFixed(0)} > 78) — wachten op afkoeling / pullback` };
+    }
+    if (side === 'SHORT' && rsiVal < 22) {
+      return { ready: false, reason: `5m RSI oversold (${rsiVal.toFixed(0)} < 22) — wachten op afkoeling / pullback` };
     }
   }
 
