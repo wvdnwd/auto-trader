@@ -1,4 +1,4 @@
-import { computeFibLevels, goldenZoneWickTouch, inGoldenZone } from './fibonacci.js';
+import { computeFibLevels, detectGoldenZoneBounce, goldenZoneWickTouch, inGoldenZone } from './fibonacci.js';
 import {
   adx,
   atrPct,
@@ -362,24 +362,26 @@ export function buildSignal(
   //    0.382–0.618 "golden zone" of a swing that runs the same direction as the
   //    trade is the classic continuation entry; it never vetoes a setup on its own,
   //    it only adds a little extra conviction when it lines up.
-  const fib = computeFibLevels(candles, price, 100);
+  //    Drawn strictly from the true swing extreme (Bodem ➔ Top for LONG, Top ➔ Bodem for SHORT).
+  const fib = computeFibLevels(candles, price, 100, side);
   const fibDirectionAgrees =
     !!fib && ((side === 'LONG' && fib.direction === 'UP') || (side === 'SHORT' && fib.direction === 'DOWN'));
   // A close inside the zone counts, but so does a recent wick that only
-  // poked into the zone and closed back outside — the classic "tag and
-  // reject" continuation entry. Checking close price alone misses that,
-  // since a fast reclaim can close the candle right back outside the band.
+  // poked into the zone and closed back outside, or a multi-candle touch followed by a bounce out.
   const closeInZone = !!fib && inGoldenZone(fib, price);
-  const wickInZone = !!fib && goldenZoneWickTouch(fib, candles, 8);
-  const fibConfluence = !!fib && fibDirectionAgrees && (closeInZone || wickInZone);
+  const gzBounce = fib ? detectGoldenZoneBounce(fib, candles, price, 12) : null;
+  const wickInZone = !!fib && (goldenZoneWickTouch(fib, candles, 8) || Boolean(gzBounce?.bouncedOut));
+  const fibConfluence = !!fib && fibDirectionAgrees && (closeInZone || wickInZone || Boolean(gzBounce?.bouncedOut));
   checks.push({
     name: 'Fibonacci confluentie',
     passed: !fib || fibConfluence,
     detail: fib
       ? fibConfluence
-        ? closeInZone
-          ? `Prijs in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement)`
-          : `Wick in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement), close erbuiten`
+        ? gzBounce?.bouncedOut
+          ? 'Golden Zone (0.382–0.618) reeds geraakt — bevestigde bounce uit de zone!'
+          : closeInZone
+            ? `Prijs in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement)`
+            : `Wick in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement), close erbuiten`
         : `Prijs buiten golden zone (${(fib.distanceToNearest * 100).toFixed(0)}% van ${(fib.nearest.ratio * 100).toFixed(1)}%-niveau)`
       : 'Onvoldoende data voor Fibonacci-niveaus',
   });
@@ -426,7 +428,7 @@ export function buildSignal(
   const isTrending = regime === 'TREND_UP' || regime === 'TREND_DOWN';
   const fastEma = ema(closes, 21);
   const emaDistanceAtr = Number.isFinite(fastEma) && atr > 0 ? Math.abs(price - fastEma) / atr : 0;
-  const recentGoldenZoneBounce = wickInZone && fibDirectionAgrees;
+  const recentGoldenZoneBounce = (wickInZone || Boolean(gzBounce?.bouncedOut)) && fibDirectionAgrees;
   const maxPullbackAtr = hasVolumeSpurt ? 2.5 : PULLBACK_MAX_EMA_DISTANCE_ATR;
   const inPullback =
     !isTrending ||
@@ -438,13 +440,15 @@ export function buildSignal(
     passed: inPullback,
     detail: isTrending
       ? inPullback
-        ? fibConfluence
-          ? 'Instap in Fibonacci Golden Zone pullback'
-          : recentGoldenZoneBounce
-            ? 'Recente golden zone bounce (tag & reject) — instap op de bounce'
-            : hasVolumeSpurt && emaDistanceAtr > PULLBACK_MAX_EMA_DISTANCE_ATR
-              ? `Breakout momentum: volume spurt (${volume.toFixed(1)}x) binnen ${emaDistanceAtr.toFixed(1)} ATR van EMA21`
-              : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
+        ? gzBounce?.bouncedOut
+          ? 'Golden Zone (0.382–0.618) reeds geraakt — instap op bevestigde bounce uit de zone!'
+          : fibConfluence
+            ? 'Instap in Fibonacci Golden Zone pullback'
+            : recentGoldenZoneBounce
+              ? 'Recente golden zone bounce (tag & reject) — instap op de bounce'
+              : hasVolumeSpurt && emaDistanceAtr > PULLBACK_MAX_EMA_DISTANCE_ATR
+                ? `Breakout momentum: volume spurt (${volume.toFixed(1)}x) binnen ${emaDistanceAtr.toFixed(1)} ATR van EMA21`
+                : `Gezonde pullback binnen ${PULLBACK_MAX_EMA_DISTANCE_ATR} ATR van EMA21 (${emaDistanceAtr.toFixed(1)} ATR afstand)`
         : `Koers te ver uitgelopen van EMA21 (${emaDistanceAtr.toFixed(1)} ATR) — wacht op dip`
       : 'Geen trendregime — pullback-toets neutraal',
   });
@@ -758,10 +762,10 @@ export function buildSignal(
   // Calibrate confidence so it truth-reflects execution readiness:
   // 1. If an asset is in trend but extended past EMA21 (no pullback), the engine refuses
   //    to FOMO-buy. Cap conviction at 0.68 so it displays as "waiting for dip" rather than
-  //    falsely claiming 100% certainty. (Volume spurt breakouts bypass this cap)
-  if (isTrending && !inPullback && !hasVolumeSpurt) {
+  //    falsely claiming 100% certainty. (Volume spurt breakouts and confirmed Golden Zone bounces bypass this cap)
+  if (isTrending && !inPullback && !hasVolumeSpurt && !gzBounce?.bouncedOut) {
     rawConfidence = Math.min(rawConfidence, 0.68);
-  } else if (hasMicro && (!timingReady || !reversalConfirmed) && !hasVolumeSpurt) {
+  } else if (hasMicro && (!timingReady || !reversalConfirmed) && !hasVolumeSpurt && !gzBounce?.bouncedOut) {
     // 2. In pullback, but 15m micro-trigger not yet confirmed (wait for hammer/green candle)
     rawConfidence = Math.min(rawConfidence, 0.78);
   }

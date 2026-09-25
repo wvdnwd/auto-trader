@@ -168,6 +168,26 @@ export function SignalChart({
   const effectivePosition = loadedData?.position || position || null;
   const effectivePlannedTrade = loadedData?.plannedTrade || plannedTrade || null;
 
+  const maxCandles = Math.max(45, effectiveCandles.length);
+
+  const handleZoomIn = () => {
+    setCandleCount((prev) => Math.max(15, prev - 15));
+  };
+
+  const handleZoomOut = () => {
+    setCandleCount((prev) => Math.min(maxCandles, prev + 15));
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    if (Math.abs(e.deltaY) > 2) {
+      if (e.deltaY < 0) {
+        setCandleCount((prev) => Math.max(15, prev - 5));
+      } else {
+        setCandleCount((prev) => Math.min(maxCandles, prev + 5));
+      }
+    }
+  };
+
   const chart = useMemo(() => {
     if (!effectiveCandles || effectiveCandles.length < 2) return null;
     const validCandles = effectiveCandles.filter(
@@ -351,10 +371,40 @@ export function SignalChart({
     const goldenHigh =
       goldenBottom !== undefined && goldenTop !== undefined ? Math.max(goldenBottom, goldenTop) : undefined;
 
+    const checkBounce = Boolean(
+      effectiveSignal?.checks?.some(
+        (c) =>
+          c.detail?.toLowerCase().includes('reeds geraakt') ||
+          (c.name === 'Sniper Pullback' && c.detail?.toLowerCase().includes('bounce'))
+      )
+    );
+
+    // Direct candle bounce check over the recent candles (lookback up to 12 bars)
+    const recentLookback = recent.slice(-12);
+    let candleBounce = false;
+    if (goldenLow !== undefined && goldenHigh !== undefined && recentLookback.length > 0) {
+      if (side === 'LONG' && lastClose > goldenHigh) {
+        const touchedZone = recentLookback.some((c) => c.low <= goldenHigh && c.high >= goldenLow);
+        const deepBreach = recentLookback.some((c) => c.close < goldenLow * 0.98);
+        if (touchedZone && !deepBreach) {
+          candleBounce = true;
+        }
+      } else if (side === 'SHORT' && lastClose < goldenLow) {
+        const touchedZone = recentLookback.some((c) => c.high >= goldenLow && c.low <= goldenHigh);
+        const deepBreach = recentLookback.some((c) => c.close > goldenHigh * 1.02);
+        if (touchedZone && !deepBreach) {
+          candleBounce = true;
+        }
+      }
+    }
+
+    const isBounceOut = checkBounce || candleBounce;
+
     const isPriceInZone =
       goldenLow !== undefined && goldenHigh !== undefined && lastClose >= goldenLow && lastClose <= goldenHigh;
     const isWaitingPullback =
       !effectivePosition &&
+      !isBounceOut &&
       (side === 'LONG'
         ? goldenHigh !== undefined && lastClose > goldenHigh
         : goldenLow !== undefined && lastClose < goldenLow);
@@ -479,7 +529,7 @@ export function SignalChart({
         // Price is already at/in entry zone
         const p1X = startX + 24;
         const p1Y = entryYVal;
-        trajectoryPoints.push({ x: p1X, y: p1Y, label: 'Instap' });
+        trajectoryPoints.push({ x: p1X, y: p1Y, label: isBounceOut ? 'Bounce' : 'Instap' });
 
         const tp1Y = tps[0] ? y(tps[0].price) : entryYVal;
         const p2X = startX + 52;
@@ -510,6 +560,7 @@ export function SignalChart({
       entryPrice,
       lastClose,
       isPriceInZone,
+      isBounceOut,
       isWaitingPullback,
       waitTopY,
       waitBottomY,
@@ -620,20 +671,62 @@ export function SignalChart({
           <span className={styles.tfTitle}>Zoom:</span>
           <button
             type="button"
-            className={`${styles.tfBtn} ${candleCount === 45 ? styles.tfBtnActive : ''}`}
-            onClick={() => setCandleCount(45)}
-            title="45 candles — grote, duidelijke candles"
+            className={styles.tfBtn}
+            onClick={handleZoomIn}
+            title="Inzoomen (minder candles, meer detail)"
           >
-            🔍 Detail (45)
+            🔍+ In
           </button>
           <button
             type="button"
-            className={`${styles.tfBtn} ${candleCount === 90 ? styles.tfBtnActive : ''}`}
-            onClick={() => setCandleCount(90)}
-            title="90 candles — breder trendoverzicht"
+            className={styles.tfBtn}
+            onClick={handleZoomOut}
+            title="Uitzoomen (meer candles, breder overzicht)"
           >
-            📊 Overzicht (90)
+            🔍- Uit
           </button>
+          <button
+            type="button"
+            className={`${styles.tfBtn} ${candleCount === 25 ? styles.tfBtnActive : ''}`}
+            onClick={() => setCandleCount(25)}
+            title="25 candles — Sniper detail"
+          >
+            25
+          </button>
+          <button
+            type="button"
+            className={`${styles.tfBtn} ${candleCount === 45 ? styles.tfBtnActive : ''}`}
+            onClick={() => setCandleCount(45)}
+            title="45 candles — Standaard detail"
+          >
+            45
+          </button>
+          <button
+            type="button"
+            className={`${styles.tfBtn} ${candleCount === 75 ? styles.tfBtnActive : ''}`}
+            onClick={() => setCandleCount(75)}
+            title="75 candles — Trendoverzicht"
+          >
+            75
+          </button>
+          <button
+            type="button"
+            className={`${styles.tfBtn} ${candleCount === 120 ? styles.tfBtnActive : ''}`}
+            onClick={() => setCandleCount(120)}
+            title="120 candles — Macro overzicht"
+          >
+            120
+          </button>
+          {maxCandles > 120 && (
+            <button
+              type="button"
+              className={`${styles.tfBtn} ${candleCount >= maxCandles ? styles.tfBtnActive : ''}`}
+              onClick={() => setCandleCount(maxCandles)}
+              title={`Alle ${maxCandles} beschikbare candles tonen`}
+            >
+              Alles ({maxCandles})
+            </button>
+          )}
         </div>
 
         <div className={styles.filterBar}>
@@ -676,12 +769,16 @@ export function SignalChart({
           <span>
             <b>Verwachte koersroute ({chart.side}):</b>{' '}
             {isLong
-              ? chart.isWaitingPullback
-                ? 'Wacht op pullback in instapzone ➔ opwaartse reactie richting TP1, TP2 en TP3'
-                : 'Instapzone bereikt ➔ opwaartse impuls richting TP1, TP2 en TP3'
-              : chart.isWaitingPullback
-                ? 'Wacht op pullback omhoog bij weerstand ➔ neerwaartse afwijzing richting TP1, TP2 en TP3'
-                : 'Weerstand bereikt ➔ neerwaartse impuls richting TP1, TP2 en TP3'}
+              ? chart.isBounceOut
+                ? '🔥 Golden Zone bounce voltooid ➔ directe opwaartse reactie richting TP1, TP2 en TP3'
+                : chart.isWaitingPullback
+                  ? 'Wacht op pullback in instapzone ➔ opwaartse reactie richting TP1, TP2 en TP3'
+                  : 'Instapzone bereikt ➔ opwaartse impuls richting TP1, TP2 en TP3'
+              : chart.isBounceOut
+                ? '🔥 Golden Zone afwijzing voltooid ➔ directe neerwaartse reactie richting TP1, TP2 en TP3'
+                : chart.isWaitingPullback
+                  ? 'Wacht op pullback omhoog bij weerstand ➔ neerwaartse afwijzing richting TP1, TP2 en TP3'
+                  : 'Weerstand bereikt ➔ neerwaartse impuls richting TP1, TP2 en TP3'}
           </span>
         </div>
         <div className={styles.projectionTargets}>
@@ -720,6 +817,11 @@ export function SignalChart({
                 if (chart.isPriceInZone) {
                   return '🎯 Koers bevindt zich nu in de Golden Zone (0.382–0.618) — sterke reactiezone!';
                 }
+                if (chart.isBounceOut) {
+                  return chart.side === 'LONG'
+                    ? '🔥 Golden Zone (0.382–0.618) reeds geraakt en koers veert krachtig op — actieve bounce instap!'
+                    : '🔥 Golden Zone (0.382–0.618) reeds geraakt en koers ketst krachtig af — actieve afwijzing instap!';
+                }
                 if (chart.side === 'LONG') {
                   return p > chart.goldenHigh
                     ? '⏳ Koers staat boven de Golden Zone — wacht op pullback richting de zone.'
@@ -756,6 +858,7 @@ export function SignalChart({
         preserveAspectRatio="none"
         role="img"
         aria-label={`Candlestick grafiek van ${symbol.replace('_', '/')}`}
+        onWheel={handleWheel}
       >
         <defs>
           <marker
@@ -818,7 +921,7 @@ export function SignalChart({
             <rect
               x={PAD.left + 6}
               y={Math.min(chart.waitTopY, chart.waitBottomY) + 2}
-              width={chart.isPriceInZone ? 160 : 225}
+              width={chart.isPriceInZone ? 160 : chart.isBounceOut ? 210 : 225}
               height={15}
               rx={3}
               className={styles.waitZoneBadgeBg}
@@ -830,9 +933,11 @@ export function SignalChart({
             >
               {chart.isPriceInZone
                 ? '🎯 INSTAPZONE BEREIKT'
-                : isLong
-                  ? '⏳ WACHT OP PULLBACK IN DEZE ZONE'
-                  : '⏳ WACHT OP PULLBACK OMHOOG IN ZONE'}
+                : chart.isBounceOut
+                  ? '🔥 BOUNCE UIT ZONE BEVESTIGD'
+                  : isLong
+                    ? '⏳ WACHT OP PULLBACK IN DEZE ZONE'
+                    : '⏳ WACHT OP PULLBACK OMHOOG IN ZONE'}
             </text>
           </g>
         )}

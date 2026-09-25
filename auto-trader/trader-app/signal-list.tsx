@@ -66,7 +66,9 @@ function getFibPullbackInfo(s: Signal): FibPullbackInfo {
   const isPriceInGz = gzLow > 0 && s.price >= gzLow && s.price <= gzHigh;
   const isBounce = Boolean(
     pullbackCheck?.detail?.toLowerCase().includes('bounce') ||
-    pullbackCheck?.detail?.toLowerCase().includes('wick')
+    pullbackCheck?.detail?.toLowerCase().includes('wick') ||
+    pullbackCheck?.detail?.toLowerCase().includes('reeds geraakt') ||
+    fibCheck?.detail?.toLowerCase().includes('reeds geraakt')
   );
 
   let badgeText = '⏳ Wacht op Retracement';
@@ -78,7 +80,7 @@ function getFibPullbackInfo(s: Signal): FibPullbackInfo {
   if (isBounce) {
     badgeText = '🔥 Bounce Bevestigd';
     badgeClass = 'badgeSuccess';
-    status = 'Tag & reject bounce gezien vanaf de Golden Zone — instap op de bounce!';
+    status = 'Golden Zone (0.382–0.618) reeds geraakt en koers veert krachtig op — actieve bounce instap!';
   } else if (isPriceInGz) {
     badgeText = '🎯 In Golden Zone';
     badgeClass = 'badgeSuccess';

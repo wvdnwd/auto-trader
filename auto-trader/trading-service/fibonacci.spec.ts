@@ -1,4 +1,4 @@
-import { computeFibLevels, goldenZoneWickTouch, inGoldenZone } from './fibonacci.js';
+import { computeFibLevels, detectGoldenZoneBounce, goldenZoneWickTouch, goldenZoneLevels, inGoldenZone } from './fibonacci.js';
 import type { Candle } from './types.js';
 
 /** Build a simple synthetic swing: price rises from `low` to `high` then pulls back. */
@@ -81,6 +81,39 @@ describe('computeFibLevels', () => {
     expect(fib.nearest.ratio).toBe(0.5);
     expect(fib.distanceToNearest).toBeLessThan(0.05);
   });
+
+  it('anchors swing strictly from bodem to top when preferredSide is LONG', () => {
+    // Construct candles where a spike happened early, but the active swing is bottom 90 -> top 180
+    const candles: Candle[] = [
+      { time: 1, open: 120, high: 130, low: 110, close: 125, volume: 10 },
+      { time: 2, open: 125, high: 125, low: 90, close: 95, volume: 10 }, // Bodem (low = 90)
+      { time: 3, open: 95, high: 140, low: 94, close: 135, volume: 10 },
+      { time: 4, open: 135, high: 180, low: 130, close: 175, volume: 10 }, // Top (high = 180)
+      { time: 5, open: 175, high: 175, low: 145, close: 150, volume: 10 }, // Pullback
+    ];
+    const fib = computeFibLevels(candles, 150, 10, 'LONG');
+    expect(fib).not.toBeNull();
+    expect(fib!.direction).toBe('UP');
+    expect(fib!.swingLow).toBe(90);
+    expect(fib!.swingHigh).toBe(180);
+    const half = fib!.retracements.find((r) => r.ratio === 0.5);
+    expect(half?.price).toBe(135);
+  });
+
+  it('anchors swing strictly from top to bodem when preferredSide is SHORT', () => {
+    const candles: Candle[] = [
+      { time: 1, open: 150, high: 155, low: 145, close: 150, volume: 10 },
+      { time: 2, open: 150, high: 200, low: 148, close: 195, volume: 10 }, // Top (high = 200)
+      { time: 3, open: 195, high: 195, low: 130, close: 135, volume: 10 },
+      { time: 4, open: 135, high: 140, low: 100, close: 105, volume: 10 }, // Bodem (low = 100)
+      { time: 5, open: 105, high: 135, low: 105, close: 130, volume: 10 }, // Pullback rally
+    ];
+    const fib = computeFibLevels(candles, 130, 10, 'SHORT');
+    expect(fib).not.toBeNull();
+    expect(fib!.direction).toBe('DOWN');
+    expect(fib!.swingHigh).toBe(200);
+    expect(fib!.swingLow).toBe(100);
+  });
 });
 
 describe('inGoldenZone', () => {
@@ -96,6 +129,90 @@ describe('inGoldenZone', () => {
     const fib = computeFibLevels(candles, 200)!;
     expect(inGoldenZone(fib, 195)).toBe(false);
     expect(inGoldenZone(fib, 105)).toBe(false);
+  });
+});
+
+describe('goldenZoneLevels', () => {
+  it('correctly returns min and max bounds for UP direction', () => {
+    const candles = swingCandles(100, 200, 30);
+    const fib = computeFibLevels(candles, 200)!;
+    const { lower, upper } = goldenZoneLevels(fib);
+    expect(lower).toBeCloseTo(138.2, 0); // 200 - 0.618 * 100
+    expect(upper).toBeCloseTo(161.8, 0); // 200 - 0.382 * 100
+  });
+});
+
+describe('detectGoldenZoneBounce', () => {
+  it('detects a confirmed bounce out of the Golden Zone for LONG', () => {
+    const candles = swingCandles(100, 200, 30);
+    const fib = computeFibLevels(candles, 200)!;
+    // Golden zone is 138.2 to 161.8
+    // Candle 1: dips down into 145 (inside zone)
+    // Candle 2: bounces and closes at 170 (above 161.8 zone upper bound)
+    const testCandles: Candle[] = [
+      { time: 1000, open: 180, high: 185, low: 170, close: 175, volume: 50 },
+      { time: 1900, open: 175, high: 175, low: 145, close: 148, volume: 80 }, // in zone
+      { time: 2800, open: 148, high: 172, low: 146, close: 170, volume: 100 }, // bounced out
+    ];
+
+    const result = detectGoldenZoneBounce(fib, testCandles, 170);
+    expect(result.touchedZone).toBe(true);
+    expect(result.bouncedOut).toBe(true);
+    expect(result.entryType).toBe('bounce_out');
+  });
+
+  it('detects price currently inside the Golden Zone as in_zone', () => {
+    const candles = swingCandles(100, 200, 30);
+    const fib = computeFibLevels(candles, 200)!;
+    const testCandles: Candle[] = [
+      { time: 1000, open: 180, high: 185, low: 170, close: 175, volume: 50 },
+      { time: 1900, open: 175, high: 175, low: 145, close: 150, volume: 80 },
+    ];
+
+    const result = detectGoldenZoneBounce(fib, testCandles, 150);
+    expect(result.touchedZone).toBe(true);
+    expect(result.bouncedOut).toBe(false);
+    expect(result.entryType).toBe('in_zone');
+  });
+
+  it('invalidates bounce when candle closed below 0.786 invalidation level', () => {
+    const candles = swingCandles(100, 200, 30);
+    const fib = computeFibLevels(candles, 200)!;
+    // 0.786 level is 200 - 0.786*100 = 121.4
+    const testCandles: Candle[] = [
+      { time: 1000, open: 180, high: 185, low: 170, close: 175, volume: 50 },
+      { time: 1900, open: 175, high: 175, low: 110, close: 115, volume: 80 }, // breached 0.786
+      { time: 2800, open: 115, high: 170, low: 115, close: 168, volume: 100 },
+    ];
+
+    const result = detectGoldenZoneBounce(fib, testCandles, 168);
+    expect(result.bouncedOut).toBe(false);
+    expect(result.entryType).toBe('none');
+  });
+
+  it('detects a confirmed rejection bounce for DOWN / SHORT swing', () => {
+    // DOWN swing: 200 down to 100 (5 candles minimum)
+    const downCandles: Candle[] = [
+      { time: 1, open: 170, high: 175, low: 165, close: 172, volume: 10 },
+      { time: 2, open: 172, high: 200, low: 170, close: 195, volume: 10 }, // Top
+      { time: 3, open: 195, high: 195, low: 150, close: 155, volume: 10 },
+      { time: 4, open: 155, high: 160, low: 100, close: 105, volume: 10 }, // Bodem
+      { time: 5, open: 105, high: 110, low: 102, close: 108, volume: 10 },
+    ];
+    const fib = computeFibLevels(downCandles, 108, 10, 'SHORT')!;
+    expect(fib).not.toBeNull();
+    expect(fib.direction).toBe('DOWN');
+    // Golden Zone retracement (0.382–0.618) of 100 wide move is 138.2 to 161.8
+    // Candle rallies into 150, then drops and closes back at 120 (below 138.2)
+    const testCandles: Candle[] = [
+      { time: 100, open: 105, high: 155, low: 105, close: 150, volume: 50 }, // rallied into zone
+      { time: 200, open: 150, high: 152, low: 118, close: 120, volume: 80 }, // rejected down below zone
+    ];
+
+    const result = detectGoldenZoneBounce(fib, testCandles, 120);
+    expect(result.touchedZone).toBe(true);
+    expect(result.bouncedOut).toBe(true);
+    expect(result.entryType).toBe('bounce_out');
   });
 });
 
