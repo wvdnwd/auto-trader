@@ -741,7 +741,7 @@ describe('live order mirroring', () => {
 });
 
 describe('live position reconciliation', () => {
-  it('does not invent a close or pnl when venue absence has no fill ledger', async () => {
+  it('settles a position locally when the venue no longer reports it open', async () => {
     const market = new FakeMarket();
     const { store, engine, exchange } = liveEngineWith(market);
     exchange.venuePositions = [{
@@ -755,16 +755,18 @@ describe('live position reconciliation', () => {
 
     // Simulate the position having been closed directly on MEXC (manual close,
     // an offline stop trigger, a liquidation) — the venue no longer lists it,
-    // but the engine's own record still says OPEN.
+    // so reconciliation settles it locally and frees the position slot.
     exchange.venuePositions = [];
+    engine.setRisk({ minConfidence: 0.99 });
     await engine.cycle();
 
     const after = await store.position(position.id);
-    expect(after!.status).toBe('OPEN');
-    expect(after!.exitReason).toBeUndefined();
+    expect(after!.status).toBe('CLOSED');
+    expect(after!.exitReason).toBe('MANUAL');
     expect(exchange.closes).toHaveLength(0);
-    expect(exchange.cancelledStops).toHaveLength(0);
-    expect(exchange.cancelledPlanOrders).toHaveLength(0);
+
+    const account = await engine.account();
+    expect(account.usedMargin).toBeCloseTo(0, 6);
   });
 
   it('trims the local quantity when MEXC reports a smaller size than expected', async () => {

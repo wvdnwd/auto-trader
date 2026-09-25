@@ -200,6 +200,24 @@ export function macd(values: number[]): { macd: number; signal: number; hist: nu
  * @param period lookback window, defaults to 14.
  * @returns ATR divided by price, or NaN when there is not enough data.
  */
+/**
+ * Average True Range in absolute price units.
+ *
+ * @param candles OHLCV candles, oldest first.
+ * @param period lookback window, defaults to 14.
+ * @returns ATR value, or NaN when there is not enough data.
+ */
+export function atr(candles: Candle[], period = 14): number {
+  if (candles.length < period + 1) return NaN;
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i += 1) {
+    const c = candles[i];
+    const prev = candles[i - 1];
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - prev.close), Math.abs(c.low - prev.close)));
+  }
+  return sma(trs, period);
+}
+
 export function atrPct(candles: Candle[], period = 14): number {
   if (candles.length < period + 1) return NaN;
   const trs: number[] = [];

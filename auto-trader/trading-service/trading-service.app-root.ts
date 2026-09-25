@@ -171,6 +171,16 @@ export function run() {
     }
   });
 
+  app.post('/positions/:id/realign-tpsl', async (req, res) => {
+    try {
+      const customTpSl = req.body?.customTpSl;
+      const result = await serviceFor(res).realignPositionTpSl(req.params.id, customTpSl);
+      res.status(200).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
   app.get('/markets', async (_req, res) => {
     try {
       res.json({ markets: await serviceFor(res).markets(40) });

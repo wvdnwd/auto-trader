@@ -424,6 +424,19 @@ export class TradingService {
     return this.engine.reducePosition(id, fraction);
   }
 
+  /**
+   * Realign / recalculate or manually customize Take Profit targets and Stop Loss for an open position.
+   *
+   * @param id position id.
+   * @param customTpSl optional custom levels.
+   */
+  async realignPositionTpSl(
+    id: string,
+    customTpSl?: { stopLoss?: number; takeProfits?: Array<{ price: number; portion?: number }> }
+  ): Promise<{ ok: boolean; position: Position }> {
+    return this.engine.realignPositionTpSl(id, customTpSl);
+  }
+
   /** Reset the paper account and clear all history. */
   async reset(): Promise<void> {
     this.assertNoUnresolvedLivePositions();

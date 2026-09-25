@@ -1,4 +1,5 @@
 import type {
+  Position,
   BacktestConfig,
   BacktestStatus,
   ChartData,
@@ -135,6 +136,20 @@ export function closePosition(id: string): Promise<{ closed: boolean }> {
  */
 export function reducePosition(id: string, fraction = 0.5): Promise<{ reduced: boolean }> {
   return request(`/positions/${id}/reduce`, { method: 'POST', body: JSON.stringify({ fraction }) });
+}
+
+/**
+ * Realign or reset Take Profit targets and Stop Loss for an open position.
+ * If custom levels are omitted, automatically recalculates optimal levels using current ATR and market structure.
+ */
+export function realignPositionTpSl(
+  id: string,
+  customTpSl?: { stopLoss?: number; takeProfits?: Array<{ price: number; portion?: number }> }
+): Promise<{ ok: boolean; position?: Position }> {
+  return request(`/positions/${id}/realign-tpsl`, {
+    method: 'POST',
+    body: JSON.stringify({ customTpSl }),
+  });
 }
 
 /** Reset the paper account and wipe history. */

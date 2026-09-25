@@ -4,6 +4,7 @@ import {
   closeExchangePosition,
   closePosition,
   reducePosition,
+  realignPositionTpSl,
   fetchChart,
   fetchSnapshot,
   placeTestOrder,
@@ -1295,6 +1296,7 @@ export function Dashboard() {
                               plan={plan}
                               onClose={plan ? (id) => act(() => closePosition(id)) : undefined}
                               onReduce={plan ? (id, frac) => act(() => reducePosition(id, frac)) : undefined}
+                              onRealignTpSl={plan ? (id, custom) => act(() => realignPositionTpSl(id, custom)) : undefined}
                               onOpenChart={setChartSymbol}
                             />
                           );
@@ -1315,6 +1317,7 @@ export function Dashboard() {
                           mark={marks[p.symbol]}
                           onClose={(id) => act(() => closePosition(id))}
                           onReduce={(id, frac) => act(() => reducePosition(id, frac))}
+                          onRealignTpSl={(id, custom) => act(() => realignPositionTpSl(id, custom))}
                           onOpenChart={setChartSymbol}
                         />
                       ))}

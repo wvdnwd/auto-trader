@@ -20,7 +20,7 @@ import {
   trailPatch,
   trimForRegimeFlip,
 } from './exits.js';
-import { rsi } from './indicators.js';
+import { atr, rsi } from './indicators.js';
 import { LIVE_EXECUTION_DISABLED_REASON, MexcExchangeAdapter, type IExchangeAdapter } from './exchange-adapter.js';
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { notify } from './notifier.js';
@@ -41,6 +41,7 @@ import type {
   RiskConfig,
   Signal,
   Ticker,
+  TakeProfitLevel,
   TradePlan,
   TradePostMortem,
 } from './types.js';
@@ -984,10 +985,16 @@ export class Engine {
         // Settle it locally at the last known mark so the paper book (balance,
         // stats, dashboard) stops reflecting a position that is already gone.
         // No reduce order is sent — there is nothing left on the venue to reduce.
-        await this.log(
-          'warn',
-          `Reconciliatie: ${position.symbol} ${position.side} is niet (meer) open op MEXC. Exposure-afwezigheid bevestigd, maar zonder fill-ledger wordt geen lokale close/PnL geboekt en blijven beschermingsorders ongemoeid.`
-        );
+        const price = this.markOf(position);
+        let exitReason: NonNullable<Position['exitReason']> = 'MANUAL';
+        if (position.side === 'LONG') {
+          if (price <= position.stopLoss) exitReason = 'STOP_LOSS';
+          else if (position.takeProfit && price >= position.takeProfit) exitReason = 'TAKE_PROFIT';
+        } else {
+          if (price >= position.stopLoss) exitReason = 'STOP_LOSS';
+          else if (position.takeProfit && price <= position.takeProfit) exitReason = 'TAKE_PROFIT';
+        }
+        await this.settleExternally(position, price, exitReason);
         continue;
       }
 
@@ -2644,6 +2651,18 @@ export class Engine {
       });
       return true;
     } catch (err) {
+      const msg = (err as Error).message.toLowerCase();
+      if (
+        msg.includes('not found') ||
+        msg.includes('no position') ||
+        msg.includes('empty') ||
+        msg.includes('zero') ||
+        msg.includes('not exist') ||
+        msg.includes('position is zero')
+      ) {
+        await this.log('warn', `Live positie ${position.symbol} bestaat niet meer op exchange — lokaal sluiten wordt voltooid.`);
+        return true;
+      }
       await this.log(
         'warn',
         `Live take-profit sluiten mislukt voor ${position.symbol}: ${(err as Error).message} — wordt volgende cyclus opnieuw geprobeerd.`
@@ -2673,6 +2692,154 @@ export class Engine {
     } catch (err) {
       await this.log('warn', `Stop verplaatsen op exchange mislukt voor ${position.symbol}: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Settle an externally closed position locally (e.g. stopped out or closed on exchange).
+   */
+  private async settleExternally(
+    position: Position,
+    price: number,
+    reason: NonNullable<Position['exitReason']> = 'MANUAL'
+  ): Promise<void> {
+    if (position.live) {
+      if (position.liveStopOrderId) {
+        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol).catch(() => {});
+      }
+      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
+    }
+    const { total, settling, net } = closeSettlement(position, price);
+    const claimed = await this.store.settlePosition(position.id, {
+      closedAt: Date.now(),
+      exit: price,
+      pnl: net,
+      pnlPct: position.margin ? net / position.margin : 0,
+      exitReason: reason,
+      remainingQuantity: 0,
+      realisedPnl: total,
+    });
+    if (!claimed) return;
+    await this.store.applyBalanceDelta({
+      balance: position.margin + settling,
+      realisedPnl: settling,
+    });
+    this.marks.delete(position.symbol);
+    await this.log(
+      net >= 0 ? 'trade' : 'warn',
+      `Reconciliatie: ${position.symbol} ${position.side} extern gesloten op exchange — lokaal afgewikkeld @ ${price} (PnL: ${net >= 0 ? '+' : ''}$${net.toFixed(2)}), slot vrijgegeven.`
+    );
+    void notify({
+      kind: 'trade-close',
+      message: `CLOSE ${position.side} ${position.symbol} @ ${price} · extern gesloten op exchange · ${net >= 0 ? '+' : ''}$${net.toFixed(2)} · LIVE`,
+    });
+  }
+
+  /**
+   * Realign / recalculate or manually customize Take Profit targets and Stop Loss for an open position.
+   * If custom levels are provided, validates and sets them; otherwise automatically recalculates
+   * optimal levels using current ATR and market structure. If the position is live, updates orders on the exchange.
+   */
+  public async realignPositionTpSl(
+    id: string,
+    customTpSl?: { stopLoss?: number; takeProfits?: Array<{ price: number; portion?: number }> }
+  ): Promise<{ ok: boolean; position: Position }> {
+    const position = await this.store.position(id);
+    if (!position || position.status !== 'OPEN') {
+      throw new Error(`Positie ${id} niet gevonden of niet meer open.`);
+    }
+
+    const price = this.markOf(position);
+    const detail = await this.market
+      .contractDetail(position.symbol)
+      .catch(() => ({ contractSize: position.liveContractSize || 1, minVol: 1, maxVol: 100000, priceScale: 4 }));
+    const priceScale = detail.priceScale ?? 4;
+    const isLong = position.side === 'LONG';
+    const dir = isLong ? 1 : -1;
+
+    let newSl: number;
+    let newTps: TakeProfitLevel[];
+
+    if (customTpSl?.stopLoss && customTpSl?.takeProfits?.length) {
+      newSl = Number(customTpSl.stopLoss.toFixed(priceScale));
+      newTps = customTpSl.takeProfits.map((tp, idx) => ({
+        price: Number(tp.price.toFixed(priceScale)),
+        portion: tp.portion ?? (idx === 0 ? 0.33 : idx === 1 ? 0.33 : 0.34),
+        rMultiple: Math.round((Math.abs(tp.price - position.entry) / Math.max(0.0001, Math.abs(position.entry - newSl))) * 10) / 10 || 1.5,
+        hit: false,
+      }));
+    } else {
+      // Automatic smart recalculation using ATR and market structure
+      const candles = await this.market.candles(position.symbol, 'Min60').catch(() => []);
+      const atrVal = candles.length >= 14 ? atr(candles, 14) : price * 0.02;
+      const stopDistance = Math.max(price * 0.015, atrVal * 1.5);
+      newSl = Number((price - dir * stopDistance).toFixed(priceScale));
+
+      const tp1 = Number((price + dir * stopDistance * 1.5).toFixed(priceScale));
+      const tp2 = Number((price + dir * stopDistance * 2.5).toFixed(priceScale));
+      const tp3 = Number((price + dir * stopDistance * 3.5).toFixed(priceScale));
+
+      newTps = [
+        { price: tp1, portion: 0.33, rMultiple: 1.5, hit: false },
+        { price: tp2, portion: 0.33, rMultiple: 2.5, hit: false },
+        { price: tp3, portion: 0.34, rMultiple: 3.5, hit: false },
+      ];
+    }
+
+    const updatedTakeProfit = newTps[0].price;
+    await this.store.updatePosition(position.id, {
+      stopLoss: newSl,
+      takeProfit: updatedTakeProfit,
+      takeProfits: newTps,
+      breakEven: false,
+    });
+
+    position.stopLoss = newSl;
+    position.takeProfit = updatedTakeProfit;
+    position.takeProfits = newTps;
+    position.breakEven = false;
+
+    // If live, synchronize Stop Loss and Take Profit orders on the exchange
+    if (position.live && this.exchange.status().enabled) {
+      const remainingQty = position.remainingQuantity ?? position.quantity;
+      const contractSize = position.liveContractSize || 1;
+      const vol = Math.max(detail.minVol, Math.round(remainingQty / contractSize));
+
+      // 1. Move or place Stop Loss
+      await this.moveLiveStop(position, newSl, remainingQty).catch((err) => {
+        void this.log('warn', `Stop Loss bijwerken op exchange mislukt voor ${position.symbol}: ${(err as Error).message}`);
+      });
+
+      // 2. Cancel old plan/TP orders and place fresh TP orders
+      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
+
+      let remainingVol = vol;
+      for (let i = 0; i < newTps.length; i++) {
+        const tp = newTps[i];
+        const isLast = i === newTps.length - 1;
+        const tpVol = isLast ? remainingVol : Math.max(detail.minVol, Math.round(vol * tp.portion));
+        remainingVol -= tpVol;
+        if (tpVol > 0) {
+          await this.exchange
+            .placeTakeProfitOrder({
+              symbol: position.symbol,
+              side: position.side,
+              vol: tpVol,
+              triggerPrice: tp.price,
+              externalOid: `${position.id}-tp-${i + 1}-${Date.now()}`,
+            })
+            .catch((err) => {
+              void this.log('warn', `TP${i + 1} herplaatsen op exchange mislukt: ${(err as Error).message}`);
+            });
+        }
+      }
+    }
+
+    await this.log(
+      'trade',
+      `🎯 TP & SL opnieuw ingesteld voor ${position.symbol} ${position.side}: SL @ ${newSl}, TP's @ ${newTps.map((t) => t.price).join(', ')}${position.live ? ' (gesynchroniseerd op exchange)' : ''}`
+    );
+
+    return { ok: true, position };
   }
 
   private async close(
