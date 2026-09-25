@@ -51,7 +51,6 @@ $AllowList = @(
     "tsconfig.json",
     "auto-trader",
     "setup-pi.sh",
-    "setup-pi5.sh",
     "start-traderr.sh",
     "ecosystem.config.cjs"
 )
@@ -63,7 +62,6 @@ $RequiredFiles = @(
     "pnpm-lock.yaml",
     "tsconfig.json",
     "setup-pi.sh",
-    "setup-pi5.sh",
     "start-traderr.sh",
     "ecosystem.config.cjs"
 )

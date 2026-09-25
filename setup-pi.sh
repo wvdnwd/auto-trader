@@ -10,8 +10,8 @@ echo "📦 [1/6] Systeempakketten bijwerken en benodigdheden installeren..."
 sudo apt-get update -y
 sudo apt-get install -y curl git build-essential ca-certificates
 
-# 2. Node.js LTS (v20) controleren / installeren
-echo "🟢 [2/6] Node.js 20 LTS controleren..."
+# 2. Node.js LTS controleren / installeren
+echo "🟢 [2/6] Node.js LTS controleren..."
 NEED_NODE=true
 if command -v node >/dev/null 2>&1; then
   NODE_VER=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
@@ -22,8 +22,8 @@ if command -v node >/dev/null 2>&1; then
 fi
 
 if [ "$NEED_NODE" = true ]; then
-  echo "   Node.js 20 LTS installeren via NodeSource..."
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+  echo "   Node.js 22 LTS installeren via NodeSource..."
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
   echo "   Node.js $(node -v) succesvol geïnstalleerd!"
 fi
