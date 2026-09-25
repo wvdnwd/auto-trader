@@ -653,24 +653,110 @@ export function buildSignal(
   const pullbackFamilyBonus = Math.max(fibBonus, sniperBonus);
   const liquidityFamilyBonus = Math.max(sweepBonus, asianSweepBonus);
 
-  const confidence = Math.min(
-    1,
+  // --- Micro-timing & Reversal confirmation (15m candles when available) ---
+  const reversalConfirmed = (() => {
+    if (
+      lowerCandles &&
+      lowerCandles.length === candles.length &&
+      lowerCandles[0]?.time === candles[0]?.time &&
+      lowerCandles[lowerCandles.length - 1]?.time === candles[candles.length - 1]?.time
+    ) {
+      return true;
+    }
+    if (!hasFreshMicroCandles(lowerCandles, 2, lastCandle.time)) return false;
+    const last = lowerCandles[lowerCandles.length - 1];
+    const prev = lowerCandles[lowerCandles.length - 2];
+    const lastRange = Math.max(0.0000001, last.high - last.low);
+    if (side === 'LONG') {
+      const lowerWick = Math.min(last.open, last.close) - last.low;
+      const hasHammerWick = lowerWick / lastRange >= 0.35;
+      return last.close >= last.open || hasHammerWick;
+    } else {
+      const upperWick = last.high - Math.max(last.open, last.close);
+      const hasStarWick = upperWick / lastRange >= 0.35;
+      return last.close <= last.open || hasStarWick;
+    }
+  })();
+
+  const timingReady = (() => {
+    if (
+      lowerCandles &&
+      lowerCandles.length === candles.length &&
+      lowerCandles[0]?.time === candles[0]?.time &&
+      lowerCandles[lowerCandles.length - 1]?.time === candles[candles.length - 1]?.time
+    ) {
+      return true;
+    }
+    if (!hasFreshMicroCandles(lowerCandles, 15, lastCandle.time)) return false;
+    const lowerCloses = lowerCandles.map((c) => c.close);
+    const rsi15m = rsi(lowerCloses, 14);
+    if (!Number.isFinite(rsi15m)) return false;
+    if (side === 'LONG' && rsi15m > 70) return false;
+    if (side === 'SHORT' && rsi15m < 30) return false;
+
+    // Price action: avoid catching a falling knife during pullbacks
+    const last = lowerCandles[lowerCandles.length - 1];
+    const prev = lowerCandles[lowerCandles.length - 2];
+    if (last && prev) {
+      const lastRange = Math.max(0.0000001, last.high - last.low);
+      if (side === 'LONG') {
+        const lastIsRed = last.close < last.open;
+        const prevIsRed = prev.close < prev.open;
+        const lowerWick = Math.min(last.open, last.close) - last.low;
+        const hasHammerWick = lowerWick / lastRange >= 0.35;
+        if (lastIsRed && prevIsRed && last.close < prev.close && !hasHammerWick) {
+          return false;
+        }
+      } else if (side === 'SHORT') {
+        const lastIsGreen = last.close > last.open;
+        const prevIsGreen = prev.close > prev.open;
+        const upperWick = last.high - Math.max(last.open, last.close);
+        const hasStarWick = upperWick / lastRange >= 0.35;
+        if (lastIsGreen && prevIsGreen && last.close > prev.close && !hasStarWick) {
+          return false;
+        }
+      }
+    }
+    return true;
+  })();
+
+  let rawConfidence =
     Math.abs(raw) *
-      volPenalty *
-      regimePenalty *
-      checkPenalty *
-      alignmentBonus *
-      pullbackFamilyBonus *
-      liquidityFamilyBonus *
-      rsiDivBonus *
-      volumeSpurtBonus *
-      smcBonus *
-      structureBonus *
-      smtBonus *
-      pocBonus *
-      smtPenalty *
-      contradictionPenalty
+    volPenalty *
+    regimePenalty *
+    checkPenalty *
+    alignmentBonus *
+    pullbackFamilyBonus *
+    liquidityFamilyBonus *
+    rsiDivBonus *
+    volumeSpurtBonus *
+    smcBonus *
+    structureBonus *
+    smtBonus *
+    pocBonus *
+    smtPenalty *
+    contradictionPenalty;
+
+  const hasMicro = Boolean(
+    lowerCandles &&
+      lowerCandles.length >= 2 &&
+      hasFreshMicroCandles(lowerCandles, 2, lastCandle.time)
   );
+
+  // Calibrate confidence so it truth-reflects execution readiness:
+  // 1. If an asset is in trend but extended past EMA21 (no pullback), the engine refuses
+  //    to FOMO-buy. Cap conviction at 0.68 so it displays as "waiting for dip" rather than
+  //    falsely claiming 100% certainty.
+  if (isTrending && !inPullback) {
+    rawConfidence = Math.min(rawConfidence, 0.68);
+  } else if (hasMicro && (!timingReady || !reversalConfirmed)) {
+    // 2. In pullback, but 15m micro-trigger not yet confirmed (wait for hammer/green candle)
+    rawConfidence = Math.min(rawConfidence, 0.78);
+  }
+
+  // 3. Absolute certainty (100%) does not exist in financial trading.
+  //    Cap maximum confidence at 0.92 so high-conviction trades show as 85-92%.
+  const confidence = Math.min(0.92, rawConfidence);
   if (!Number.isFinite(confidence)) return null;
 
   const priorityReasons: string[] = [`Regime ${regime} (1u: ${higherRegime})`];
@@ -731,70 +817,8 @@ export function buildSignal(
     fib,
     // Filled in by the engine once it has the active risk config — `buildSignal`
     plannedLeverage: null,
-    reversalConfirmed: (() => {
-      if (
-        lowerCandles &&
-        lowerCandles.length === candles.length &&
-        lowerCandles[0]?.time === candles[0]?.time &&
-        lowerCandles[lowerCandles.length - 1]?.time === candles[candles.length - 1]?.time
-      ) {
-        return true;
-      }
-      if (!hasFreshMicroCandles(lowerCandles, 2, lastCandle.time)) return false;
-      const last = lowerCandles[lowerCandles.length - 1];
-      const prev = lowerCandles[lowerCandles.length - 2];
-      const lastRange = Math.max(0.0000001, last.high - last.low);
-      if (side === 'LONG') {
-        const lowerWick = Math.min(last.open, last.close) - last.low;
-        const hasHammerWick = lowerWick / lastRange >= 0.35;
-        return last.close >= last.open || hasHammerWick;
-      } else {
-        const upperWick = last.high - Math.max(last.open, last.close);
-        const hasStarWick = upperWick / lastRange >= 0.35;
-        return last.close <= last.open || hasStarWick;
-      }
-    })(),
-    timingReady: (() => {
-      if (
-        lowerCandles &&
-        lowerCandles.length === candles.length &&
-        lowerCandles[0]?.time === candles[0]?.time &&
-        lowerCandles[lowerCandles.length - 1]?.time === candles[candles.length - 1]?.time
-      ) {
-        return true;
-      }
-      if (!hasFreshMicroCandles(lowerCandles, 15, lastCandle.time)) return false;
-      const lowerCloses = lowerCandles.map((c) => c.close);
-      const rsi15m = rsi(lowerCloses, 14);
-      if (!Number.isFinite(rsi15m)) return false;
-      if (side === 'LONG' && rsi15m > 70) return false;
-      if (side === 'SHORT' && rsi15m < 30) return false;
-
-      // Price action: avoid catching a falling knife during pullbacks
-      const last = lowerCandles[lowerCandles.length - 1];
-      const prev = lowerCandles[lowerCandles.length - 2];
-      if (last && prev) {
-        const lastRange = Math.max(0.0000001, last.high - last.low);
-        if (side === 'LONG') {
-          const lastIsRed = last.close < last.open;
-          const prevIsRed = prev.close < prev.open;
-          const lowerWick = Math.min(last.open, last.close) - last.low;
-          const hasHammerWick = lowerWick / lastRange >= 0.35;
-          if (lastIsRed && prevIsRed && last.close < prev.close && !hasHammerWick) {
-            return false;
-          }
-        } else if (side === 'SHORT') {
-          const lastIsGreen = last.close > last.open;
-          const prevIsGreen = prev.close > prev.open;
-          const upperWick = last.high - Math.max(last.open, last.close);
-          const hasStarWick = upperWick / lastRange >= 0.35;
-          if (lastIsGreen && prevIsGreen && last.close > prev.close && !hasStarWick) {
-            return false;
-          }
-        }
-      }
-      return true;
-    })(),
+    reversalConfirmed,
+    timingReady,
     session: sessionInfo.session,
     asianRange,
     marketStructure,

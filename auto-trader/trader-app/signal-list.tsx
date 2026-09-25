@@ -268,9 +268,23 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
                   </span>
                 )}
               </div>
-              <span className={`${styles.pnl} ${passes ? styles.up : ''}`} style={{ fontSize: '0.82rem' }}>
-                {pct(s.confidence, 0)}
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                <span className={`${styles.pnl} ${passes ? styles.up : ''}`} style={{ fontSize: '0.85rem', fontWeight: 700 }}>
+                  {pct(s.confidence, 0)}
+                </span>
+                <span
+                  className={`${styles.tag} ${
+                    actionPlan.badgeClass === 'badgeSuccess'
+                      ? styles.safe
+                      : actionPlan.badgeClass === 'badgeWarning'
+                        ? styles.amber
+                        : styles.neutral
+                  }`}
+                  style={{ fontSize: '0.72rem', padding: '0.12rem 0.45rem' }}
+                >
+                  {actionPlan.badgeText}
+                </span>
+              </div>
               <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
                 <button
                   type="button"
