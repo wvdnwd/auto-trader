@@ -25,7 +25,7 @@ import { FEE } from './exits.js';
 export const DEFAULT_RISK: RiskConfig = {
   baseRiskPct: 0.005,
   maxRiskPct: 0.015,
-  maxLeverage: 15,
+  maxLeverage: 20,
   minLeverage: 2,
   maxOpenPositions: 3,
   maxTotalMarginPct: 0.95,
@@ -300,9 +300,9 @@ function stopGeometry(signal: Signal, config: RiskConfig): StopGeometry | null {
 
 /**
  * Asset leverage tiering:
- * - BTC / ETH: max 20x, default 15x
- * - Major Alts: max 10x, default 8x
- * - Small / Meme Alts: max 5x, default 4x
+ * - BTC / ETH: max 25x, default 20x
+ * - Major Alts: max 15x, default 12x
+ * - Small / Meme Alts: max 10x, default 8x
  */
 export function classifyLeverage(symbol: string): {
   leverageClass: LeverageClass;
@@ -311,7 +311,7 @@ export function classifyLeverage(symbol: string): {
 } {
   const norm = symbol.toUpperCase();
   if (norm.startsWith('BTC_') || norm.startsWith('ETH_')) {
-    return { leverageClass: 'BTC_ETH', defaultLeverage: 15, maxLeverage: 20 };
+    return { leverageClass: 'BTC_ETH', defaultLeverage: 20, maxLeverage: 25 };
   }
   const majors = [
     'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK', 'DOT', 'NEAR', 'SUI', 'APT', 'TIA', 'INJ',
@@ -319,9 +319,9 @@ export function classifyLeverage(symbol: string): {
   ];
   const isMajor = majors.some((m) => norm.startsWith(`${m}_`));
   if (isMajor) {
-    return { leverageClass: 'MAJOR_ALT', defaultLeverage: 8, maxLeverage: 10 };
+    return { leverageClass: 'MAJOR_ALT', defaultLeverage: 12, maxLeverage: 15 };
   }
-  return { leverageClass: 'SMALL_ALT', defaultLeverage: 4, maxLeverage: 5 };
+  return { leverageClass: 'SMALL_ALT', defaultLeverage: 8, maxLeverage: 10 };
 }
 
 /**
@@ -346,7 +346,7 @@ export function computeLeverageBreakdown(
   entry: number,
   stopLoss: number,
   strategy: StrategyType = 'SWING',
-  maxConfigLeverage = 15,
+  maxConfigLeverage = 20,
   turboMode = false
 ): LeverageBreakdown | null {
   const { leverageClass, defaultLeverage, maxLeverage } = classifyLeverage(symbol);
@@ -358,24 +358,25 @@ export function computeLeverageBreakdown(
     : Math.min(maxLeverage, maxConfigLeverage);
   let targetLeverage = turboMode ? effectiveMax : Math.min(defaultLeverage, effectiveMax);
   if (strategy === 'BREAKOUT' && !turboMode) {
-    if (targetLeverage >= 15) targetLeverage = 12;
+    if (targetLeverage >= 20) targetLeverage = 15;
+    else if (targetLeverage >= 12) targetLeverage = 10;
     else if (targetLeverage >= 8) targetLeverage = 6;
-    else targetLeverage = 3;
+    else targetLeverage = 4;
   }
 
-  const candidateTiers = [20, 18, 16, 15, 12, 10, 8, 6, 5, 4, 3, 2];
+  const candidateTiers = [25, 22, 20, 18, 16, 15, 14, 12, 10, 8, 6, 5, 4, 3, 2];
   const validTiers = candidateTiers.filter((t) => t <= targetLeverage);
 
   let selectedLeverage = validTiers[validTiers.length - 1] ?? 2;
   let liquidationPrice = computeLiquidationPrice(entry, side, selectedLeverage);
   let liquidationBufferR = Math.abs(entry - liquidationPrice) / stopDistance;
-  let requiredBufferR = 3.5;
+  let requiredBufferR = 2.0;
   let steppedDown = false;
 
   for (const tier of validTiers) {
     const liq = computeLiquidationPrice(entry, side, tier);
     const bufR = Math.abs(entry - liq) / stopDistance;
-    const reqR = turboMode ? 3.0 : tier > 15 ? 6.0 : tier > 12 ? 5.0 : 3.5;
+    const reqR = turboMode ? 1.8 : tier >= 20 ? 2.5 : tier >= 12 ? 2.2 : 2.0;
     if (bufR >= reqR) {
       selectedLeverage = tier;
       liquidationPrice = liq;
@@ -412,7 +413,7 @@ function leverageForStop(signal: Signal, config: RiskConfig, stopDistancePct: nu
     effectiveLev,
     caps.turboActive
   );
-  if (!breakdown || breakdown.liquidationBufferR < 3.0) return null;
+  if (!breakdown || breakdown.liquidationBufferR < 1.8) return null;
   return breakdown.selectedLeverage;
 }
 
@@ -446,7 +447,7 @@ export function previewLeverage(signal: Signal, config: RiskConfig): number | nu
     effectiveLev,
     caps.turboActive
   );
-  if (!breakdown || breakdown.liquidationBufferR < 3.0) return null;
+  if (!breakdown || breakdown.liquidationBufferR < 1.8) return null;
   signal.leverageBreakdown = breakdown;
   return breakdown.selectedLeverage;
 }
@@ -469,20 +470,20 @@ function leverageCaps(signal: Signal, config: RiskConfig): { volCap: number; con
   const highConviction = signal.confidence >= (config.highConvictionConfidence ?? 0.7);
   if (signal.atrPct > 0.02) {
     return {
-      volCap: highConviction ? config.maxLeverage : 8,
+      volCap: highConviction ? config.maxLeverage : 10,
       confFloor: turbo ? 10 : 8,
       turboActive: turbo,
     };
   }
   if (signal.atrPct > 0.01) {
     return {
-      volCap: turbo ? 18 : config.maxLeverage,
+      volCap: turbo ? Math.max(config.maxLeverage + 5, 25) : config.maxLeverage,
       confFloor: turbo ? 10 : 8,
       turboActive: turbo,
     };
   }
   return {
-    volCap: turbo ? Math.max(config.maxLeverage, 20) : config.maxLeverage,
+    volCap: turbo ? Math.max(config.maxLeverage + 5, 25) : config.maxLeverage,
     confFloor: turbo ? 10 : 8,
     turboActive: turbo,
   };
@@ -574,7 +575,7 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig, 
     effectiveLev,
     caps.turboActive
   );
-  if (!breakdown || breakdown.liquidationBufferR < 3.0) return null;
+  if (!breakdown || breakdown.liquidationBufferR < 1.8) return null;
   const leverage = breakdown.selectedLeverage;
 
   // 2. Risk budget with dynamic MTF multipliers
