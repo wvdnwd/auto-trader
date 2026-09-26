@@ -126,9 +126,6 @@ export function Dashboard() {
   const [chart, setChart] = useState<ChartData | null>(null);
   const [chartError, setChartError] = useState<string | null>(null);
   const [showKeyForm, setShowKeyForm] = useState(false);
-  const [venueTab, setVenueTab] = useState<'mexc' | 'hyperliquid'>('hyperliquid');
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [apiSecretInput, setApiSecretInput] = useState('');
   const [walletAddressInput, setWalletAddressInput] = useState('');
   const [privateKeyInput, setPrivateKeyInput] = useState('');
   const [isTestnetInput, setIsTestnetInput] = useState(false);
@@ -290,13 +287,10 @@ export function Dashboard() {
   // Marks come from the engine so every open position has a live price, even
   // when its market is not in the current scanner ranking.
   const marks = snap.marks || {};
-  // Once live trading is armed, the dashboard shows the real MEXC account
-  // instead of the internal paper ledger — balances, pnl and open positions
-  // all switch to what the exchange itself reports, so there is never a
-  // question of which number is the real one.
-  const isLive = snap.exchange.enabled;
+  // Shows the real Hyperliquid account state (USDC collateral, L1 on-chain open positions).
+  const isLive = snap.exchange.enabled || snap.exchange.configured;
   const liveAccount = snap.exchangeAccount;
-  const liveAccountOk = isLive && liveAccount && !liveAccount.error;
+  const liveAccountOk = Boolean(liveAccount && !liveAccount.error);
   const openCount = isLive ? (liveAccountOk ? liveAccount.open.length : undefined) : snap.open.length;
   const maxOpen = risk.maxOpenPositions || 10;
 
@@ -332,24 +326,42 @@ export function Dashboard() {
                 EN
               </button>
             </span>
-            {snap.exchange.enabled && (
-              <span
-                style={{
-                  fontSize: '0.78rem',
-                  fontWeight: 800,
-                  padding: '3px 8px',
-                  borderRadius: '4px',
-                  background: snap.exchange.venue === 'hyperliquid' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                  color: snap.exchange.venue === 'hyperliquid' ? '#38bdf8' : '#ef4444',
-                  border: `1px solid ${snap.exchange.venue === 'hyperliquid' ? '#38bdf8' : '#ef4444'}`,
-                  letterSpacing: '0.05em',
-                  textTransform: 'uppercase',
-                }}
-                title={snap.exchange.venue === 'hyperliquid' ? 'Live gekoppeld met Hyperliquid DEX' : 'Live gekoppeld met MEXC Futures'}
-              >
-                🔴 {snap.exchange.venue?.toUpperCase() || 'MEXC'} LIVE
-              </span>
-            )}
+            <span
+              style={{
+                fontSize: '0.78rem',
+                fontWeight: 800,
+                padding: '3px 8px',
+                borderRadius: '4px',
+                background: snap.exchange.enabled
+                  ? 'rgba(56, 189, 248, 0.2)'
+                  : snap.exchange.configured
+                  ? 'rgba(234, 179, 8, 0.2)'
+                  : 'rgba(148, 163, 184, 0.15)',
+                color: snap.exchange.enabled
+                  ? '#38bdf8'
+                  : snap.exchange.configured
+                  ? '#eab308'
+                  : '#94a3b8',
+                border: `1px solid ${
+                  snap.exchange.enabled
+                    ? '#38bdf8'
+                    : snap.exchange.configured
+                    ? '#eab308'
+                    : '#475569'
+                }`,
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+              }}
+              title={
+                snap.exchange.enabled
+                  ? 'Live order-uitvoering actief op Hyperliquid L1 DEX'
+                  : snap.exchange.configured
+                  ? 'Hyperliquid wallet gekoppeld'
+                  : 'Hyperliquid koppeling vereist (zie Opties)'
+              }
+            >
+              {snap.exchange.enabled ? '⚡ HYPERLIQUID LIVE' : snap.exchange.configured ? '🟡 HYPERLIQUID READY' : '🔌 HYPERLIQUID'}
+            </span>
             <span className={styles.status}>
               <span className={`${styles.dot} ${snap.running ? styles.dotLive : ''}`} />
               {snap.running ? (snap.watching ? t('statusLiveWatching') : t('statusLive')) : t('statusPaused')}
@@ -680,15 +692,11 @@ export function Dashboard() {
               <span>{snap.exchange.enabled ? '🔴' : snap.exchange.configured ? '🟡' : '🔌'}</span>
               <span className={styles.exchangeRow}>
                 <span>
-                  <b>{snap.exchange.venue === 'hyperliquid' ? '⚡ Hyperliquid DEX (L1)' : '🏛️ MEXC Futures'}</b>{' '}
+                  <b>⚡ Hyperliquid DEX (L1)</b>{' '}
                   {snap.exchange.enabled
-                    ? (snap.exchange.venue === 'hyperliquid'
-                        ? '🔴 Live trading actief op Hyperliquid L1 — orders worden direct on-chain geplaatst!'
-                        : t('mexcLinkEnabled'))
+                    ? '🔴 Live trading actief op Hyperliquid L1 — orders worden direct on-chain geplaatst met USDC!'
                     : snap.exchange.configured
-                      ? (snap.exchange.venue === 'hyperliquid'
-                          ? '🟡 Hyperliquid wallet gekoppeld (klaar voor live trading)'
-                          : t('mexcLinkConfigured'))
+                      ? '🟡 Hyperliquid wallet gekoppeld (klaar voor live trading)'
                       : t('mexcLinkNone')}
                 </span>
                 <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -707,22 +715,6 @@ export function Dashboard() {
                   >
                     {snap.exchange.configured ? t('changeKey') : t('enterOwnKey')}
                   </button>
-                  {snap.exchange.configured && (
-                    <button
-                      type="button"
-                      className={styles.btn}
-                      disabled={busy}
-                      title="Wissel direct tussen Hyperliquid en MEXC"
-                      onClick={() => {
-                        const targetVenue = snap.exchange.venue === 'hyperliquid' ? 'mexc' : 'hyperliquid';
-                        if (window.confirm(`Wil je overschakelen naar ${targetVenue === 'hyperliquid' ? 'Hyperliquid DEX' : 'MEXC Futures'}?`)) {
-                          void act(() => setExchangeVenue(targetVenue));
-                        }
-                      }}
-                    >
-                      🔄 Wissel naar {snap.exchange.venue === 'hyperliquid' ? 'MEXC' : 'Hyperliquid'}
-                    </button>
-                  )}
                   {snap.exchange.configured && (
                     <button
                       type="button"
@@ -865,7 +857,7 @@ export function Dashboard() {
                       style={{ width: '1.2rem', height: '1.2rem', cursor: 'pointer' }}
                     />
                     <label htmlFor="test-keep-open" style={{ margin: 0, cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' }}>
-                      {testKeepOpen ? '🔓 Positie OPEN laten op MEXC (met actieve TP & SL triggers)' : '🔒 Direct weer automatisch sluiten na test'}
+                      {testKeepOpen ? '🔓 Positie OPEN laten op Hyperliquid L1 (met actieve TP & SL triggers)' : '🔒 Direct weer automatisch sluiten na test'}
                     </label>
                   </div>
                   {testError && (
@@ -875,10 +867,10 @@ export function Dashboard() {
                     <span className={styles.up} style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
                       <span>{t('testOrderPlaced', { id: testResult.orderId, vol: testResult.vol, price: usd(testResult.price) })}</span>
                       {testResult.tpPrice && (
-                        <span style={{ color: '#4ade80' }}>🎯 Take Profit ingesteld op MEXC: <b>${testResult.tpPrice}</b> ({testSide === 'LONG' ? `+${testTpPct}%` : `-${testTpPct}%`})</span>
+                        <span style={{ color: '#4ade80' }}>🎯 Take Profit ingesteld op Hyperliquid: <b>${testResult.tpPrice}</b> ({testSide === 'LONG' ? `+${testTpPct}%` : `-${testTpPct}%`})</span>
                       )}
                       {testResult.slPrice && (
-                        <span style={{ color: '#f87171' }}>🛡️ Stop Loss ingesteld op MEXC: <b>${testResult.slPrice}</b> ({testSide === 'LONG' ? `-${testSlPct}%` : `+${testSlPct}%`})</span>
+                        <span style={{ color: '#f87171' }}>🛡️ Stop Loss ingesteld op Hyperliquid: <b>${testResult.slPrice}</b> ({testSide === 'LONG' ? `-${testSlPct}%` : `+${testSlPct}%`})</span>
                       )}
                       <span>
                         {testResult.closeOrderId
@@ -935,7 +927,7 @@ export function Dashboard() {
                         className={`${styles.btn} ${styles.btnDanger}`}
                         disabled={testBusy}
                         onClick={() => {
-                          if (!window.confirm(`Positie op ${testedSymbol} nu sluiten op MEXC?`)) return;
+                          if (!window.confirm(`Positie op ${testedSymbol} nu sluiten op Hyperliquid?`)) return;
                           setTestBusy(true);
                           closeExchangePosition(testedSymbol)
                             .then(() => {
@@ -972,178 +964,92 @@ export function Dashboard() {
               <div className={styles.notice}>
                 <span>🔑</span>
                 <span className={styles.exchangeRow} style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.8rem' }}>
-                    <button
-                      type="button"
-                      className={`${styles.btn} ${venueTab === 'hyperliquid' ? styles.btnPrimary : ''}`}
-                      onClick={() => setVenueTab('hyperliquid')}
-                    >
-                      ⚡ Hyperliquid DEX (L1)
-                    </button>
-                    <button
-                      type="button"
-                      className={`${styles.btn} ${venueTab === 'mexc' ? styles.btnPrimary : ''}`}
-                      onClick={() => setVenueTab('mexc')}
-                    >
-                      🏛️ MEXC Futures
-                    </button>
+                  <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.85rem', color: '#94a3b8' }}>
+                    Verbind via Hyperliquid L1 met USDC als onderpand. Orders worden direct op de on-chain orderboeken geplaatst via EIP-712 ondertekening.
+                  </p>
+                  <div className={styles.field}>
+                    <label htmlFor="hl-wallet-address">{t('apiKeyLabel')} (0x...)</label>
+                    <input
+                      id="hl-wallet-address"
+                      type="text"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="0x..."
+                      value={walletAddressInput}
+                      onChange={(e) => setWalletAddressInput(e.target.value)}
+                    />
                   </div>
-
-                  {venueTab === 'hyperliquid' ? (
-                    <>
-                      <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.85rem', color: '#94a3b8' }}>
-                        Verbind via Hyperliquid L1 met USDC als onderpand. Orders worden direct op de on-chain orderboeken geplaatst via EIP-712 ondertekening.
-                      </p>
-                      <div className={styles.field}>
-                        <label htmlFor="hl-wallet-address">Wallet Adres (0x...)</label>
-                        <input
-                          id="hl-wallet-address"
-                          type="text"
-                          autoComplete="off"
-                          spellCheck={false}
-                          placeholder="0x..."
-                          value={walletAddressInput}
-                          onChange={(e) => setWalletAddressInput(e.target.value)}
-                        />
-                      </div>
-                      <div className={styles.field}>
-                        <label htmlFor="hl-private-key">Private Key (voor live trading via Agent Wallet of Main Wallet)</label>
-                        <input
-                          id="hl-private-key"
-                          type="password"
-                          autoComplete="off"
-                          spellCheck={false}
-                          placeholder="0x... of 64 hex tekens"
-                          value={privateKeyInput}
-                          onChange={(e) => setPrivateKeyInput(e.target.value)}
-                        />
-                        <small style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.2rem' }}>
-                          Tip: Maak op app.hyperliquid.xyz bij voorkeur een Agent Wallet aan met beperkte rechten voor geautomatiseerde handel.
-                        </small>
-                      </div>
-                      <div style={{ margin: '0.5rem 0 0.8rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <input
-                          id="hl-testnet"
-                          type="checkbox"
-                          checked={isTestnetInput}
-                          onChange={(e) => setIsTestnetInput(e.target.checked)}
-                          style={{ cursor: 'pointer' }}
-                        />
-                        <label htmlFor="hl-testnet" style={{ cursor: 'pointer', fontSize: '0.85rem' }}>
-                          Gebruik Hyperliquid Testnet (api.hyperliquid-testnet.xyz)
-                        </label>
-                      </div>
-                      <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnPrimary}`}
-                          disabled={busy || !walletAddressInput.trim()}
-                          onClick={() =>
+                  <div className={styles.field}>
+                    <label htmlFor="hl-private-key">{t('apiSecretLabel')} (voor live trading via Agent Wallet of Main Wallet)</label>
+                    <input
+                      id="hl-private-key"
+                      type="password"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="0x... of 64 hex tekens"
+                      value={privateKeyInput}
+                      onChange={(e) => setPrivateKeyInput(e.target.value)}
+                    />
+                    <small style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.2rem' }}>
+                      Tip: Maak op app.hyperliquid.xyz bij voorkeur een Agent Wallet aan met beperkte rechten voor geautomatiseerde handel.
+                    </small>
+                  </div>
+                  <div style={{ margin: '0.5rem 0 0.8rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <input
+                      id="hl-testnet"
+                      type="checkbox"
+                      checked={isTestnetInput}
+                      onChange={(e) => setIsTestnetInput(e.target.checked)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <label htmlFor="hl-testnet" style={{ cursor: 'pointer', fontSize: '0.85rem' }}>
+                      Gebruik Hyperliquid Testnet (api.hyperliquid-testnet.xyz)
+                    </label>
+                  </div>
+                  <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnPrimary}`}
+                      disabled={busy || !walletAddressInput.trim()}
+                      onClick={() =>
+                        void act(async () => {
+                          await saveExchangeCredentials({
+                            venue: 'hyperliquid',
+                            walletAddress: walletAddressInput.trim(),
+                            privateKey: privateKeyInput.trim(),
+                            isTestnet: isTestnetInput,
+                          });
+                          setShowKeyForm(false);
+                        })
+                      }
+                    >
+                      ⚡ Verbind & Activeer Hyperliquid
+                    </button>
+                    {snap.exchange.configured && (
+                      <button
+                        type="button"
+                        className={`${styles.btn} ${styles.btnDanger}`}
+                        disabled={busy}
+                        onClick={() => {
+                          if (window.confirm(t('removeConnectionConfirm'))) {
                             void act(async () => {
                               await saveExchangeCredentials({
                                 venue: 'hyperliquid',
-                                walletAddress: walletAddressInput.trim(),
-                                privateKey: privateKeyInput.trim(),
-                                isTestnet: isTestnetInput,
+                                walletAddress: '',
+                                privateKey: '',
                               });
                               setShowKeyForm(false);
-                            })
+                            });
                           }
-                        >
-                          ⚡ Verbind & Activeer Hyperliquid
-                        </button>
-                        {snap.exchange.configured && (
-                          <button
-                            type="button"
-                            className={`${styles.btn} ${styles.btnDanger}`}
-                            disabled={busy}
-                            onClick={() => {
-                              if (window.confirm('Weet je zeker dat je de exchange verbinding wilt verwijderen?')) {
-                                void act(async () => {
-                                  await saveExchangeCredentials('', '');
-                                  setShowKeyForm(false);
-                                });
-                              }
-                            }}
-                          >
-                            Verbinding Verbreken
-                          </button>
-                        )}
-                        <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
-                          {t('cancel')}
-                        </button>
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span>{t('apiKeyFormIntro')}</span>
-                      <div className={styles.field}>
-                        <label htmlFor="mexc-api-key">{t('apiKeyLabel')}</label>
-                        <input
-                          id="mexc-api-key"
-                          type="text"
-                          autoComplete="off"
-                          spellCheck={false}
-                          placeholder="mx0v..."
-                          value={apiKeyInput}
-                          onChange={(e) => setApiKeyInput(e.target.value)}
-                        />
-                      </div>
-                      <div className={styles.field}>
-                        <label htmlFor="mexc-api-secret">{t('apiSecretLabel')}</label>
-                        <input
-                          id="mexc-api-secret"
-                          type="password"
-                          autoComplete="off"
-                          spellCheck={false}
-                          placeholder="••••••••"
-                          value={apiSecretInput}
-                          onChange={(e) => setApiSecretInput(e.target.value)}
-                        />
-                      </div>
-                      <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnPrimary}`}
-                          disabled={busy || !apiKeyInput.trim() || !apiSecretInput.trim()}
-                          onClick={() =>
-                            void act(async () => {
-                              await saveExchangeCredentials({
-                                venue: 'mexc',
-                                apiKey: apiKeyInput.trim(),
-                                apiSecret: apiSecretInput.trim(),
-                              });
-                              setApiKeyInput('');
-                              setApiSecretInput('');
-                              setShowKeyForm(false);
-                            })
-                          }
-                        >
-                          {t('saveAndConnect')}
-                        </button>
-                        {snap.exchange.configured && (
-                          <button
-                            type="button"
-                            className={`${styles.btn} ${styles.btnDanger}`}
-                            disabled={busy}
-                            onClick={() => {
-                              if (window.confirm(t('removeConnectionConfirm'))) {
-                                void act(async () => {
-                                  await saveExchangeCredentials('', '');
-                                  setShowKeyForm(false);
-                                });
-                              }
-                            }}
-                          >
-                            {t('removeConnection')}
-                          </button>
-                        )}
-                        <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
-                          {t('cancel')}
-                        </button>
-                      </span>
-                    </>
-                  )}
+                        }}
+                      >
+                        {t('removeConnection')}
+                      </button>
+                    )}
+                    <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
+                      {t('cancel')}
+                    </button>
+                  </span>
                 </span>
               </div>
             )}
@@ -1198,7 +1104,7 @@ export function Dashboard() {
 
         <section className={styles.stats}>
           <div className={styles.card}>
-            <p className={styles.cardLabel}>{t('equity')}{isLive ? ' (MEXC)' : ''}</p>
+            <p className={styles.cardLabel}>{t('equity')}{' (Hyperliquid)'}</p>
             <p className={styles.cardValue}>
               {isLive ? (liveAccountOk ? usd(liveAccount.equity) : '—') : usd(account.equity)}
             </p>
@@ -1211,7 +1117,7 @@ export function Dashboard() {
             )}
           </div>
           <div className={styles.card}>
-            <p className={styles.cardLabel}>{t('freeBalance')}{isLive ? ' (MEXC)' : ''}</p>
+            <p className={styles.cardLabel}>{t('freeBalance')}</p>
             <p className={styles.cardValue}>
               {isLive ? (liveAccountOk ? usd(liveAccount.available) : '—') : usd(account.balance)}
             </p>
@@ -1224,7 +1130,7 @@ export function Dashboard() {
             </p>
           </div>
           <div className={styles.card}>
-            <p className={styles.cardLabel}>{t('openPnl')}{isLive ? ' (MEXC)' : ''}</p>
+            <p className={styles.cardLabel}>{t('openPnl')}</p>
             <p
               className={`${styles.cardValue} ${
                 isLive && !liveAccountOk
@@ -1273,7 +1179,7 @@ export function Dashboard() {
           <div className={styles.column}>
             <section className={styles.panel}>
               <div className={styles.panelHead}>
-                <h2>{t('openPositions')}{isLive ? ` (${snap.exchange.venue?.toUpperCase() || 'MEXC'})` : ''}</h2>
+                <h2>{t('openPositions')}{isLive ? ' (Hyperliquid L1)' : ''}</h2>
                 <span
                   className={`${styles.count} ${openCount !== undefined && openCount > maxOpen ? styles.countOverflow : ''}`}
                   title={openCount === undefined ? t('mexcUnavailable') : `${openCount} open / max ${maxOpen} trades`}

@@ -251,21 +251,21 @@ export type ExchangeCredentialsInput = {
 };
 
 /**
- * Save (or clear, when passed empty strings) the MEXC or Hyperliquid credentials
+ * Save (or clear, when passed empty strings) the Hyperliquid credentials
  * used for live order execution.
  */
 export function saveExchangeCredentials(
-  credsOrApiKey: ExchangeCredentialsInput | string,
-  apiSecret?: string
+  credsOrWallet: ExchangeCredentialsInput | string,
+  privateKey?: string
 ): Promise<LiveTradingStatus> {
-  const payload = typeof credsOrApiKey === 'string'
-    ? { apiKey: credsOrApiKey, apiSecret: apiSecret || '', venue: 'mexc' }
-    : credsOrApiKey;
+  const payload = typeof credsOrWallet === 'string'
+    ? { walletAddress: credsOrWallet, privateKey: privateKey || '', venue: 'hyperliquid' }
+    : credsOrWallet;
   return request('/exchange/credentials', { method: 'POST', body: JSON.stringify(payload) });
 }
 
 /**
- * Switch active execution venue between MEXC and Hyperliquid.
+ * Switch active execution venue between Hyperliquid and MEXC.
  */
 export function setExchangeVenue(venue: 'mexc' | 'hyperliquid'): Promise<LiveTradingStatus> {
   return request('/exchange/venue', { method: 'POST', body: JSON.stringify({ venue }) });
@@ -296,7 +296,7 @@ export function dismissScoutCandidate(symbol: string): Promise<{ dismissed: bool
   return request(`/scout/${encodeURIComponent(symbol)}/dismiss`, { method: 'POST' });
 }
 
-/** Result of a manual real-order connectivity test against MEXC. */
+/** Result of a manual real-order connectivity test against Hyperliquid. */
 export type TestOrderResult = {
   orderId: string;
   vol: number;
@@ -307,16 +307,16 @@ export type TestOrderResult = {
 };
 
 /**
- * Place a tiny real order on MEXC to verify the connected API key can
+ * Place a tiny real order on Hyperliquid to verify the connected wallet can
  * actually place and fill orders — bypassing the strategy and paper engine.
  * By default the order is opened and immediately closed again at market, so
  * it does not linger as a real position.
  *
- * @param symbol contract symbol, e.g. `BTC_USDT`.
+ * @param symbol contract symbol, e.g. `BTC_USDT` or `BTC`.
  * @param side `LONG` or `SHORT`.
- * @param usdtAmount notional size in USDT, e.g. 1 for a $1 test.
+ * @param usdtAmount notional size in USDC, e.g. 1 for a $1 test.
  * @param leverage leverage to open the test order with.
- * @param keepOpen when true, leaves the resulting position open on MEXC.
+ * @param keepOpen when true, leaves the resulting position open on Hyperliquid.
  * @param tpPct take-profit target in %, default 3.
  * @param slPct stop-loss protection in %, default 2.
  * @returns the opened (and, unless kept open, closing) order ids.
@@ -337,7 +337,7 @@ export function placeTestOrder(
 }
 
 /**
- * Close a live position directly on MEXC.
+ * Close a live position directly on Hyperliquid.
  */
 export function closeExchangePosition(symbol: string): Promise<{ orderId: string; vol: number }> {
   return request(`/exchange/positions/${encodeURIComponent(symbol)}/close`, { method: 'POST' });

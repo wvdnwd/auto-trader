@@ -187,7 +187,7 @@ export class TradingService {
     private readonly optimizer: OptimizerRunner,
     private readonly walkForward: WalkForwardRunner,
     private readonly scout: MarketScout,
-    private exchange: IExchangeAdapter = new MexcExchangeAdapter()
+    private exchange: IExchangeAdapter = new HyperliquidExchangeAdapter()
   ) {
     this.store.onFailure?.(() => {
       this.engine.stop();
@@ -213,7 +213,7 @@ export class TradingService {
         : 'Explicit non-live local development: using in-memory state',
     });
     const stored = await this.store.exchangeCredentials();
-    const venue = stored.venue || ((stored.walletAddress || process.env.HYPERLIQUID_WALLET) ? 'hyperliquid' : 'mexc');
+    const venue = stored.venue || 'hyperliquid';
     if (venue === 'hyperliquid') {
       const adapter = new HyperliquidExchangeAdapter(
         stored.walletAddress || process.env.HYPERLIQUID_WALLET,
@@ -235,8 +235,8 @@ export class TradingService {
     const persistedLive = readPersistedLiveTrading();
     if (!isConfigured) {
       process.env.LIVE_TRADING_ENABLED = 'false';
-    } else if (persistedLive !== null) {
-      process.env.LIVE_TRADING_ENABLED = persistedLive ? 'true' : 'false';
+    } else if (persistedLive !== false) {
+      process.env.LIVE_TRADING_ENABLED = 'true';
     } else if (process.env.LIVE_TRADING_ENABLED !== 'true') {
       process.env.LIVE_TRADING_ENABLED = 'false';
     }
@@ -266,7 +266,7 @@ export class TradingService {
       this.store.positions('OPEN'),
       this.store.positions('CLOSED', 100),
       this.store.events(60),
-      exchangeStatus.enabled ? this.fetchExchangeAccount() : Promise.resolve(null),
+      (exchangeStatus.enabled || exchangeStatus.configured) ? this.fetchExchangeAccount() : Promise.resolve(null),
       this.store.learning(),
     ]);
     // Recompute capacity against the active at-risk count: positions that reached
@@ -613,10 +613,10 @@ export class TradingService {
   ): Promise<{ orderId: string; vol: number; price: number; tpPrice: number; slPrice: number; closeOrderId: string | null }> {
     if (!this.exchange.isConfigured()) {
       throw new Error(
-        'Exchange API-sleutel ontbreekt — koppel eerst je eigen sleutel voordat je een testorder plaatst.'
+        'Hyperliquid wallet credentials ontbreken — koppel eerst je wallet en private key voordat je een testorder plaatst.'
       );
     }
-    if (!(usdtAmount > 0)) throw new Error('bedrag (USDT) moet groter dan 0 zijn');
+    if (!(usdtAmount > 0)) throw new Error('bedrag (USDC) moet groter dan 0 zijn');
 
     const [price, detail] = await Promise.all([
       this.market.price(symbol),
@@ -824,7 +824,7 @@ export class TradingService {
     const updated = {
       ...current,
       ...creds,
-      venue: creds.venue || current.venue || (creds.walletAddress ? 'hyperliquid' : 'mexc'),
+      venue: creds.venue || current.venue || 'hyperliquid',
     };
 
     await this.store.saveExchangeCredentials(updated);
@@ -844,11 +844,18 @@ export class TradingService {
     }
 
     const hasCreds = Boolean((updated.apiKey && updated.apiSecret) || (updated.walletAddress && updated.privateKey));
+    if (hasCreds) {
+      writePersistedLiveTrading(true);
+      process.env.LIVE_TRADING_ENABLED = 'true';
+    } else if (!updated.walletAddress && !updated.apiKey) {
+      writePersistedLiveTrading(false);
+      process.env.LIVE_TRADING_ENABLED = 'false';
+    }
     await this.store.addEvent({
       at: Date.now(),
       level: 'info',
       message: hasCreds
-        ? `Exchange credentials opgeslagen voor ${updated.venue?.toUpperCase() || 'exchange'}.`
+        ? `Exchange credentials opgeslagen voor ${updated.venue?.toUpperCase() || 'exchange'} (live trading actief).`
         : 'Exchange credentials verwijderd.',
     });
 
@@ -904,7 +911,7 @@ export class TradingService {
    */
   static from(market: MarketData = new MarketData()): TradingService {
     const store = new Store();
-    const venue = (process.env.EXCHANGE_VENUE?.toLowerCase() === 'hyperliquid') ? 'hyperliquid' : 'mexc';
+    const venue = (process.env.EXCHANGE_VENUE?.toLowerCase() === 'mexc') ? 'mexc' : 'hyperliquid';
     const exchange: IExchangeAdapter = venue === 'hyperliquid'
       ? new HyperliquidExchangeAdapter(
           process.env.HYPERLIQUID_WALLET,

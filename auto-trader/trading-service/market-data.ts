@@ -1,7 +1,8 @@
 import type { Candle, Ticker } from './types.js';
 export { isCryptoPerp } from './market-filter.js';
 
-const BASE = process.env.FUTURES_API_BASE || 'https://contract.mexc.com/api/v1/contract';
+const BASE = process.env.FUTURES_API_BASE || '';
+const HYPERLIQUID_URL = process.env.HYPERLIQUID_INFO_URL || 'https://api.hyperliquid.xyz/info';
 
 type RawTicker = {
   symbol: string;
@@ -31,10 +32,6 @@ type RawContractDetail = {
   priceScale?: number;
 };
 
-/**
- * The handful of contract-spec fields needed to translate a USDT amount into
- * the `vol` (contract count) MEXC's order endpoint expects.
- */
 export type ContractDetail = {
   symbol: string;
   /** Amount of the underlying one contract ('vol' unit) represents. */
@@ -47,36 +44,12 @@ export type ContractDetail = {
   priceScale: number;
 };
 
-/**
- * Venue responses that mean "try again", not "this request is wrong".
- *
- * 510 is the venue's rate limit and it arrives as HTTP 200 with `success: false`,
- * so it has to be matched on the body code rather than the status. Retrying these
- * matters more than it looks: a single throw kills the whole engine cycle, which
- * also skips exit management on open positions.
- */
 const RETRYABLE_CODES = new Set([429, 500, 502, 503, 510]);
-
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Max distinct historical windows kept in memory at once. */
 const HISTORY_CACHE_LIMIT = 200;
 
-/**
- * Global outbound-request gate shared by every call this module makes.
- *
- * A single scan cycle used to fire one request per symbol per timeframe (14+
- * for a 7-symbol universe) all at once with zero pacing. MEXC's public API
- * rate-limits by IP and answers a tripped limit with code 510 on EVERY
- * in-flight request at once — which is exactly the "all symbols fail in the
- * same warning" pattern seen in production, not a per-symbol problem. Capping
- * how many requests may be in flight together, and spacing out when each new
- * one is allowed to start, keeps the whole module under the venue's burst
- * limit instead of tripping it every cycle.
- */
-const MAX_CONCURRENT_REQUESTS = 3;
-/** Minimum gap between the start of two outbound requests, in ms. */
-const DISPATCH_GAP_MS = 150;
+const MAX_CONCURRENT_REQUESTS = 4;
+const DISPATCH_GAP_MS = 100;
 
 let activeRequests = 0;
 let lastDispatchAt = 0;
@@ -93,7 +66,6 @@ function pumpQueue(): void {
   setTimeout(waiter, wait);
 }
 
-/** Reserve a slot in the shared request gate, resolving once dispatch is allowed. */
 function acquireSlot(): Promise<void> {
   return new Promise((resolve) => {
     waiters.push(resolve);
@@ -101,20 +73,85 @@ function acquireSlot(): Promise<void> {
   });
 }
 
-/** Release a slot back to the shared request gate, waking the next waiter. */
 function releaseSlot(): void {
   activeRequests -= 1;
   pumpQueue();
+}
+
+/**
+ * Normalise any user-supplied or internal symbol to Hyperliquid's asset name.
+ * E.g. 'BTC_USDT', 'BTC-USDC', 'BTC_USDC', 'BTC' -> 'BTC'.
+ * Handles special scaled meme naming e.g. PEPE -> kPEPE, 1000BONK -> kBONK.
+ */
+export function normalizeCoin(symbol: string): string {
+  const clean = symbol.replace(/-USDC$|-USDT$|_USDT$|_USDC$/i, '').toUpperCase();
+  if (clean === 'PEPE' || clean === '1000PEPE') return 'kPEPE';
+  if (clean === 'BONK' || clean === '1000BONK') return 'kBONK';
+  if (clean === 'SHIB' || clean === '1000SHIB') return 'kSHIB';
+  if (clean === 'MOG' || clean === '1000000MOG') return 'kMOG';
+  return clean;
+}
+
+function toHlInterval(interval: string): '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '8h' | '12h' | '1d' {
+  const lower = interval.toLowerCase();
+  if (lower === 'min5' || lower === '5m') return '5m';
+  if (lower === 'min15' || lower === '15m') return '15m';
+  if (lower === 'min60' || lower === '60m' || lower === '1h') return '1h';
+  if (lower === '4h') return '4h';
+  if (lower === '1d' || lower === '1day') return '1d';
+  if (lower === '1m' || lower === '3m' || lower === '30m' || lower === '2h' || lower === '8h' || lower === '12h') {
+    return lower as any;
+  }
+  return '15m';
+}
+
+function hlIntervalToMs(interval: string): number {
+  switch (interval) {
+    case '1m': return 60_000;
+    case '3m': return 180_000;
+    case '5m': return 300_000;
+    case '15m': return 900_000;
+    case '30m': return 1_800_000;
+    case '1h': return 3_600_000;
+    case '2h': return 7_200_000;
+    case '4h': return 14_400_000;
+    case '8h': return 28_800_000;
+    case '12h': return 43_200_000;
+    case '1d': return 86_400_000;
+    default: return 900_000;
+  }
+}
+
+async function postHl<T>(body: unknown, attempts = 3): Promise<T> {
+  let lastError: Error = new Error('Hyperliquid info request failed');
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(200 * 2 ** (attempt - 1));
+    }
+    await acquireSlot();
+    try {
+      const res = await fetch(HYPERLIQUID_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        throw new Error(`Hyperliquid HTTP ${res.status}`);
+      }
+      return (await res.json()) as T;
+    } catch (err) {
+      lastError = err as Error;
+    } finally {
+      releaseSlot();
+    }
+  }
+  throw lastError;
 }
 
 async function getJson<T>(url: string, attempts = 3): Promise<T> {
   let last: Error = new Error(`market data request failed: ${url}`);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) {
-      // Back off with jitter so parallel symbol requests do not retry in lockstep
-      // and trip the same limit again. Rate-limit (510) responses get a longer
-      // base delay than plain network hiccups since the whole IP window needs
-      // time to clear, not just this one request.
       await sleep(400 * 2 ** (attempt - 1) + Math.random() * 200);
     }
     await acquireSlot();
@@ -140,8 +177,6 @@ async function getJson<T>(url: string, attempts = 3): Promise<T> {
       if (body.data === undefined) throw new Error(`market data returned no payload for ${url}`);
       return body.data;
     } catch (err) {
-      // Network-level failures are worth one more try; anything the venue
-      // explicitly rejected has already been rethrown above.
       if (err instanceof TypeError) {
         last = err;
         continue;
@@ -155,54 +190,23 @@ async function getJson<T>(url: string, attempts = 3): Promise<T> {
 }
 
 /**
- * Read-only feed of perpetual futures market data.
- *
- * Uses public endpoints only — no API key, no account access. Swap the base URL
- * via the `FUTURES_API_BASE` env var to point at another venue with the same shape.
+ * Read-only feed of perpetual futures market data from Hyperliquid L1.
  */
 export class MarketData {
   private tickerCache: { at: number; data: Ticker[] } = { at: 0, data: [] };
-
   private candleCache = new Map<string, { at: number; data: Candle[] }>();
-
-  /** Contract specs (size, min/max order vol) rarely change — cached for the process lifetime. */
   private contractCache = new Map<string, ContractDetail>();
-
-  /**
-   * Historical windows never change once fetched, so they are cached for reuse
-   * across a run — e.g. the overlapping windows a walk-forward analysis replays,
-   * or the shared candles every optimizer candidate scores against.
-   *
-   * Bounded to {@link HISTORY_CACHE_LIMIT} entries: a long optimizer search can
-   * touch hundreds of distinct `symbol:interval:from:to` windows in one process
-   * lifetime, and each entry holds a full OHLCV series, so an unbounded map would
-   * grow for as long as the process runs. Evicting the oldest entry once the
-   * limit is hit keeps memory flat without hurting the common case, where the
-   * same handful of windows are re-read many times in a row.
-   */
   private historyCache = new Map<string, Candle[]>();
 
   constructor(
-    /** How long ticker snapshots stay fresh, in ms. */
     private readonly tickerTtlMs = 20_000,
-    /** How long candle series stay fresh, in ms. */
     private readonly candleTtlMs = 60_000,
-    /**
-     * How far past its TTL a cached ticker may be served when the venue is
-     * unreachable. Kept short: a stale price still drives exit decisions, and on
-     * this strategy's 3x ATR stops half a minute of drift is tolerable where a
-     * dead cycle — which manages no positions at all — is not.
-     */
     private readonly staleGraceMs = 30_000
   ) {}
 
   /**
-   * Fetch every USDT perpetual ticker, cached for a short TTL.
-   *
-   * @param maxAgeMs how stale a cached snapshot may be before refetching.
-   *   Defaults to the configured TTL; pass a lower value when running the fast
-   *   cycle and a sharper entry price is worth the extra request.
-   * @returns list of tickers sorted by 24h quote volume, most liquid first.
+   * Fetch perpetual tickers, cached for a short TTL.
+   * Primary source is Hyperliquid decentralized perpetuals.
    */
   async tickers(maxAgeMs?: number): Promise<Ticker[]> {
     const ttl = maxAgeMs ?? this.tickerTtlMs;
@@ -210,15 +214,250 @@ export class MarketData {
     if (now - this.tickerCache.at < ttl && this.tickerCache.data.length) {
       return this.tickerCache.data;
     }
-    let raw: RawTicker[];
+
+    if (BASE && BASE.includes('contract.mexc.com')) {
+      return this.fetchMexcTickers(now);
+    }
+
     try {
-      raw = await getJson<RawTicker[]>(`${BASE}/ticker`);
+      const [meta, assetCtxs] = await postHl<[
+        { universe: Array<{ name: string; szDecimals: number; maxLeverage: number }> },
+        Array<{
+          markPx?: string;
+          midPx?: string | null;
+          prevDayPx?: string;
+          dayNtlVlm?: string;
+          funding?: string;
+          impactPxs?: [string, string] | null;
+        }>
+      ]>({
+        type: 'metaAndAssetCtxs',
+      });
+
+      const data: Ticker[] = [];
+      const universe = meta?.universe || [];
+      const ctxs = assetCtxs || [];
+
+      for (let i = 0; i < universe.length; i += 1) {
+        const u = universe[i];
+        const ctx = ctxs[i];
+        if (!u || !ctx) continue;
+        const lastPrice = Number(ctx.markPx || ctx.midPx || 0);
+        if (!Number.isFinite(lastPrice) || lastPrice <= 0) continue;
+
+        const bid1 = ctx.impactPxs && ctx.impactPxs[0] ? Number(ctx.impactPxs[0]) : undefined;
+        const ask1 = ctx.impactPxs && ctx.impactPxs[1] ? Number(ctx.impactPxs[1]) : undefined;
+        const spreadPct =
+          bid1 !== undefined && ask1 !== undefined && lastPrice > 0
+            ? Math.max(0, (ask1 - bid1) / lastPrice)
+            : undefined;
+        const prevDayPx = Number(ctx.prevDayPx) || lastPrice;
+        const changeRate24h = prevDayPx > 0 ? (lastPrice - prevDayPx) / prevDayPx : 0;
+        const quoteVolume24h = Number(ctx.dayNtlVlm) || 0;
+        const fundingRate = Number(ctx.funding) || 0;
+
+        const primarySymbol = `${u.name}_USDT`;
+        data.push({
+          symbol: primarySymbol,
+          lastPrice,
+          bid1,
+          ask1,
+          spreadPct,
+          quoteVolume24h,
+          changeRate24h,
+          fundingRate,
+        });
+
+        // Add meme aliases for engine compatibility
+        if (u.name === 'kPEPE') {
+          data.push({ symbol: 'PEPE_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kBONK') {
+          data.push({ symbol: '1000BONK_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+          data.push({ symbol: 'BONK_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kSHIB') {
+          data.push({ symbol: 'SHIB_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kMOG') {
+          data.push({ symbol: '1000000MOG_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        }
+      }
+
+      data.sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
+      this.tickerCache = { at: now, data };
+      return data;
     } catch (err) {
       if (this.tickerCache.data.length && now - this.tickerCache.at < this.staleGraceMs) {
         return this.tickerCache.data;
       }
       throw err;
     }
+  }
+
+  /**
+   * Fetch the latest price for a single symbol from Hyperliquid.
+   */
+  async price(symbol: string): Promise<number> {
+    if (BASE && BASE.includes('contract.mexc.com')) {
+      const data = await getJson<RawTicker>(`${BASE}/ticker?symbol=${symbol}`);
+      return Number(data.lastPrice) || 0;
+    }
+    const coin = normalizeCoin(symbol);
+    const mids = await postHl<Record<string, string>>({ type: 'allMids' });
+    return Number(mids[coin]) || 0;
+  }
+
+  /**
+   * Fetch contract order-sizing specification for Hyperliquid.
+   */
+  async contractDetail(symbol: string): Promise<ContractDetail> {
+    const cached = this.contractCache.get(symbol);
+    if (cached) return cached;
+
+    if (BASE && BASE.includes('contract.mexc.com')) {
+      return this.fetchMexcContractDetail(symbol);
+    }
+
+    const coin = normalizeCoin(symbol);
+    let szDecimals = 4;
+    try {
+      const meta = await postHl<{ universe: Array<{ name: string; szDecimals: number; maxLeverage: number }> }>({ type: 'meta' });
+      const asset = meta?.universe?.find((u) => u.name === coin);
+      if (asset) szDecimals = asset.szDecimals;
+    } catch {
+      // Fallback
+    }
+
+    const detail: ContractDetail = {
+      symbol,
+      contractSize: 1,
+      minVol: Math.pow(10, -szDecimals),
+      maxVol: Number.MAX_SAFE_INTEGER,
+      priceScale: Math.min(8, Math.max(2, szDecimals + 2)),
+    };
+    this.contractCache.set(symbol, detail);
+    return detail;
+  }
+
+  /**
+   * Fetch OHLCV candles for a symbol from Hyperliquid.
+   */
+  async candles(symbol: string, interval = 'Min15'): Promise<Candle[]> {
+    const key = `${symbol}:${interval}`;
+    const now = Date.now();
+    const cached = this.candleCache.get(key);
+    if (cached && now - cached.at < this.candleTtlMs) return cached.data;
+
+    if (BASE && BASE.includes('contract.mexc.com')) {
+      const data = await this.fetchMexcKlines(symbol, interval);
+      this.candleCache.set(key, { at: now, data });
+      return data;
+    }
+
+    try {
+      const coin = normalizeCoin(symbol);
+      const hlInterval = toHlInterval(interval);
+      const intervalMs = hlIntervalToMs(hlInterval);
+      const startTime = now - 300 * intervalMs;
+
+      const raw = await postHl<Array<{ t: number; o: string; h: string; l: string; c: string; v: string }>>({
+        type: 'candleSnapshot',
+        req: {
+          coin,
+          interval: hlInterval,
+          startTime,
+          endTime: now,
+        },
+      });
+
+      const data: Candle[] = (Array.isArray(raw) ? raw : [])
+        .map((c) => ({
+          time: Math.floor(c.t / 1000),
+          open: Number(c.o),
+          high: Number(c.h),
+          low: Number(c.l),
+          close: Number(c.c),
+          volume: Number(c.v),
+        }))
+        .filter(
+          (c) =>
+            Number.isFinite(c.open) &&
+            Number.isFinite(c.high) &&
+            Number.isFinite(c.low) &&
+            Number.isFinite(c.close) &&
+            c.close > 0
+        )
+        .sort((a, b) => a.time - b.time);
+
+      this.candleCache.set(key, { at: now, data });
+      return data;
+    } catch (err) {
+      if (cached && cached.data.length) return cached.data;
+      throw err;
+    }
+  }
+
+  /**
+   * Return any cached candles for a symbol, regardless of TTL.
+   */
+  getCachedCandles(symbol: string, interval = 'Min60'): Candle[] | undefined {
+    return this.candleCache.get(`${symbol}:${interval}`)?.data;
+  }
+
+  /**
+   * Fetch a history of candles for backtesting from Hyperliquid.
+   */
+  async history(symbol: string, interval: string, from: number, to: number): Promise<Candle[]> {
+    const key = `${symbol}:${interval}:${from}:${to}`;
+    const cached = this.historyCache.get(key);
+    if (cached) return cached;
+
+    if (BASE && BASE.includes('contract.mexc.com')) {
+      return this.fetchMexcHistory(symbol, interval, from, to);
+    }
+
+    const coin = normalizeCoin(symbol);
+    const hlInterval = toHlInterval(interval);
+
+    const raw = await postHl<Array<{ t: number; o: string; h: string; l: string; c: string; v: string }>>({
+      type: 'candleSnapshot',
+      req: {
+        coin,
+        interval: hlInterval,
+        startTime: Math.floor(from * 1000),
+        endTime: Math.floor(to * 1000),
+      },
+    });
+
+    const data: Candle[] = (Array.isArray(raw) ? raw : [])
+      .map((c) => ({
+        time: Math.floor(c.t / 1000),
+        open: Number(c.o),
+        high: Number(c.h),
+        low: Number(c.l),
+        close: Number(c.c),
+        volume: Number(c.v),
+      }))
+      .filter(
+        (c) =>
+          Number.isFinite(c.open) &&
+          Number.isFinite(c.high) &&
+          Number.isFinite(c.low) &&
+          Number.isFinite(c.close) &&
+          c.close > 0 &&
+          c.time >= from &&
+          c.time <= to
+      )
+      .sort((a, b) => a.time - b.time);
+
+    if (this.historyCache.size >= HISTORY_CACHE_LIMIT) {
+      const oldestKey = this.historyCache.keys().next().value;
+      if (oldestKey !== undefined) this.historyCache.delete(oldestKey);
+    }
+    this.historyCache.set(key, data);
+    return data;
+  }
+
+  private async fetchMexcTickers(now: number): Promise<Ticker[]> {
+    const raw = await getJson<RawTicker[]>(`${BASE}/ticker`);
     const data = raw
       .filter((t) => t.symbol?.endsWith('_USDT'))
       .map<Ticker>((t) => {
@@ -246,32 +485,7 @@ export class MarketData {
     return data;
   }
 
-  /**
-   * Fetch the latest price for a single symbol, bypassing the candle cache.
-   *
-   * @param symbol contract symbol, e.g. `BTC_USDT`.
-   * @returns the last traded price.
-   */
-  async price(symbol: string): Promise<number> {
-    const data = await getJson<RawTicker>(`${BASE}/ticker?symbol=${symbol}`);
-    return Number(data.lastPrice) || 0;
-  }
-
-  /**
-   * Fetch a contract's order-sizing spec — the pieces needed to translate a
-   * plain USDT amount into the `vol` (contract count) MEXC's order endpoint
-   * expects, and to validate that amount against the venue's min/max order size.
-   *
-   * Cached indefinitely per symbol: contract specs change on the order of
-   * months, not during a session, so re-fetching every call would just be
-   * wasted requests on the hot order-placement path.
-   *
-   * @param symbol contract symbol, e.g. `BTC_USDT`.
-   * @returns the contract size and order size bounds for that symbol.
-   */
-  async contractDetail(symbol: string): Promise<ContractDetail> {
-    const cached = this.contractCache.get(symbol);
-    if (cached) return cached;
+  private async fetchMexcContractDetail(symbol: string): Promise<ContractDetail> {
     const data = await getJson<RawContractDetail>(`${BASE}/detail?symbol=${symbol}`);
     const detail: ContractDetail = {
       symbol,
@@ -284,83 +498,7 @@ export class MarketData {
     return detail;
   }
 
-  /**
-   * Fetch OHLCV candles for a symbol.
-   *
-   * @param symbol contract symbol, e.g. `BTC_USDT`.
-   * @param interval venue interval key, e.g. `Min15` or `Min60`.
-   * @returns candles oldest first.
-   */
-  async candles(symbol: string, interval = 'Min15'): Promise<Candle[]> {
-    const key = `${symbol}:${interval}`;
-    const now = Date.now();
-    const cached = this.candleCache.get(key);
-    if (cached && now - cached.at < this.candleTtlMs) return cached.data;
-
-    try {
-      const data = await this.fetchKlines(symbol, interval);
-      this.candleCache.set(key, { at: now, data });
-      return data;
-    } catch (err) {
-      if (cached && cached.data.length) return cached.data;
-      throw err;
-    }
-  }
-
-  /**
-   * Return any cached candles for a symbol, regardless of TTL.
-   */
-  getCachedCandles(symbol: string, interval = 'Min60'): Candle[] | undefined {
-    return this.candleCache.get(`${symbol}:${interval}`)?.data;
-  }
-
-  /**
-   * Fetch a long history of candles for backtesting, paging backwards through
-   * the venue's per-request limit until the requested window is covered.
-   *
-   * @param symbol contract symbol, e.g. `BTC_USDT`.
-   * @param interval venue interval key, e.g. `Min15`.
-   * @param from start of the window, unix seconds.
-   * @param to end of the window, unix seconds.
-   * @returns candles oldest first, de-duplicated and sorted.
-   */
-  async history(symbol: string, interval: string, from: number, to: number): Promise<Candle[]> {
-    const key = `${symbol}:${interval}:${from}:${to}`;
-    const cached = this.historyCache.get(key);
-    if (cached) return cached;
-
-    const byTime = new Map<number, Candle>();
-    let cursor = to;
-    // Page backwards: each request returns the newest bars up to `end`, so we
-    // walk the window back until we reach `from` or the venue stops returning data.
-    for (let page = 0; page < 24 && cursor > from; page += 1) {
-      const batch = await this.fetchKlines(symbol, interval, from, cursor);
-      if (!batch.length) break;
-      for (const candle of batch) byTime.set(candle.time, candle);
-      const oldest = batch[0].time;
-      if (oldest <= from || oldest >= cursor) break;
-      cursor = oldest - 1;
-    }
-
-    const data = [...byTime.values()]
-      .filter((c) => c.time >= from && c.time <= to)
-      .sort((a, b) => a.time - b.time);
-    // Evict the oldest window first so the cache cannot grow without bound
-    // across a long-running optimizer or walk-forward session.
-    if (this.historyCache.size >= HISTORY_CACHE_LIMIT) {
-      const oldestKey = this.historyCache.keys().next().value;
-      if (oldestKey !== undefined) this.historyCache.delete(oldestKey);
-    }
-    this.historyCache.set(key, data);
-    return data;
-  }
-
-  private async fetchKlines(
-    symbol: string,
-    interval: string,
-    from?: number,
-    to?: number
-  ): Promise<Candle[]> {
+  private async fetchMexcKlines(symbol: string, interval: string, from?: number, to?: number): Promise<Candle[]> {
     const params = new URLSearchParams({ interval });
     if (from !== undefined) params.set('start', String(Math.floor(from)));
     if (to !== undefined) params.set('end', String(Math.floor(to)));
@@ -382,5 +520,27 @@ export class MarketData {
           Number.isFinite(c.close) &&
           c.close > 0
       );
+  }
+
+  private async fetchMexcHistory(symbol: string, interval: string, from: number, to: number): Promise<Candle[]> {
+    const byTime = new Map<number, Candle>();
+    let cursor = to;
+    for (let page = 0; page < 24 && cursor > from; page += 1) {
+      const batch = await this.fetchMexcKlines(symbol, interval, from, cursor);
+      if (!batch.length) break;
+      for (const candle of batch) byTime.set(candle.time, candle);
+      const oldest = batch[0].time;
+      if (oldest <= from || oldest >= cursor) break;
+      cursor = oldest - 1;
+    }
+    const data = [...byTime.values()]
+      .filter((c) => c.time >= from && c.time <= to)
+      .sort((a, b) => a.time - b.time);
+    if (this.historyCache.size >= HISTORY_CACHE_LIMIT) {
+      const oldestKey = this.historyCache.keys().next().value;
+      if (oldestKey !== undefined) this.historyCache.delete(oldestKey);
+    }
+    this.historyCache.set(`${symbol}:${interval}:${from}:${to}`, data);
+    return data;
   }
 }

@@ -85,7 +85,7 @@ export class Store {
       dayKey: new Date().toISOString().slice(0, 10),
     },
     scout: { universeExtras: [], cooldowns: {}, lastRunAt: null },
-    exchangeCredentials: { apiKey: '', apiSecret: '', walletAddress: '', privateKey: '', isTestnet: false, venue: 'mexc' },
+    exchangeCredentials: { apiKey: '', apiSecret: '', walletAddress: '', privateKey: '', isTestnet: false, venue: 'hyperliquid' },
     learning: { factorStats: {}, penalties: {} },
   };
 
@@ -617,7 +617,7 @@ export class Store {
             walletAddress: (d.walletAddress as string) || '',
             privateKey: (d.privateKey as string) || '',
             isTestnet: Boolean(d.isTestnet),
-            venue: (d.venue as 'mexc' | 'hyperliquid') || (d.apiKey ? 'mexc' : 'hyperliquid'),
+            venue: (d.venue as 'mexc' | 'hyperliquid') || 'hyperliquid',
           };
         }
       }
@@ -631,7 +631,7 @@ export class Store {
       walletAddress: process.env.HYPERLIQUID_WALLET || '',
       privateKey: process.env.HYPERLIQUID_PRIVATE_KEY || '',
       isTestnet: process.env.HYPERLIQUID_TESTNET === 'true',
-      venue: (process.env.EXCHANGE_VENUE as 'mexc' | 'hyperliquid') || (process.env.HYPERLIQUID_WALLET ? 'hyperliquid' : 'mexc'),
+      venue: (process.env.EXCHANGE_VENUE as 'mexc' | 'hyperliquid') || 'hyperliquid',
     };
   }
 
