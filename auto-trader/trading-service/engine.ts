@@ -25,7 +25,7 @@ import { LIVE_EXECUTION_DISABLED_REASON, MexcExchangeAdapter, type IExchangeAdap
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { notify } from './notifier.js';
 import { rankCandidates } from './candidate-ranking.js';
-import { DEFAULT_RISK, concentrationBlock, isPositionDerisked, planTrade, previewLeverage, tradingBlockedReason } from './risk.js';
+import { DEFAULT_RISK, concentrationBlock, correlationGroup, isPositionDerisked, planTrade, previewLeverage, tradingBlockedReason } from './risk.js';
 import { btcTrendConflict, buildSignal, checkLtfReversal, detectRegime } from './strategy.js';
 import { analyzeMarketStructure } from './market-structure.js';
 import { getMarketSession } from './sessions.js';
@@ -34,12 +34,15 @@ import { analyzeClosedTrade } from './post-mortem.js';
 import type {
   Account,
   BlockedState,
+  BlockReasonCode,
   Candle,
   EngineEvent,
   MarketSession,
   Position,
   RiskConfig,
   Signal,
+  SetupScore,
+  StrategyType,
   Ticker,
   TakeProfitLevel,
   TradePlan,
@@ -165,6 +168,7 @@ export const CORE_UNIVERSE = [
 export const ENTRY_INTERVAL = 'Min60';
 export const CONFIRM_INTERVAL = 'Hour4';
 export const MICRO_INTERVAL = 'Min15';
+export const SNIPER_INTERVAL = 'Min5';
 
 /**
  * How close to the entry threshold a signal must be for the engine to switch to
@@ -243,7 +247,11 @@ export class Engine {
   private lastBrokenLogAt = 0;
 
   /** Tracks last skip reason per symbol to prevent spamming identical skip messages every cycle. */
-  private lastSkipReasons = new Map<string, { reason: string; at: number }>();
+  /** Granular cooldown tracker: key -> { until: timestamp, reason: description } */
+  private cooldowns = new Map<string, { until: number; reason: string }>();
+
+  /** Tracks last skip reason per symbol to prevent spamming identical skip messages every cycle. */
+  private lastSkipReasons = new Map<string, { reason: string; at: number; blockCode?: BlockReasonCode }>();
 
   /** Timestamp of last pacing log to avoid spamming the log every 5s. */
   private lastPacingLogAt = 0;
@@ -337,6 +345,64 @@ export class Engine {
   /** The most recent ranked signals from the scanner. */
   get signals(): Signal[] {
     return this.lastSignals;
+  }
+
+  /** Active cooldowns by key with remaining seconds. */
+  getCooldowns(): Record<string, { until: number; reason: string; remainingSec: number }> {
+    const now = Date.now();
+    const result: Record<string, { until: number; reason: string; remainingSec: number }> = {};
+    for (const [key, val] of this.cooldowns.entries()) {
+      if (val.until > now) {
+        result[key] = {
+          until: val.until,
+          reason: val.reason,
+          remainingSec: Math.ceil((val.until - now) / 1000),
+        };
+      }
+    }
+    return result;
+  }
+
+  /** Set cooldown for a symbol, direction or zone. */
+  setCooldown(key: string, durationMinutes: number, reason: string): void {
+    this.cooldowns.set(key, { until: Date.now() + durationMinutes * 60_000, reason });
+  }
+
+  /** Clear a cooldown manually. */
+  clearCooldown(key: string): void {
+    this.cooldowns.delete(key);
+  }
+
+  /** Check if a symbol, direction or zone is currently in cooldown. */
+  isCooldownActive(
+    symbol: string,
+    side: 'LONG' | 'SHORT',
+    zoneId?: string
+  ): { active: boolean; remainingSec: number; reason?: string } {
+    const now = Date.now();
+    const keysToCheck = [
+      symbol,
+      `${symbol}:${side}`,
+      zoneId ? `${symbol}:zone:${zoneId}` : null,
+      `${symbol}:fakeout`,
+    ].filter(Boolean) as string[];
+
+    for (const key of keysToCheck) {
+      const cd = this.cooldowns.get(key);
+      if (cd && cd.until > now) {
+        return {
+          active: true,
+          remainingSec: Math.ceil((cd.until - now) / 1000),
+          reason: cd.reason,
+        };
+      }
+    }
+    return { active: false, remainingSec: 0 };
+  }
+
+  /** Last skip reasons recorded per symbol. */
+  getSkipReasons(): Record<string, { reason: string; at: number; blockCode?: BlockReasonCode }> {
+    return Object.fromEntries(this.lastSkipReasons.entries());
   }
 
   /** Timestamp of the last completed scan. */
@@ -1912,7 +1978,48 @@ export class Engine {
         const remainingHours = Math.ceil((penalty.penalizedUntil - Date.now()) / 3600_000);
         await this.logSkip(
           signal.symbol,
-          `Munt zit op het strafbankje na 2 opeenvolgende verliezen (nog ${remainingHours}u cooldown)`
+          `Munt zit op het strafbankje na 2 opeenvolgende verliezen (nog ${remainingHours}u cooldown)`,
+          'BLOCKED_COOLDOWN'
+        );
+        continue;
+      }
+
+      const ticker = this.lastTickers.get(signal.symbol);
+
+      // Granular Cooldown Check (TP: 15m, BE: 30m, SL: 60m, Fakeout: 120m)
+      const zoneKey = signal.zone4H ? `${Math.round(signal.zone4H.low)}-${Math.round(signal.zone4H.high)}` : undefined;
+      const cd = this.isCooldownActive(signal.symbol, signal.side, zoneKey);
+      if (cd.active) {
+        signal.blockReasonCode = 'BLOCKED_COOLDOWN';
+        await this.logSkip(
+          signal.symbol,
+          `Cooldown actief: ${cd.reason} (nog ${cd.remainingSec}s)`,
+          'BLOCKED_COOLDOWN'
+        );
+        continue;
+      }
+
+      // MTF Setup Score Check: Score < 70 = NO TRADE. Reversal requires >= 80.
+      const minScore = this.risk.minScore ?? 70;
+      const minReversalScore = this.risk.minReversalScore ?? 80;
+      const score = signal.setupScore?.total ?? Math.round(signal.confidence * 100);
+
+      if (score < minScore) {
+        signal.blockReasonCode = 'BLOCKED_LOW_SCORE';
+        await this.logSkip(
+          signal.symbol,
+          `MTF Setup Score (${score}/100) onder minimum vereiste (${minScore})`,
+          'BLOCKED_LOW_SCORE'
+        );
+        continue;
+      }
+
+      if (signal.strategyType === 'REVERSAL' && score < minReversalScore) {
+        signal.blockReasonCode = 'BLOCKED_REVERSAL_LOW_SCORE';
+        await this.logSkip(
+          signal.symbol,
+          `Reversal setup score (${score}/100) onder minimum vereiste (${minReversalScore})`,
+          'BLOCKED_REVERSAL_LOW_SCORE'
         );
         continue;
       }
@@ -1924,7 +2031,29 @@ export class Engine {
       if (isScaleIn && existingPos) {
         if (this.risk.pyramidingEnabled === false) continue;
         if ((existingPos.scaleInCount ?? 0) >= 1) continue; // Max 1 scale-in (2 tranches total)
-        if (existingPos.side !== signal.side) continue;
+        if (existingPos.side !== signal.side) {
+          if (score >= minReversalScore) {
+            await this.log(
+              'trade',
+              `🔄 One-Way Mode Reversal: ${signal.symbol} score is ${score}/100 (>= ${minReversalScore}). Oude ${existingPos.side} positie sluiten alvorens nieuwe ${signal.side} te openen...`
+            );
+            const markPrice = ticker?.lastPrice ?? signal.price;
+            await this.close(existingPos, markPrice, 'SIGNAL_FLIP');
+            account = await this.account();
+            const freshOpen = await this.store.positions('OPEN');
+            open.length = 0;
+            open.push(...freshOpen);
+            held.delete(signal.symbol);
+          } else {
+            signal.blockReasonCode = 'BLOCKED_EXISTING_SYMBOL_POSITION';
+            await this.logSkip(
+              signal.symbol,
+              `Bestaande ${existingPos.side} positie op ${signal.symbol}, score (${score}) onvoldoende voor reversal flip (min. ${minReversalScore})`,
+              'BLOCKED_EXISTING_SYMBOL_POSITION'
+            );
+            continue;
+          }
+        } else {
 
         // A TP1 flag is insufficient; the stop must cover fees at break-even.
         if (!isPositionDerisked(existingPos)) {
@@ -1956,11 +2085,13 @@ export class Engine {
           await this.logSkip(signal.symbol, `Wachten op 15m pullback-ommekeer voor 2e tranche van ${signal.symbol}`);
           continue;
         }
+        }
       } else if (held.has(signal.symbol)) {
+        signal.blockReasonCode = 'BLOCKED_EXISTING_SYMBOL_POSITION';
         continue;
       }
 
-      const ticker = this.lastTickers.get(signal.symbol);
+
 
       // Bitcoin Gatekeeper: block altcoins that fight Bitcoin's dominant trend or when BTC is in CHOP
       if (this.risk.btcFilterEnabled !== false && signal.symbol !== 'BTC_USDT') {
@@ -2128,7 +2259,7 @@ export class Engine {
         }
       }
 
-      // Trade Pacing: enforce a cooldown between new entries to avoid clustering trades on spikes
+      // Trade Pacing: enforce a cooldown between new entries if explicitly configured
       const cooldownMin = this.risk.entryCooldownMinutes ?? 0;
       const cooldownMs = cooldownMin * 60_000;
       if (cooldownMin > 0 && this.lastEntryAt && Date.now() - this.lastEntryAt < cooldownMs) {
@@ -2140,13 +2271,24 @@ export class Engine {
         break;
       }
 
+
+      // Pacing timer removed
+        // pacing check removed
+
+
+
+
+
+
+
       const usingOverflow = slots <= 0;
       if (usingOverflow && signal.confidence < this.risk.highConvictionConfidence) continue;
       // Correlated markets all lose together, so cap one-way and same-group
       // exposure before sizing anything.
       const crowded = concentrationBlock(signal, book, this.risk);
       if (crowded) {
-        await this.logSkip(signal.symbol, crowded);
+        signal.blockReasonCode = 'BLOCKED_CORRELATED_RISK';
+        await this.logSkip(signal.symbol, crowded, 'BLOCKED_CORRELATED_RISK');
         continue;
       }
       const plan = planTrade(signal, account, this.risk);
@@ -2159,6 +2301,41 @@ export class Engine {
           );
         }
         continue;
+      }
+
+      // Portfolio Heat & Correlated Group Risk Limits
+      const maxPortfolioHeat = this.risk.maxPortfolioHeat ?? 0.015;
+      const maxCorrelatedRisk = this.risk.maxCorrelatedRisk ?? 0.010;
+
+      const currentHeat = open
+        .filter((p) => !isPositionDerisked(p))
+        .reduce((sum, p) => sum + (p.initialRisk * p.quantity) / (account.equity || 1), 0);
+
+      if (currentHeat + plan.riskPct > maxPortfolioHeat) {
+        signal.blockReasonCode = 'BLOCKED_PORTFOLIO_HEAT';
+        await this.logSkip(
+          signal.symbol,
+          `Portfolio heat zou ${((currentHeat + plan.riskPct) * 100).toFixed(2)}% worden (max ${(maxPortfolioHeat * 100).toFixed(1)}%)`,
+          'BLOCKED_PORTFOLIO_HEAT'
+        );
+        continue;
+      }
+
+      const grp = correlationGroup(signal.symbol);
+      if (grp !== 'alts') {
+        const currentGroupRisk = open
+          .filter((p) => correlationGroup(p.symbol) === grp && !isPositionDerisked(p))
+          .reduce((sum, p) => sum + (p.initialRisk * p.quantity) / (account.equity || 1), 0);
+
+        if (currentGroupRisk + plan.riskPct > maxCorrelatedRisk) {
+          signal.blockReasonCode = 'BLOCKED_CORRELATED_RISK';
+          await this.logSkip(
+            signal.symbol,
+            `Gecorreleerd risico voor groep '${grp}' zou ${((currentGroupRisk + plan.riskPct) * 100).toFixed(2)}% worden (max ${(maxCorrelatedRisk * 100).toFixed(1)}%)`,
+            'BLOCKED_CORRELATED_RISK'
+          );
+          continue;
+        }
       }
       // 5-Minute (5m) Sniper Trigger: verify micro-reversal on 5m candles right before opening trade
       if (this.risk.ltfSniper5mEnabled !== false) {
@@ -2276,10 +2453,11 @@ export class Engine {
           // Two timeframes: 1h drives the entry, 4h confirms the context.
           // 15m micro-timing confirms entry when enabled.
           const fetchLower = this.risk.microTiming15mEnabled !== false;
-          const [candles, higher, lower] = await Promise.all([
+          const [candles, higher, lower, sniper] = await Promise.all([
             this.market.candles(ticker.symbol, ENTRY_INTERVAL),
             this.market.candles(ticker.symbol, CONFIRM_INTERVAL).catch(() => []),
             fetchLower ? this.market.candles(ticker.symbol, MICRO_INTERVAL).catch(() => []) : Promise.resolve([]),
+            this.market.candles(ticker.symbol, SNIPER_INTERVAL).catch(() => []),
           ]);
           if (candles.length < 60) {
             broken.push(`${ticker.symbol} (${candles.length} candles)`);
@@ -2294,7 +2472,8 @@ export class Engine {
             lower,
             learning,
             bmCandles,
-            bmSymbol
+            bmSymbol,
+            sniper
           );
         } catch (err) {
           broken.push(`${ticker.symbol} (${(err as Error).message})`);
@@ -2449,6 +2628,9 @@ export class Engine {
       regime: plan.regime,
       reasons: plan.reasons,
       entryChecks: signal?.checks,
+      strategyType: plan.strategyType,
+      setupScore: plan.setupScore,
+      leverageBreakdown: plan.leverageBreakdown,
     };
 
     // Mirror onto the real MEXC account when armed. Done BEFORE the position is
@@ -2897,6 +3079,41 @@ export class Engine {
       realisedPnl: settling,
     });
     this.marks.delete(position.symbol);
+
+    // Granular cooldowns per coin / setup:
+    // - Na TP: 15 min cooldown op dezelfde coin
+    // - Na Break-Even: 30 min cooldown op dezelfde coin
+    // - Na Stop-Loss: 60 min cooldown op dezelfde coin/richting
+    // - Na Fakeout / valse breakout: 120 min cooldown op die zone
+    const durationMinutes = Math.max(1, Math.round((Date.now() - position.openedAt) / 60_000));
+    const hitAnyTp = position.takeProfits && position.takeProfits.some((t) => t.hit);
+
+    if (reason === 'TAKE_PROFIT' || (hitAnyTp && net >= 0)) {
+      const cdMin = this.risk.cooldownTpMinutes ?? 15;
+      this.setCooldown(position.symbol, cdMin, `Take-profit bereikt (${cdMin}m cooldown op munt)`);
+    } else if (reason === 'BREAK_EVEN' || (position.breakEven && Math.abs(net) < 1.0)) {
+      const cdMin = this.risk.cooldownBeMinutes ?? 30;
+      this.setCooldown(position.symbol, cdMin, `Break-even geraakt (${cdMin}m cooldown op munt)`);
+    } else if (reason === 'STOP_LOSS' || (reason === 'TRAILING_STOP' && net < -0.05)) {
+      const isQuickStop = durationMinutes <= 20;
+      const isFakeout =
+        isQuickStop ||
+        position.strategyType === 'BREAKOUT' ||
+        (postMortem?.verdict === 'LOSS' && durationMinutes <= 30);
+      if (isFakeout) {
+        const cdMin = this.risk.cooldownFakeoutMinutes ?? 120;
+        this.setCooldown(position.symbol, cdMin, `Fakeout / valse uitbraak (${cdMin}m cooldown)`);
+        this.setCooldown(`${position.symbol}:fakeout`, cdMin, `Fakeout (${cdMin}m cooldown)`);
+        this.setCooldown(`${position.symbol}:${position.side}`, cdMin, `Fakeout richting (${cdMin}m cooldown)`);
+      } else {
+        const cdMin = this.risk.cooldownSlMinutes ?? 60;
+        this.setCooldown(
+          `${position.symbol}:${position.side}`,
+          cdMin,
+          `Stop-loss geraakt (${cdMin}m cooldown op ${position.side})`
+        );
+      }
+    }
     await this.log(
       net >= 0 ? 'trade' : 'warn',
       `CLOSE ${position.side} ${position.symbol} @ ${price} · ${reason} · ${net >= 0 ? '+' : ''}${net.toFixed(2)} (${((position.margin ? net / position.margin : 0) * 100).toFixed(1)}%)${position.live ? ' · 🔴 LIVE' : ''}`
@@ -3012,12 +3229,12 @@ export class Engine {
    * Log a skip reason for a candidate symbol at most once while the condition persists.
    * If the reason changes or 30 minutes pass, it can log again.
    */
-  private async logSkip(symbol: string, reason: string): Promise<void> {
+  private async logSkip(symbol: string, reason: string, blockCode?: BlockReasonCode): Promise<void> {
     const prev = this.lastSkipReasons.get(symbol);
     const now = Date.now();
     if (!prev || prev.reason !== reason || now - prev.at > 30 * 60_000) {
-      this.lastSkipReasons.set(symbol, { reason, at: now });
-      await this.log('info', `${symbol} overgeslagen: ${reason}`);
+      this.lastSkipReasons.set(symbol, { reason, at: now, blockCode });
+      await this.log('info', `${symbol} overgeslagen: ${reason}${blockCode ? ` [${blockCode}]` : ''}`);
     }
   }
 

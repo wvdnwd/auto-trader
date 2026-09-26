@@ -9,7 +9,11 @@ import type {
   PivotType,
   Side,
   StructureBreak,
+  Trend4H,
+  Trend1H,
+  Zone4H,
 } from './types.js';
+import { ema, dmi } from './indicators.js';
 
 /**
  * Identify swing pivot points (fractals) in a candle series.
@@ -822,5 +826,479 @@ export function analyzeMarketStructure(
     imbalanceScalp,
     volumeProfile,
     smtDivergence,
+  };
+}
+
+export type Pivot4H = {
+  type: 'HIGH' | 'LOW';
+  price: number;
+  open: number;
+  close: number;
+  index: number;
+  time: number;
+};
+
+/**
+ * 4H Pivot Highs & Lows detection using pivot_left and pivot_right confirmation bars.
+ */
+export function findPivots4H(candles: Candle[], left = 4, right = 4): Pivot4H[] {
+  if (candles.length < left + right + 1) return [];
+  const pivots: Pivot4H[] = [];
+  for (let i = left; i < candles.length - right; i += 1) {
+    const c = candles[i];
+    let isHigh = true;
+    let isLow = true;
+    for (let j = 1; j <= left; j += 1) {
+      if (candles[i - j].high > c.high) isHigh = false;
+      if (candles[i - j].low < c.low) isLow = false;
+    }
+    for (let j = 1; j <= right; j += 1) {
+      if (candles[i + j].high >= c.high) isHigh = false;
+      if (candles[i + j].low <= c.low) isLow = false;
+    }
+    if (isHigh) {
+      pivots.push({
+        type: 'HIGH',
+        price: c.high,
+        open: c.open,
+        close: c.close,
+        index: i,
+        time: c.time,
+      });
+    }
+    if (isLow) {
+      pivots.push({
+        type: 'LOW',
+        price: c.low,
+        open: c.open,
+        close: c.close,
+        index: i,
+        time: c.time,
+      });
+    }
+  }
+  return pivots;
+}
+
+/**
+ * 4H Support and Resistance Zones:
+ * - Support: low = pivot.low, high = min(open, close)
+ * - Resistance: high = pivot.high, low = max(open, close)
+ * - Merge zones if distance <= mergeAtrFactor * ATR_4H (default 0.25)
+ * - Counts touches/reactions and tracks broken state
+ */
+export function detectZones4H(
+  candles4H: Candle[],
+  atr4H: number,
+  left = 4,
+  right = 4,
+  mergeAtrFactor = 0.25
+): Zone4H[] {
+  const pivots = findPivots4H(candles4H, left, right);
+  if (!pivots.length) return [];
+
+  const rawZones: Zone4H[] = pivots.map((p, idx) => {
+    let low: number;
+    let high: number;
+    const bodyMin = Math.min(p.open, p.close);
+    const bodyMax = Math.max(p.open, p.close);
+    if (p.type === 'LOW') {
+      low = p.price;
+      high = bodyMin > low ? bodyMin : low + (atr4H > 0 ? atr4H * 0.1 : 0.0001);
+      return {
+        id: `zone_supp_${p.time}_${idx}`,
+        type: 'SUPPORT' as const,
+        low,
+        high,
+        mid: (low + high) / 2,
+        pivotIndex: p.index,
+        candleTime: p.time,
+        touches: 0,
+        broken: false,
+      };
+    } else {
+      high = p.price;
+      low = bodyMax < high ? bodyMax : high - (atr4H > 0 ? atr4H * 0.1 : 0.0001);
+      return {
+        id: `zone_res_${p.time}_${idx}`,
+        type: 'RESISTANCE' as const,
+        low,
+        high,
+        mid: (low + high) / 2,
+        pivotIndex: p.index,
+        candleTime: p.time,
+        touches: 0,
+        broken: false,
+      };
+    }
+  });
+
+  // Track touches and breaks across subsequent 4H candles
+  for (const zone of rawZones) {
+    for (let i = zone.pivotIndex + 1; i < candles4H.length; i += 1) {
+      const c = candles4H[i];
+      if (c.low <= zone.high && c.high >= zone.low) {
+        zone.touches += 1;
+        zone.lastTouchTime = c.time;
+      }
+      if (zone.type === 'RESISTANCE' && c.close > zone.high) {
+        zone.broken = true;
+      }
+      if (zone.type === 'SUPPORT' && c.close < zone.low) {
+        zone.broken = true;
+      }
+    }
+  }
+
+  // Merge nearby zones of the same type if distance <= mergeAtrFactor * atr4H
+  const mergeThreshold = atr4H > 0 ? mergeAtrFactor * atr4H : 0;
+  const merged: Zone4H[] = [];
+
+  for (const z of rawZones) {
+    const candidateIdx = merged.findIndex((m) => {
+      if (m.type !== z.type) return false;
+      const dist = Math.max(0, m.low - z.high, z.low - m.high);
+      return dist <= mergeThreshold;
+    });
+
+    if (candidateIdx >= 0) {
+      const m = merged[candidateIdx];
+      const newLow = Math.min(m.low, z.low);
+      const newHigh = Math.max(m.high, z.high);
+      merged[candidateIdx] = {
+        ...m,
+        low: newLow,
+        high: newHigh,
+        mid: (newLow + newHigh) / 2,
+        touches: m.touches + z.touches,
+        broken: m.broken && z.broken,
+        lastTouchTime: Math.max(m.lastTouchTime ?? 0, z.lastTouchTime ?? 0),
+      };
+    } else {
+      merged.push({ ...z });
+    }
+  }
+
+  // Fallback if no pivots exist in strong momentum trend
+  if (rawZones.length === 0 && candles4H.length >= 10) {
+    const minLow = Math.min(...candles4H.map((c) => c.low));
+    const maxHigh = Math.max(...candles4H.map((c) => c.high));
+    const thickness = atr4H > 0 ? atr4H * 0.1 : 0.0001;
+    return [
+      {
+        id: `zone_sup_${candles4H[0].time}`,
+        type: 'SUPPORT' as const,
+        low: minLow,
+        high: minLow + thickness,
+        mid: minLow + thickness / 2,
+        pivotIndex: 0,
+        candleTime: candles4H[0].time,
+        touches: 1,
+        broken: false,
+        lastTouchTime: candles4H[candles4H.length - 1].time,
+      },
+      {
+        id: `zone_res_${candles4H[0].time}`,
+        type: 'RESISTANCE' as const,
+        low: maxHigh - thickness,
+        high: maxHigh,
+        mid: maxHigh - thickness / 2,
+        pivotIndex: candles4H.length - 1,
+        candleTime: candles4H[candles4H.length - 1].time,
+        touches: 1,
+        broken: false,
+        lastTouchTime: candles4H[candles4H.length - 1].time,
+      },
+    ];
+  }
+
+  return merged;
+}
+
+/**
+ * 4H Trend Detection:
+ * Bullish = latest swing high broken with 4H candle close.
+ * Bearish = latest swing low broken with 4H candle close.
+ * Range = no clear break, oscillating between swing high and swing low.
+ */
+export function detectTrend4H(candles4H: Candle[], pivots: Pivot4H[]): Trend4H {
+  if (candles4H.length < 5) return 'RANGE';
+  const lastClose = candles4H[candles4H.length - 1].close;
+
+  if (!pivots.length) {
+    const firstClose = candles4H[0].close;
+    if (lastClose > firstClose * 1.005) return 'BULLISH';
+    if (lastClose < firstClose * 0.995) return 'BEARISH';
+    return 'RANGE';
+  }
+
+  const highs = pivots.filter((p) => p.type === 'HIGH');
+  const lows = pivots.filter((p) => p.type === 'LOW');
+  const lastHigh = highs[highs.length - 1];
+  const lastLow = lows[lows.length - 1];
+
+  if (lastHigh && lastClose > lastHigh.price) {
+    return 'BULLISH';
+  }
+  if (lastLow && lastClose < lastLow.price) {
+    return 'BEARISH';
+  }
+  if (highs.length >= 2 && lows.length >= 2) {
+    const prevHigh = highs[highs.length - 2];
+    const prevLow = lows[lows.length - 2];
+    if (lastHigh.price > prevHigh.price && lastLow.price > prevLow.price) return 'BULLISH';
+    if (lastHigh.price < prevHigh.price && lastLow.price < prevLow.price) return 'BEARISH';
+  }
+  return 'RANGE';
+}
+
+/**
+ * 1H Trend Confirmation & Switch:
+ * - Bullish: EMA 20 > EMA 50 > EMA 200 AND ADX_1H > 20 AND +DI > -DI.
+ * - Bearish: EMA 20 < EMA 50 < EMA 200 AND ADX_1H > 20 AND -DI > +DI.
+ * - Trendswitch: 1H candle closes through 1H swing high/low AND EMA 20 crosses EMA 50.
+ */
+export function detectTrend1H(candles1H: Candle[]): {
+  trend: Trend1H;
+  emaStack: 'BULLISH' | 'BEARISH' | 'NONE';
+  dmiAgrees: boolean;
+  adxValue: number;
+  plusDi: number;
+  minusDi: number;
+  isTrendSwitch: boolean;
+  switchDirection?: 'BULLISH' | 'BEARISH';
+} {
+  const closes = candles1H.map((c) => c.close);
+  const ema20 = ema(closes, 20);
+  const ema50 = ema(closes, 50);
+  const ema200 = ema(closes, 200);
+  const dmiResult = dmi(candles1H, 14);
+
+  const prevCloses = closes.slice(0, -1);
+  const prevEma20 = ema(prevCloses, 20);
+  const prevEma50 = ema(prevCloses, 50);
+
+  const emaStackBullish =
+    Number.isFinite(ema20) &&
+    Number.isFinite(ema50) &&
+    Number.isFinite(ema200) &&
+    ema20 > ema50 &&
+    ema50 > ema200;
+  const emaStackBearish =
+    Number.isFinite(ema20) &&
+    Number.isFinite(ema50) &&
+    Number.isFinite(ema200) &&
+    ema20 < ema50 &&
+    ema50 < ema200;
+
+  const dmiBullish = dmiResult.adx > 20 && dmiResult.plusDi > dmiResult.minusDi;
+  const dmiBearish = dmiResult.adx > 20 && dmiResult.minusDi > dmiResult.plusDi;
+
+  const pivots1H = findPivots(candles1H, 3);
+  const lastHigh1H = pivots1H.filter((p) => p.type === 'HH' || p.type === 'LH').slice(-1)[0];
+  const lastLow1H = pivots1H.filter((p) => p.type === 'HL' || p.type === 'LL').slice(-1)[0];
+  const lastClose = closes[closes.length - 1];
+
+  const crossedUp =
+    Number.isFinite(prevEma20) &&
+    Number.isFinite(prevEma50) &&
+    prevEma20 <= prevEma50 &&
+    ema20 > ema50;
+  const crossedDown =
+    Number.isFinite(prevEma20) &&
+    Number.isFinite(prevEma50) &&
+    prevEma20 >= prevEma50 &&
+    ema20 < ema50;
+
+  let isTrendSwitch = false;
+  let switchDirection: 'BULLISH' | 'BEARISH' | undefined;
+
+  if (crossedUp && lastHigh1H && lastClose > lastHigh1H.price) {
+    isTrendSwitch = true;
+    switchDirection = 'BULLISH';
+  } else if (crossedDown && lastLow1H && lastClose < lastLow1H.price) {
+    isTrendSwitch = true;
+    switchDirection = 'BEARISH';
+  }
+
+  let trend: Trend1H = 'RANGE';
+  if (emaStackBullish && dmiBullish) {
+    trend = 'BULLISH';
+  } else if (emaStackBearish && dmiBearish) {
+    trend = 'BEARISH';
+  } else if (isTrendSwitch) {
+    trend = switchDirection === 'BULLISH' ? 'BULLISH' : 'BEARISH';
+  }
+
+  return {
+    trend,
+    emaStack: emaStackBullish ? 'BULLISH' : emaStackBearish ? 'BEARISH' : 'NONE',
+    dmiAgrees: trend === 'BULLISH' ? dmiBullish : trend === 'BEARISH' ? dmiBearish : false,
+    adxValue: dmiResult.adx,
+    plusDi: dmiResult.plusDi,
+    minusDi: dmiResult.minusDi,
+    isTrendSwitch,
+    switchDirection,
+  };
+}
+
+/**
+ * 15m Structure Setup:
+ * - BOS (Break of structure) in trade direction
+ * - Higher low for longs, Lower high for shorts
+ * - Setup trigger candle (high/low to be broken on 5m)
+ */
+export function detect15mStructure(
+  candles15m: Candle[],
+  side: Side,
+  atr15m: number
+): {
+  bos: boolean;
+  higherLowOrLowerHigh: boolean;
+  triggerCandle: { high: number; low: number; time: number } | null;
+  detail: string;
+} {
+  if (candles15m.length < 10) {
+    return { bos: false, higherLowOrLowerHigh: false, triggerCandle: null, detail: 'Onvoldoende 15m candles' };
+  }
+  const pivots = findPivots(candles15m, 2);
+  const lastCandle = candles15m[candles15m.length - 1];
+  const lastClose = lastCandle.close;
+
+  if (side === 'LONG') {
+    const highs = pivots.filter((p) => p.type === 'HH' || p.type === 'LH');
+    const lows = pivots.filter((p) => p.type === 'HL' || p.type === 'LL');
+    const lastHigh = highs[highs.length - 1];
+    const lastLow = lows[lows.length - 1];
+    const prevLow = lows[lows.length - 2];
+
+    let bos = Boolean(lastHigh && lastClose > lastHigh.price);
+    let hl = Boolean(lastLow && prevLow && lastLow.price > prevLow.price);
+    if (!lastHigh && !lastLow && candles15m.length >= 5) {
+      const firstClose = candles15m[0].close;
+      if (lastClose > firstClose) {
+        bos = true;
+        hl = true;
+      }
+    }
+
+    const priorBars = candles15m.length >= 4 ? candles15m.slice(-4, -1) : candles15m.slice(0, -1);
+    const triggerCandle = {
+      high: Math.max(...priorBars.map((b) => b.high)),
+      low: Math.min(...priorBars.map((b) => b.low)),
+      time: lastCandle.time,
+    };
+
+    return {
+      bos,
+      higherLowOrLowerHigh: hl,
+      triggerCandle,
+      detail: `15m BOS: ${bos ? 'Ja' : 'Nee'}, Higher Low: ${hl ? 'Ja' : 'Nee'}`,
+    };
+  } else {
+    const highs = pivots.filter((p) => p.type === 'HH' || p.type === 'LH');
+    const lows = pivots.filter((p) => p.type === 'HL' || p.type === 'LL');
+    const lastLow = lows[lows.length - 1];
+    const lastHigh = highs[highs.length - 1];
+    const prevHigh = highs[highs.length - 2];
+
+    let bos = Boolean(lastLow && lastClose < lastLow.price);
+    let lh = Boolean(lastHigh && prevHigh && lastHigh.price < prevHigh.price);
+    if (!lastLow && !lastHigh && candles15m.length >= 5) {
+      const firstClose = candles15m[0].close;
+      if (lastClose < firstClose) {
+        bos = true;
+        lh = true;
+      }
+    }
+
+    const priorBars = candles15m.length >= 4 ? candles15m.slice(-4, -1) : candles15m.slice(0, -1);
+    const triggerCandle = {
+      high: Math.max(...priorBars.map((b) => b.high)),
+      low: Math.min(...priorBars.map((b) => b.low)),
+      time: lastCandle.time,
+    };
+
+    return {
+      bos,
+      higherLowOrLowerHigh: lh,
+      triggerCandle,
+      detail: `15m BOS: ${bos ? 'Ja' : 'Nee'}, Lower High: ${lh ? 'Ja' : 'Nee'}`,
+    };
+  }
+}
+
+/**
+ * 5m Entry Trigger:
+ * - Only evaluated after 5m candle close
+ * - Long: candle close > trigger high
+ * - Short: candle close < trigger low
+ * - Filter: 5m volume > volume_ma_20 OR candle pattern (engulfing, pinbar wick >= 35%, strong body >= 50%, momentum)
+ */
+export function detect5mEntryTrigger(
+  candles5m: Candle[],
+  side: Side,
+  triggerCandle: { high: number; low: number } | null,
+  volSma20: number
+): {
+  triggered: boolean;
+  cleanClose: boolean;
+  candlePattern: boolean;
+  volumeSurge: boolean;
+  detail: string;
+} {
+  if (candles5m.length < 2 || !triggerCandle) {
+    return {
+      triggered: false,
+      cleanClose: false,
+      candlePattern: false,
+      volumeSurge: false,
+      detail: 'Onvoldoende 5m data of geen trigger candle',
+    };
+  }
+
+  const last = candles5m[candles5m.length - 1];
+  const prev = candles5m[candles5m.length - 2];
+  const barRange = Math.max(0.000001, last.high - last.low);
+
+  let cleanClose = false;
+  let candlePattern = false;
+  const volumeSurge = Number.isFinite(volSma20) && volSma20 > 0 ? last.volume >= volSma20 * 0.9 : true;
+
+  if (side === 'LONG') {
+    cleanClose = last.close >= triggerCandle.high;
+    const lowerWick = Math.min(last.open, last.close) - last.low;
+    const isHammer = lowerWick / barRange >= 0.35;
+    const isEngulfing =
+      last.close > last.open &&
+      prev.close < prev.open &&
+      last.close > prev.open &&
+      last.open < prev.close;
+    const isStrongBody = (last.close - last.open) / barRange >= 0.5;
+    const isMomentum = last.close > last.open && prev.close > prev.open;
+    candlePattern = isHammer || isEngulfing || isStrongBody || isMomentum;
+  } else {
+    cleanClose = last.close <= triggerCandle.low;
+    const upperWick = last.high - Math.max(last.open, last.close);
+    const isShootingStar = upperWick / barRange >= 0.35;
+    const isEngulfing =
+      last.close < last.open &&
+      prev.close > prev.open &&
+      last.close < prev.open &&
+      last.open > prev.close;
+    const isStrongBody = (last.open - last.close) / barRange >= 0.5;
+    const isMomentum = last.close < last.open && prev.close < prev.open;
+    candlePattern = isShootingStar || isEngulfing || isStrongBody || isMomentum;
+  }
+
+  const triggered = cleanClose && (volumeSurge || candlePattern);
+  const detail = `5m close: ${cleanClose ? 'Voorbij trigger' : 'Binnen range'}, patroon: ${candlePattern ? 'Ja' : 'Nee'}, volume: ${volumeSurge ? 'Boven SMA20' : 'Onder SMA20'}`;
+
+  return {
+    triggered,
+    cleanClose,
+    candlePattern,
+    volumeSurge,
+    detail,
   };
 }

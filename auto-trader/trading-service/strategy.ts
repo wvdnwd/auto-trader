@@ -1,9 +1,11 @@
 import { computeFibLevels, detectGoldenZoneBounce, goldenZoneWickTouch, inGoldenZone } from './fibonacci.js';
 import {
   adx,
+  atr as computeAtr,
   atrPct,
   channelPosition,
   detectRsiDivergence,
+  dmi,
   ema,
   macd,
   momentum,
@@ -12,10 +14,34 @@ import {
   significantLow,
   trendSlope,
   volumeRatio,
+  volumeSma,
 } from './indicators.js';
-import { analyzeMarketStructure } from './market-structure.js';
+import {
+  analyzeMarketStructure,
+  detect15mStructure,
+  detect5mEntryTrigger,
+  detectTrend1H,
+  detectTrend4H,
+  detectZones4H,
+  findPivots4H,
+} from './market-structure.js';
 import { computeAsianRange, getMarketSession } from './sessions.js';
-import type { Candle, FactorStat, LearningState, Regime, Side, Signal, SignalCheck, Ticker } from './types.js';
+import type {
+  Candle,
+  FactorStat,
+  FibLevels,
+  LearningState,
+  Regime,
+  SetupScore,
+  Side,
+  Signal,
+  SignalCheck,
+  StrategyType,
+  Ticker,
+  Trend1H,
+  Trend4H,
+  Zone4H,
+} from './types.js';
 
 const PULLBACK_MAX_EMA_DISTANCE_ATR = 1.8;
 const ENTRY_CANDLE_SECONDS = 60 * 60;
@@ -162,14 +188,237 @@ function adaptiveFactorMultiplier(factorName: string, baseBonus: number, stats?:
 }
 
 /**
- * Build a directional signal for one symbol by blending trend and mean-reversion
- * models, weighted by the detected regime.
+ * Compute the 0-100 Multi-Timeframe Setup Score according to the system rules:
+ * - 4H Quality (max 20pt)
+ * - 1H Confirmation (max 25pt)
+ * - 15m Structure (max 20pt)
+ * - 5m Trigger (max 10pt)
+ * - Volume (max 5pt)
+ * - ADX / DI (max 5pt)
+ * - Risk / Reward (max 5pt)
+ * - Confluence (max 10pt)
+ */
+export function computeMtfScore(params: {
+  side: Side;
+  strategy: StrategyType;
+  trend4H: Trend4H;
+  zone4H: Zone4H | null;
+  candles4H: Candle[];
+  candles1H: Candle[];
+  candles15m: Candle[];
+  candles5m: Candle[];
+  fib: FibLevels | null;
+  rrEstimate: number;
+}): SetupScore {
+  let quality4H = 0;
+  let confirm1H = 0;
+  let structure15m = 0;
+  let trigger5m = 0;
+  let volume = 0;
+  let adxDi = 0;
+  let riskReward = 0;
+  let confluence = 0;
+  const details: string[] = [];
+
+  // 1. 4H Quality (max 20pt)
+  const is4HAligned =
+    (params.side === 'LONG' && params.trend4H === 'BULLISH') ||
+    (params.side === 'SHORT' && params.trend4H === 'BEARISH');
+  if (is4HAligned) {
+    quality4H += 10;
+    details.push('4H Trend in lijn met trade (+10)');
+  } else if (params.trend4H === 'RANGE') {
+    quality4H += 5;
+    details.push('4H Range context (+5)');
+  }
+
+  if (params.zone4H) {
+    if (params.zone4H.touches <= 2) {
+      quality4H += 10;
+      details.push(`Verse 4H zone (${params.zone4H.touches} touches) (+10)`);
+    } else if (params.zone4H.touches <= 4) {
+      quality4H += 5;
+      details.push(`4H zone (${params.zone4H.touches} touches) (+5)`);
+    }
+  } else if (is4HAligned) {
+    quality4H += 10;
+    details.push('4H Trend momentum (+10)');
+  }
+
+  // 2. 1H Confirmation (max 25pt)
+  if (params.candles1H.length >= 20) {
+    const closes1H = params.candles1H.map((c) => c.close);
+    const ema20 = ema(closes1H, 20);
+    const ema50 = ema(closes1H, 50);
+    const ema200 = closes1H.length >= 200 ? ema(closes1H, 200) : ema(closes1H, Math.min(closes1H.length, 100));
+    const emaStackBullish =
+      Number.isFinite(ema20) &&
+      Number.isFinite(ema50) &&
+      ema20 > ema50 &&
+      (!Number.isFinite(ema200) || ema50 > ema200);
+    const emaStackBearish =
+      Number.isFinite(ema20) &&
+      Number.isFinite(ema50) &&
+      ema20 < ema50 &&
+      (!Number.isFinite(ema200) || ema50 < ema200);
+
+    if ((params.side === 'LONG' && emaStackBullish) || (params.side === 'SHORT' && emaStackBearish)) {
+      confirm1H += 15;
+      details.push('1H EMA stack aligned (+15)');
+    } else if (params.side === 'LONG' ? ema20 > ema50 : ema20 < ema50) {
+      confirm1H += 8;
+      details.push('1H EMA20/50 aligned (+8)');
+    }
+
+    const last1H = params.candles1H[params.candles1H.length - 1];
+    if (last1H) {
+      const isGreen = last1H.close >= last1H.open;
+      if ((params.side === 'LONG' && isGreen) || (params.side === 'SHORT' && !isGreen)) {
+        confirm1H += 10;
+        details.push('1H candle gesloten in trade richting (+10)');
+      }
+    }
+  }
+
+  // 3. 15m Structure (max 20pt)
+  if (params.candles15m.length >= 5) {
+    const atr15m = computeAtr(params.candles15m, 14);
+    const struct15m = detect15mStructure(params.candles15m, params.side, atr15m);
+    if (struct15m.bos) {
+      structure15m += 10;
+      details.push('15m BOS (Break of structure) (+10)');
+    }
+    if (struct15m.higherLowOrLowerHigh) {
+      structure15m += 10;
+      details.push(`15m ${params.side === 'LONG' ? 'Higher Low' : 'Lower High'} (+10)`);
+    }
+  } else if (params.candles1H.length >= 10) {
+    // Graceful fallback to 1H structure when 15m is not supplied
+    const atr1H = computeAtr(params.candles1H, 14);
+    const struct1H = detect15mStructure(params.candles1H, params.side, atr1H);
+    if (struct1H.bos) {
+      structure15m += 10;
+      details.push('1H BOS (+10)');
+    }
+    if (struct1H.higherLowOrLowerHigh) {
+      structure15m += 10;
+      details.push(`1H ${params.side === 'LONG' ? 'Higher Low' : 'Lower High'} (+10)`);
+    }
+  }
+
+  // 4. 5m Trigger (max 10pt) & 5. Volume (max 5pt)
+  if (params.candles5m.length >= 2) {
+    const atr15 = params.candles15m.length >= 5 ? computeAtr(params.candles15m, 14) : 1;
+    const struct = detect15mStructure(params.candles15m.length >= 5 ? params.candles15m : params.candles1H, params.side, atr15);
+    const volSma5m = volumeSma(params.candles5m, 20);
+    const trig5m = detect5mEntryTrigger(params.candles5m, params.side, struct.triggerCandle, volSma5m);
+    if (trig5m.cleanClose) {
+      trigger5m += 5;
+      details.push('5m clean close voorbij trigger candle (+5)');
+    }
+    if (trig5m.candlePattern) {
+      trigger5m += 5;
+      details.push('5m candle pattern (momentum/pattern) (+5)');
+    }
+    if (trig5m.volumeSurge) {
+      volume += 5;
+      details.push('5m volume > SMA20 (+5)');
+    }
+  } else if (params.candles1H.length >= 2) {
+    // Graceful fallback to 1H close/volume trigger when 5m is not supplied
+    const last1H = params.candles1H[params.candles1H.length - 1];
+    const prev1H = params.candles1H[params.candles1H.length - 2];
+    const alignedClose = params.side === 'LONG' ? last1H.close > prev1H.close : last1H.close < prev1H.close;
+    if (alignedClose) {
+      trigger5m += 10;
+      details.push('Candle close & momentum (+10)');
+    }
+    const volSma1H = volumeSma(params.candles1H, 20);
+    if (!Number.isFinite(volSma1H) || last1H.volume >= volSma1H * 0.9) {
+      volume += 5;
+      details.push('Volume bevestiging (+5)');
+    }
+  }
+
+  // 6. ADX / DI (max 5pt)
+  if (params.candles1H.length >= 28) {
+    const dmi1H = dmi(params.candles1H, 14);
+    const dmiAgrees =
+      dmi1H.adx >= 20 &&
+      (params.side === 'LONG' ? dmi1H.plusDi > dmi1H.minusDi : dmi1H.minusDi > dmi1H.plusDi);
+    if (dmiAgrees) {
+      adxDi += 5;
+      details.push(`1H ADX ${dmi1H.adx.toFixed(1)} > 20 en DI dominantie (+5)`);
+    }
+  }
+
+  // 7. Risk / Reward (max 5pt)
+  if (params.rrEstimate >= 2.0) {
+    riskReward += 5;
+    details.push(`Risk/Reward ${params.rrEstimate.toFixed(1)} >= 2.0 (+5)`);
+  } else if (params.rrEstimate >= 1.5) {
+    riskReward += 3;
+    details.push(`Risk/Reward ${params.rrEstimate.toFixed(1)} >= 1.5 (+3)`);
+  }
+
+  // 8. Confluence (max 10pt)
+  if (params.fib) {
+    const inGz =
+      params.fib.nearest.ratio >= 0.618 &&
+      params.fib.nearest.ratio <= 0.650 &&
+      params.fib.distanceToNearest <= 0.08;
+    if (inGz) {
+      confluence += 5;
+      details.push('Fibonacci Golden Zone (0.618 - 0.650) retest (+5)');
+    }
+  }
+  if (params.zone4H) {
+    confluence += 5;
+    details.push('4H S/R zone confluentie (+5)');
+  }
+  if (confirm1H >= 20 && quality4H >= 15) {
+    confluence = Math.min(10, confluence + 5);
+    details.push('Multi-timeframe trend alignment (+5)');
+  }
+
+  const total = Math.min(
+    100,
+    quality4H + confirm1H + structure15m + trigger5m + volume + adxDi + riskReward + confluence
+  );
+
+  let multiplier = 0;
+  if (total >= 90) multiplier = 1.0;
+  else if (total >= 80) multiplier = 0.75;
+  else if (total >= 70) multiplier = 0.5;
+  else multiplier = 0;
+
+  return {
+    total,
+    quality4H,
+    confirm1H,
+    structure15m,
+    trigger5m,
+    volume,
+    adxDi,
+    riskReward,
+    confluence,
+    multiplier,
+    details,
+  };
+}
+
+/**
+ * Build a directional signal for one symbol by blending trend, mean-reversion
+ * and multi-timeframe analysis (4H -> 1H -> 15m -> 5m).
  *
  * @param ticker live ticker for the symbol.
- * @param candles OHLCV candles, oldest first — needs at least ~60 bars.
- * @param higherCandles higher timeframe candles for trend context.
- * @param lowerCandles lower timeframe candles for micro-timing.
+ * @param candles OHLCV candles (1H).
+ * @param higherCandles 4H candles for trend and S/R zones.
+ * @param lowerCandles 15m candles for market structure setup.
  * @param learning adaptive learning state from past trades.
+ * @param benchmarkCandles benchmark candles (e.g. BTC).
+ * @param benchmarkSymbol benchmark symbol.
+ * @param candles5m 5m candles for execution trigger.
  * @returns a scored signal, or null when data is insufficient or unusable.
  */
 export function buildSignal(
@@ -179,7 +428,8 @@ export function buildSignal(
   lowerCandles: Candle[] = [],
   learning?: LearningState,
   benchmarkCandles?: Candle[],
-  benchmarkSymbol = 'BTC_USDT'
+  benchmarkSymbol = 'BTC_USDT',
+  candles5m: Candle[] = []
 ): Signal | null {
   if (!Number.isFinite(ticker.lastPrice) || ticker.lastPrice <= 0) return null;
   if (candles.length < 60) return null;
@@ -813,13 +1063,67 @@ export function buildSignal(
   } else if (Math.abs(funding) > 0.0004) {
     priorityReasons.push(`Funding ${(funding * 100).toFixed(3)}% ${funding > 0 ? 'tegen longs (crowded)' : 'tegen shorts'}`);
   }
+  // MTF Multi-Timeframe Analysis (4H -> 1H -> 15m -> 5m)
+  const atr4H = higherCandles.length >= 15 ? computeAtr(higherCandles, 14) : price * volatility;
+  const pivots4H = findPivots4H(higherCandles, 4, 4);
+  const zones4H = detectZones4H(higherCandles, atr4H, 4, 4, 0.25);
+  const trend4H = detectTrend4H(higherCandles, pivots4H);
+
+  const relevantZone =
+    zones4H
+      .filter((z) => !z.broken)
+      .sort((a, b) => Math.abs(price - a.mid) - Math.abs(price - b.mid))[0] ?? null;
+
+  const trend1HInfo = detectTrend1H(candles);
+  const atr15m = lowerCandles.length >= 15 ? computeAtr(lowerCandles, 14) : atr4H * 0.25;
+  const struct15m = detect15mStructure(lowerCandles, side, atr15m);
+
+  let strategyType: StrategyType = 'SWING';
+  if (trend1HInfo.isTrendSwitch) {
+    strategyType = 'REVERSAL';
+  } else if (
+    fib &&
+    fib.nearest.ratio >= 0.618 &&
+    fib.nearest.ratio <= 0.650 &&
+    fib.distanceToNearest <= 0.08
+  ) {
+    strategyType = 'PULLBACK';
+  } else if (
+    relevantZone &&
+    ((side === 'LONG' && price > relevantZone.high + 0.15 * atr) ||
+      (side === 'SHORT' && price < relevantZone.low - 0.15 * atr)) &&
+    volume >= 1.5
+  ) {
+    strategyType = 'BREAKOUT';
+  } else {
+    strategyType = 'SWING';
+  }
+
+  const setupScore = computeMtfScore({
+    side,
+    strategy: strategyType,
+    trend4H,
+    zone4H: relevantZone,
+    candles4H: higherCandles,
+    candles1H: candles,
+    candles15m: lowerCandles,
+    candles5m,
+    fib,
+    rrEstimate: roomToStructure >= 1 ? roomToStructure : 2.0,
+  });
+
+  const finalConfidence = confidence;
+
+  priorityReasons.unshift(
+    `🎯 [${strategyType}] MTF Score ${setupScore.total}/100 (${setupScore.multiplier * 100}% risk) · 4H: ${trend4H} · 1H: ${trend1HInfo.trend}`
+  );
 
   const allReasons = [...priorityReasons, ...reasons];
 
   return {
     symbol: ticker.symbol,
     side,
-    confidence,
+    confidence: finalConfidence,
     regime,
     price,
     atrPct: volatility,
@@ -831,13 +1135,18 @@ export function buildSignal(
     roomToStructure,
     checks,
     fib,
-    // Filled in by the engine once it has the active risk config — `buildSignal`
     plannedLeverage: null,
     reversalConfirmed,
     timingReady,
     session: sessionInfo.session,
     asianRange,
     marketStructure,
+    strategyType,
+    setupScore,
+    trend4H,
+    trend1H: trend1HInfo.trend,
+    zone4H: relevantZone,
+    triggerCandle: struct15m.triggerCandle ?? undefined,
   };
 }
 

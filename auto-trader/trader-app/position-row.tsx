@@ -139,6 +139,24 @@ export function PositionRow({ position, mark, onClose, onReduce, onRealignTpSl, 
           {!open && position.exitReason && (
             <span className={`${styles.tag} ${styles.neutral}`}>{position.exitReason}</span>
           )}
+          {position.strategyType && (
+            <span className={`${styles.tag} ${styles.neutral}`} title={`MTF Strategie: ${position.strategyType}`}>
+              🎯 {position.strategyType}
+            </span>
+          )}
+          {position.setupScore && (
+            <span className={`${styles.tag} ${styles.neutral}`} title={position.setupScore.details?.join('\n')}>
+              Score: {position.setupScore.total}/100
+            </span>
+          )}
+          {position.leverageBreakdown && (
+            <span
+              className={`${styles.tag} ${position.leverageBreakdown.liquidationBufferR < 4 ? styles.short : styles.safe}`}
+              title={`Liq: $${position.leverageBreakdown.liquidationPrice.toFixed(4)} (Buffer: ${position.leverageBreakdown.liquidationBufferR.toFixed(1)}R, min ${position.leverageBreakdown.requiredBufferR}R)`}
+            >
+              🛡️ {position.leverageBreakdown.liquidationBufferR.toFixed(1)}R Liq
+            </span>
+          )}
           <span className={`${styles.tag} ${styles.neutral}`} title="Correlatiegroep — telt mee voor de max-per-groep limiet">
             {GROUP_LABELS[group]}
           </span>

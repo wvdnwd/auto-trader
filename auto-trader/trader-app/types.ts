@@ -36,6 +36,72 @@ export type FibLevels = {
   distanceToNearest: number;
 };
 
+/** Strategy classification according to the MTF analysis system. */
+export type StrategyType = 'SWING' | 'PULLBACK' | 'BREAKOUT' | 'REVERSAL';
+
+/** 4H and 1H market structure trend states. */
+export type Trend4H = 'BULLISH' | 'BEARISH' | 'RANGE';
+export type Trend1H = 'BULLISH' | 'BEARISH' | 'RANGE';
+
+/** 4H Support or Resistance zone formed by pivot wicks and bodies. */
+export type Zone4H = {
+  id: string;
+  type: 'SUPPORT' | 'RESISTANCE';
+  low: number;
+  high: number;
+  mid: number;
+  pivotIndex: number;
+  candleTime: number;
+  touches: number;
+  broken: boolean;
+  lastTouchTime?: number;
+};
+
+/** Detailed 0-100 conviction score breakdown for a setup. */
+export type SetupScore = {
+  total: number;
+  quality4H: number; // 0..20
+  confirm1H: number; // 0..25
+  structure15m: number; // 0..20
+  trigger5m: number; // 0..10
+  volume: number; // 0..5
+  adxDi: number; // 0..5
+  riskReward: number; // 0..5
+  confluence: number; // 0..10
+  multiplier: number; // 0, 0.5, 0.75, 1.0
+  details: string[];
+};
+
+/** Asset leverage tier. */
+export type LeverageClass = 'BTC_ETH' | 'MAJOR_ALT' | 'SMALL_ALT';
+
+/** Personalized leverage breakdown and liquidation safety metrics. */
+export type LeverageBreakdown = {
+  leverageClass: LeverageClass;
+  defaultLeverage: number;
+  maxLeverage: number;
+  selectedLeverage: number;
+  liquidationPrice: number;
+  liquidationBufferR: number;
+  requiredBufferR: number;
+  steppedDown: boolean;
+};
+
+/** Explanatory reason code when a prospective trade is blocked. */
+export type BlockReasonCode =
+  | 'BLOCKED_LOW_SCORE'
+  | 'BLOCKED_REVERSAL_LOW_SCORE'
+  | 'BLOCKED_COOLDOWN'
+  | 'BLOCKED_PORTFOLIO_HEAT'
+  | 'BLOCKED_CORRELATED_RISK'
+  | 'BLOCKED_MAX_POSITIONS'
+  | 'BLOCKED_EXISTING_SYMBOL_POSITION'
+  | 'BLOCKED_HIGH_LEVERAGE_LOW_LIQUIDATION_BUFFER'
+  | 'BLOCKED_DRAWDOWN'
+  | 'BLOCKED_DAILY_LOSS'
+  | 'BLOCKED_STANDBY'
+  | 'BLOCKED_LOW_RR';
+
 /** A scored trading opportunity. */
 export type Signal = {
   symbol: string;
@@ -61,6 +127,22 @@ export type Signal = {
   plannedLeverage: number | null;
   /** Market structure analysis: BOS, MSS/CHoCH, FVG, Order Block, and Premium/Discount zone. */
   marketStructure?: MarketStructureInfo | null;
+  /** Strategy type selected for this signal. */
+  strategyType?: StrategyType;
+  /** Detailed 0-100 MTF setup score. */
+  setupScore?: SetupScore;
+  /** 4H trend direction. */
+  trend4H?: Trend4H;
+  /** 1H trend direction. */
+  trend1H?: Trend1H;
+  /** 4H zone relevant to this setup. */
+  zone4H?: Zone4H | null;
+  /** Personalized leverage and liquidation buffer metrics. */
+  leverageBreakdown?: LeverageBreakdown;
+  /** Why this signal was blocked from execution, if applicable. */
+  blockReasonCode?: BlockReasonCode;
+  /** Trigger candle on 15m/5m that confirmed the entry. */
+  triggerCandle?: { high: number; low: number; time: number };
 };
 
 export type PivotType = 'HH' | 'HL' | 'LH' | 'LL';
@@ -185,6 +267,9 @@ export type Position = {
   postMortem?: TradePostMortem;
   /** Checks that were evaluated at entry, kept for post-mortem analysis. */
   entryChecks?: SignalCheck[];
+  strategyType?: StrategyType;
+  setupScore?: SetupScore;
+  leverageBreakdown?: LeverageBreakdown;
 };
 
 /** Post-mortem diagnosis of a completed trade. */
@@ -355,6 +440,50 @@ export type RiskConfig = {
   smtFilterEnabled?: boolean;
   /** Volume Profile / Point of Control (POC): use high-volume nodes as price magnets and targets (default true). */
   volumeProfileEnabled?: boolean;
+  /** MTF pivot detection left bars (default 4). */
+  pivotLeft?: number;
+  /** MTF pivot detection right bars (default 4). */
+  pivotRight?: number;
+  /** MTF ATR length (default 14). */
+  atrLength?: number;
+  /** MTF ADX length (default 14). */
+  adxLength?: number;
+  /** MTF Volume MA length (default 20). */
+  volumeMaLength?: number;
+  /** ATR distance factor for merging 4H zones (default 0.25). */
+  zoneMergeAtr?: number;
+  /** ATR breakout buffer factor (default 0.15). */
+  breakoutBufferAtr?: number;
+  /** 15m ATR stop buffer factor (default 0.20). */
+  stopBufferAtr?: number;
+  /** Maximum combined portfolio risk heat (default 0.015 = 1.5%). */
+  maxPortfolioHeat?: number;
+  /** Maximum combined risk for a correlated asset group (default 0.010 = 1.0%). */
+  maxCorrelatedRisk?: number;
+  /** Maximum positions per individual symbol (default 1). */
+  maxPositionsPerSymbol?: number;
+  /** Minimum setup score out of 100 to execute trade (default 70). */
+  minScore?: number;
+  /** Minimum setup score out of 100 for reversal entries (default 80). */
+  minReversalScore?: number;
+  /** Lower bound of Fibonacci golden zone (default 0.618). */
+  goldenZoneLow?: number;
+  /** Upper bound of Fibonacci golden zone (default 0.650). */
+  goldenZoneHigh?: number;
+  /** Minimum risk:reward ratio for swing setups (default 2.0). */
+  minimumRrSwing?: number;
+  /** Minimum risk:reward ratio for pullback setups (default 1.5). */
+  minimumRrPullback?: number;
+  /** Minimum risk:reward ratio for breakout setups (default 2.0). */
+  minimumRrBreakout?: number;
+  /** Cooldown minutes after take profit (default 15). */
+  cooldownTpMinutes?: number;
+  /** Cooldown minutes after break-even stop (default 30). */
+  cooldownBeMinutes?: number;
+  /** Cooldown minutes after stop loss (default 60). */
+  cooldownSlMinutes?: number;
+  /** Cooldown minutes after failed breakout fakeout (default 120). */
+  cooldownFakeoutMinutes?: number;
 };
 
 /** Parameters of a backtest run. */
@@ -698,4 +827,8 @@ export type Snapshot = {
   exchangeAccount: ExchangeAccountSnapshot | null;
   /** Adaptive self-learning engine state including factor performance and symbol penalties. */
   learning?: LearningState;
+  /** Active granular cooldowns keyed by symbol, symbol:side, or zone. */
+  cooldowns?: Record<string, { until: number; reason: string; remainingSec: number }>;
+  /** Most recent skip reasons per symbol. */
+  skipReasons?: Record<string, { reason: string; at: number; blockCode?: BlockReasonCode }>;
 };

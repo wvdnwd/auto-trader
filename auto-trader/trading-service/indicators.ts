@@ -429,3 +429,84 @@ export function trendSlope(values: number[], period = 20): number {
   if (!den) return 0;
   return num / den / meanY;
 }
+
+export type DmiResult = {
+  adx: number;
+  plusDi: number;
+  minusDi: number;
+  isRising: boolean;
+};
+
+/**
+ * Directional Movement Index (DMI) and ADX.
+ * Computes +DI, -DI, ADX and whether ADX is currently rising.
+ */
+export function dmi(candles: Candle[], period = 14): DmiResult {
+  if (period < 1 || candles.length < period * 2 + 2) {
+    return { adx: NaN, plusDi: NaN, minusDi: NaN, isRising: false };
+  }
+  const plusDm: number[] = [];
+  const minusDm: number[] = [];
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i += 1) {
+    const c = candles[i];
+    const p = candles[i - 1];
+    const up = c.high - p.high;
+    const down = p.low - c.low;
+    plusDm.push(up > down && up > 0 ? up : 0);
+    minusDm.push(down > up && down > 0 ? down : 0);
+    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
+  }
+  const dxs: number[] = [];
+  const pdis: number[] = [];
+  const mdis: number[] = [];
+  for (let i = period; i < trs.length; i += 1) {
+    const tr = trs.slice(i - period, i).reduce((a, b) => a + b, 0);
+    if (!tr) continue;
+    const pdi = (100 * plusDm.slice(i - period, i).reduce((a, b) => a + b, 0)) / tr;
+    const mdi = (100 * minusDm.slice(i - period, i).reduce((a, b) => a + b, 0)) / tr;
+    pdis.push(pdi);
+    mdis.push(mdi);
+    const sum = pdi + mdi;
+    if (sum) dxs.push((100 * Math.abs(pdi - mdi)) / sum);
+  }
+  if (dxs.length < period) return { adx: NaN, plusDi: NaN, minusDi: NaN, isRising: false };
+  const adxValues: number[] = [];
+  for (let i = period; i <= dxs.length; i += 1) {
+    adxValues.push(sma(dxs.slice(0, i), period));
+  }
+  const latestAdx = adxValues[adxValues.length - 1];
+  const prevAdx = adxValues.length >= 2 ? adxValues[adxValues.length - 2] : latestAdx;
+  return {
+    adx: latestAdx,
+    plusDi: pdis[pdis.length - 1] ?? NaN,
+    minusDi: mdis[mdis.length - 1] ?? NaN,
+    isRising: latestAdx > prevAdx,
+  };
+}
+
+/**
+ * Historical percentile of the current ATR over a lookback window (0..100).
+ */
+export function atrPercentile(candles: Candle[], period = 14, lookback = 100): number {
+  if (candles.length < period + 5) return 50;
+  const atrs: number[] = [];
+  const start = Math.max(0, candles.length - lookback - period);
+  for (let i = start + period + 1; i <= candles.length; i += 1) {
+    const val = atr(candles.slice(0, i), period);
+    if (Number.isFinite(val)) atrs.push(val);
+  }
+  if (!atrs.length) return 50;
+  const current = atrs[atrs.length - 1];
+  const belowCount = atrs.filter((v) => v <= current).length;
+  return Math.round((belowCount / atrs.length) * 100);
+}
+
+/**
+ * Simple moving average of volume over the last N candles.
+ */
+export function volumeSma(candles: Candle[], period = 20): number {
+  if (candles.length < period) return NaN;
+  const slice = candles.slice(-period);
+  return slice.reduce((sum, c) => sum + c.volume, 0) / period;
+}

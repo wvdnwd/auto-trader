@@ -17,6 +17,7 @@ import type {
   BacktestConfig,
   BacktestStatus,
   BlockedState,
+  BlockReasonCode,
   Candle,
   EngineEvent,
   ExchangeAccountSnapshot,
@@ -90,6 +91,10 @@ export type Snapshot = {
   exchangeAccount: ExchangeAccountSnapshot | null;
   /** Adaptive self-learning engine state including factor performance and symbol penalties. */
   learning?: LearningState;
+  /** Active granular cooldowns keyed by symbol, symbol:side, or zone. */
+  cooldowns?: Record<string, { until: number; reason: string; remainingSec: number }>;
+  /** Most recent skip reasons per symbol. */
+  skipReasons?: Record<string, { reason: string; at: number; blockCode?: BlockReasonCode }>;
 };
 
 /**
@@ -293,6 +298,8 @@ export class TradingService {
       chopStatus: this.engine.chopStatus,
       exchangeAccount,
       learning,
+      cooldowns: this.engine.getCooldowns(),
+      skipReasons: this.engine.getSkipReasons(),
     };
   }
 

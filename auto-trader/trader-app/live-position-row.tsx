@@ -120,6 +120,24 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
               TP {filledCount}/{levels.length}
             </span>
           )}
+          {plan?.strategyType && (
+            <span className={`${styles.tag} ${styles.neutral}`} title={`MTF Strategie: ${plan.strategyType}`}>
+              🎯 {plan.strategyType}
+            </span>
+          )}
+          {plan?.setupScore && (
+            <span className={`${styles.tag} ${styles.neutral}`} title={plan.setupScore.details?.join('\n')}>
+              Score: {plan.setupScore.total}/100
+            </span>
+          )}
+          {plan?.leverageBreakdown && (
+            <span
+              className={`${styles.tag} ${plan.leverageBreakdown.liquidationBufferR < 4 ? styles.short : styles.safe}`}
+              title={`Liq: $${plan.leverageBreakdown.liquidationPrice.toFixed(4)} (Buffer: ${plan.leverageBreakdown.liquidationBufferR.toFixed(1)}R, min ${plan.leverageBreakdown.requiredBufferR}R)`}
+            >
+              🛡️ {plan.leverageBreakdown.liquidationBufferR.toFixed(1)}R Liq
+            </span>
+          )}
         </div>
         <div className={styles.topRight}>
           {openTime ? (

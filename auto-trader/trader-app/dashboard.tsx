@@ -608,6 +608,18 @@ export function Dashboard() {
           </div>
         )}
 
+        {snap.cooldowns && Object.keys(snap.cooldowns).length > 0 && (
+          <div className={styles.notice} style={{ background: '#1e293b', color: '#cbd5e1', borderColor: '#475569' }}>
+            <span>⏳</span>
+            <span style={{ flex: 1 }}>
+              <b>Actieve Cooldowns:</b>{' '}
+              {Object.entries(snap.cooldowns)
+                .map(([key, cd]) => `${key.replace('_', '/')}: ${cd.reason} (${Math.ceil(cd.remainingSec / 60)}m)`)
+                .join(' · ')}
+            </span>
+          </div>
+        )}
+
         {!snap.blocked && snap.chopStatus.streak > 0 && (
           <div className={styles.notice}>
             <span>📊</span>

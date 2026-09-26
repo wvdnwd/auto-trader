@@ -1,143 +1,66 @@
 import type {
   Account,
   BlockedState,
+  BlockReasonCode,
+  LeverageBreakdown,
+  LeverageClass,
   RiskConfig,
   Side,
   Signal,
+  StrategyType,
   TakeProfitLevel,
   TradePlan,
 } from './types.js';
 import { FEE } from './exits.js';
 
 /**
- * Default risk profile.
- *
- * The base version of this profile was selected by a 160-combination parameter
- * search over 18 months of hourly data across eight crypto perps (65%/35%
- * train/test split, re-checked quarter by quarter). That search found leverage
- * was NOT the binding constraint — 8x, 12x and 20x gave identical out-of-sample
- * returns once sizing was fixed by the stop distance and risk budget — so it
- * defaulted to the lowest cap (8x) as free safety margin against liquidation.
- *
- * Measured per-quarter result of the original 8x/1%-risk profile (8 perps, 1h
- * entries, 4h filter):
- *
- * | Quarter | Return | Profit factor |
- * |---------|--------|---------------|
- * | Q1 2025 | +16.4% | 1.25 |
- * | Q2 2025 | -10.9% | 0.75 |
- * | Q3 2025 | +46.2% | 1.67 |
- * | Q4 2025 | -10.4% | 0.79 |
- * | Q1 2026 |  +3.9% | 1.09 |
- * | Q2 2026 |  +9.9% | 1.22 |
- *
- * Read that honestly: four quarters up, two down, and Q3 2025 alone carries the
- * sum. This is a trend-following profile, so it earns in trending quarters and
- * bleeds in chop. Expect losing quarters — they are normal, not a malfunction.
- *
- * DELIBERATE OVERRIDE (user request): risk budget and leverage ceiling raised
- * above the tier the optimizer called optimal, to put more balance to work per
- * trade and allow up to 20x. Since leverage did not change *return* in the
- * search above, raising the cap does not add edge — it removes the liquidation
- * safety margin the 8x default was chosen for. The stop still defines the loss
- * at the OLD (smaller) position size; at 20x that same stop sits roughly 2.5x
- * closer to the liquidation price than at 8x. Re-validate with a backtest/
- * walk-forward run before trusting this in paper trading.
- *
- * The single most important field is `requireHigherAlignment`: every parameter
- * set in the top tier had it enabled, and every set without it lost money. The
- * strategy only has an edge when it trades with the higher timeframe.
+ * Default MTF risk profile calibrated to:
+ * - baseRiskPct: 0.005 (0.5% equity per trade)
+ * - maxPortfolioHeat: 0.015 (1.5% max portfolio heat)
+ * - maxCorrelatedRisk: 0.010 (1.0% max correlated group risk)
+ * - maxOpenPositions: 3
+ * - maxPositionsPerSymbol: 1
+ * - minScore: 70 (Reversal minScore: 80)
  */
 export const DEFAULT_RISK: RiskConfig = {
-  // Calibrated to 0.025 (2.5%) to support ~€40-€50 trade sizing on ~€300 equity.
-  baseRiskPct: 0.025,
-  // Raised to 0.04 (4%) hard per-trade ceiling for high conviction setups.
-  maxRiskPct: 0.04,
-  // Lowered to 12 per user request for the first live run — the search found
-  // leverage above ~12x added no return, only shrank the liquidation buffer,
-  // so 12x sits right at that ceiling with a bit more margin of safety than
-  // the earlier 15x setting.
-  maxLeverage: 12,
+  baseRiskPct: 0.005,
+  maxRiskPct: 0.015,
+  maxLeverage: 15,
   minLeverage: 2,
-  // Max concurrent open positions in the portfolio. Scaled to 6 so trades receive
-  // substantial margin (~€40-€50 at €300 balance) with safety buffer.
-  maxOpenPositions: 6,
-  // Raised to 0.95 so the portfolio margin budget can deploy across the full balance
-  // (leaving a 5% buffer for exchange fees and slippage), rather than artificially
-  // holding 80% of funds idle.
+  maxOpenPositions: 3,
   maxTotalMarginPct: 0.95,
   maxDrawdownPct: 0.25,
-  dailyLossLimitPct: 0.08,
-  // Calibrated to 0.54: allows high-conviction setups, range bounces and volume surges without noise.
+  dailyLossLimitPct: 0.015,
   minConfidence: 0.54,
-  // Reduced from 48h to 36h: allows profitable runners to develop without keeping capital tied up for days.
   maxPositionHours: 36,
-  // Stale Trade Exit: close unconfirmed positions (TP1 not reached) after 12h if price has made no significant headway.
   maxStaleHours: 12,
-  // Proactively close positions when market conditions deteriorate into uncertainty or oppose the trade.
   uncertaintyExitEnabled: true,
-  // Progressive Profit-Locking: ratchet stop loss up as price advances (+2.2R, +3.2R, +4.2R).
   profitLockingEnabled: true,
-  // Harvest 25%-30% on parabolic blow-off top climax candles before the dump.
   climaxExitEnabled: true,
-  // Use 15m micro-timing to avoid buying at the peak of an hourly candle.
   microTiming15mEnabled: true,
-  // Use limit pullback entry instead of pure market orders when price is extended.
   pullbackEntryEnabled: true,
-  // Use ATR-based dynamic chandelier trailing stop for runners.
   dynamicChandelierTrailing: true,
-  // A wider stop survives normal noise; the tighter 2.2x version was stopped out
-  // of trades that later reached their target.
   atrStopMultiple: 3,
-  // Was 0.8 — well below firstTargetR (1.8), so the trailing stop was arming
-  // and closing trades on a pullback before TP1 ever had a chance to fill (a
-  // trade that ran to +1.2R then pulled back closed via TRAILING_STOP with a
-  // small profit, TP1 never touched). Raised to match firstTargetR so trailing
-  // only takes over the runner AFTER the first target has already been banked.
   trailArmR: 1.5,
-  // Raised from 0.6 per user request: after TP1 hits, the old 0.6 giveback let
-  // a normal post-target consolidation wobble stop the runner out almost
-  // immediately ("hit take profit, drops back a tick, stopped out"). 0.75 gives
-  // the runner more room to breathe through a pullback before the trail exits
-  // it, at the cost of giving back a larger share of the peak if it does
-  // reverse for good.
   trailGiveback: 0.75,
   firstTargetR: 1.5,
-  // Banking half at the first rung beat banking 30%. Taking the runner-heavy side
-  // sounds right in theory, but the extra realised profit funds the stop-outs.
   firstTargetPortion: 0.5,
   finalTargetR: 3.6,
   breakEvenAfterFirst: true,
   requireHigherAlignment: true,
-  // Scaled to match maxOpenPositions (6) so the book can take up to 6 aligned trades
-  // in the same direction when market conviction is high.
-  maxSameSidePositions: 3,
+  maxSameSidePositions: 2,
   maxPerGroup: 2,
-  // Scaled to 10% - 20% for ~€40-€50 trade sizing on ~€300 equity.
   minStakePct: 0.1,
   targetStakePct: 0.2,
   highConvictionConfidence: 0.7,
   maxOverflowPositions: 0,
-  // Hard floor: never open trades under $35/€35 margin.
-  minTradeMarginUsdt: 35,
-  // Relative Strength filter: off by default so altcoin breakouts and dips are not blocked by BTC comparison.
+  minTradeMarginUsdt: undefined,
   rsFilterEnabled: false,
-  // Crowding & Squeeze protection: skip longs if funding exceeds +0.08% per 8h (allows high-momentum runners while preventing extreme traps).
   maxFundingRateLong: 0.0008,
-  // Crowding & Squeeze protection: skip shorts if funding falls below -0.08% per 8h.
   minFundingRateShort: -0.0008,
-  // Price action confirmation: require 15m candle reversal before entering pullbacks.
   reversal15mRequired: true,
-  // 40 consecutive cycles (~30 mins) with zero tradeable signal across the universe
-  // before pausing new entries, allowing market structure to develop without locking out setups early.
   chopPauseStreak: 40,
-  // Off by default — a deliberate opt-in for a small starting balance (see
-  // `turboMode` doc comment on RiskConfig).
   turboMode: false,
-  // On by default per user request: as soon as the regime genuinely turns
-  // against an open position (e.g. held LONG while the market flips to
-  // TREND_DOWN), trim part of it immediately rather than riding it all the way
-  // to the stop-loss or waiting for a full opposite-side signal to close it.
   trendFlipProtection: true,
   // Half the remaining size comes off on the first adverse regime flip — enough
   // to meaningfully cut risk while leaving a stake behind in case the flip is a
@@ -195,6 +118,28 @@ export const DEFAULT_RISK: RiskConfig = {
   smtFilterEnabled: true,
   // Volume Profile & POC: compute Point of Control & Value Area.
   volumeProfileEnabled: true,
+  pivotLeft: 4,
+  pivotRight: 4,
+  atrLength: 14,
+  adxLength: 14,
+  volumeMaLength: 20,
+  zoneMergeAtr: 0.25,
+  breakoutBufferAtr: 0.15,
+  stopBufferAtr: 0.20,
+  maxPortfolioHeat: 0.015,
+  maxCorrelatedRisk: 0.010,
+  maxPositionsPerSymbol: 1,
+  minScore: 70,
+  minReversalScore: 80,
+  goldenZoneLow: 0.618,
+  goldenZoneHigh: 0.650,
+  minimumRrSwing: 2.0,
+  minimumRrPullback: 1.5,
+  minimumRrBreakout: 2.0,
+  cooldownTpMinutes: 15,
+  cooldownBeMinutes: 30,
+  cooldownSlMinutes: 60,
+  cooldownFakeoutMinutes: 120,
 };
 
 /**
@@ -353,44 +298,157 @@ function stopGeometry(signal: Signal, config: RiskConfig): StopGeometry | null {
   return { stopLoss, stopDistancePct: actualStopDistancePct, stopBasis, isImbalanceScalp, scalpTargetPrice };
 }
 
+/**
+ * Asset leverage tiering:
+ * - BTC / ETH: max 20x, default 15x
+ * - Major Alts: max 10x, default 8x
+ * - Small / Meme Alts: max 5x, default 4x
+ */
+export function classifyLeverage(symbol: string): {
+  leverageClass: LeverageClass;
+  defaultLeverage: number;
+  maxLeverage: number;
+} {
+  const norm = symbol.toUpperCase();
+  if (norm.startsWith('BTC_') || norm.startsWith('ETH_')) {
+    return { leverageClass: 'BTC_ETH', defaultLeverage: 15, maxLeverage: 20 };
+  }
+  const majors = [
+    'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK', 'DOT', 'NEAR', 'SUI', 'APT', 'TIA', 'INJ',
+    'FET', 'RENDER', 'TAO', 'AAVE', 'UNI', 'LTC', 'BCH', 'ICP', 'TON', 'TRX', 'MATIC', 'POL'
+  ];
+  const isMajor = majors.some((m) => norm.startsWith(`${m}_`));
+  if (isMajor) {
+    return { leverageClass: 'MAJOR_ALT', defaultLeverage: 8, maxLeverage: 10 };
+  }
+  return { leverageClass: 'SMALL_ALT', defaultLeverage: 4, maxLeverage: 5 };
+}
+
+/**
+ * Liquidation price calculation taking standard maintenance margin into account.
+ */
+export function computeLiquidationPrice(entry: number, side: Side, leverage: number): number {
+  const mmr = 0.005; // Standard maintenance margin rate
+  if (side === 'LONG') {
+    return Math.max(0, entry * (1 - 1 / leverage + mmr));
+  } else {
+    return entry * (1 + 1 / leverage - mmr);
+  }
+}
+
+/**
+ * Personalized leverage breakdown and liquidation safety metrics.
+ * Auto-steps down leverage tier if liquidation buffer is too tight (< required R).
+ */
+export function computeLeverageBreakdown(
+  symbol: string,
+  side: Side,
+  entry: number,
+  stopLoss: number,
+  strategy: StrategyType = 'SWING',
+  maxConfigLeverage = 15,
+  turboMode = false
+): LeverageBreakdown | null {
+  const { leverageClass, defaultLeverage, maxLeverage } = classifyLeverage(symbol);
+  const stopDistance = Math.abs(entry - stopLoss);
+  if (stopDistance <= 0 || !Number.isFinite(entry) || entry <= 0) return null;
+
+  const effectiveMax = turboMode
+    ? Math.max(maxLeverage, maxConfigLeverage)
+    : Math.min(maxLeverage, maxConfigLeverage);
+  let targetLeverage = turboMode ? effectiveMax : Math.min(defaultLeverage, effectiveMax);
+  if (strategy === 'BREAKOUT' && !turboMode) {
+    if (targetLeverage >= 15) targetLeverage = 12;
+    else if (targetLeverage >= 8) targetLeverage = 6;
+    else targetLeverage = 3;
+  }
+
+  const candidateTiers = [20, 18, 16, 15, 12, 10, 8, 6, 5, 4, 3, 2];
+  const validTiers = candidateTiers.filter((t) => t <= targetLeverage);
+
+  let selectedLeverage = validTiers[validTiers.length - 1] ?? 2;
+  let liquidationPrice = computeLiquidationPrice(entry, side, selectedLeverage);
+  let liquidationBufferR = Math.abs(entry - liquidationPrice) / stopDistance;
+  let requiredBufferR = 3.5;
+  let steppedDown = false;
+
+  for (const tier of validTiers) {
+    const liq = computeLiquidationPrice(entry, side, tier);
+    const bufR = Math.abs(entry - liq) / stopDistance;
+    const reqR = turboMode ? 3.0 : tier > 15 ? 6.0 : tier > 12 ? 5.0 : 3.5;
+    if (bufR >= reqR) {
+      selectedLeverage = tier;
+      liquidationPrice = liq;
+      liquidationBufferR = bufR;
+      requiredBufferR = reqR;
+      steppedDown = tier < targetLeverage;
+      break;
+    }
+  }
+
+  return {
+    leverageClass,
+    defaultLeverage,
+    maxLeverage: effectiveMax,
+    selectedLeverage,
+    liquidationPrice,
+    liquidationBufferR,
+    requiredBufferR,
+    steppedDown,
+  };
+}
+
 function leverageForStop(signal: Signal, config: RiskConfig, stopDistancePct: number): number | null {
-  const liquidationCap = (1 / stopDistancePct) * LIQUIDATION_BUFFER;
-  const { volCap, confFloor, turboActive } = leverageCaps(signal, config);
-  const confHighMark = 0.85;
-  const confT = Math.max(
-    0,
-    Math.min(1, (signal.confidence - config.minConfidence) / (confHighMark - config.minConfidence))
+  const geometry = stopGeometry(signal, config);
+  if (!geometry) return null;
+  const caps = leverageCaps(signal, config);
+  const effectiveLev = caps.turboActive ? caps.volCap : config.maxLeverage;
+  const breakdown = computeLeverageBreakdown(
+    signal.symbol,
+    signal.side,
+    signal.price,
+    geometry.stopLoss,
+    signal.strategyType ?? 'SWING',
+    effectiveLev,
+    caps.turboActive
   );
-  const effectiveCeiling = turboActive ? volCap : config.maxLeverage;
-  const confidenceCap = confFloor + confT * (effectiveCeiling - confFloor);
-  const leverageCap = Math.min(effectiveCeiling, volCap, liquidationCap, confidenceCap);
-  if (!Number.isFinite(leverageCap) || leverageCap < 1) return null;
-  return Math.max(1, Math.min(Math.floor(leverageCap), effectiveCeiling));
+  if (!breakdown || breakdown.liquidationBufferR < 3.0) return null;
+  return breakdown.selectedLeverage;
 }
 
 /**
  * Preview the leverage {@link planTrade} would pick for a signal, without an
  * account.
- *
- * Uses the same validated, rounded stop geometry and conviction-scaling steps
- * as `planTrade`, so the dashboard can show
- * "this signal would use ~14x" next to a candidate before it is ever sized
- * into a real trade. Position sizing (margin, notional) still needs the
- * account and only happens in `planTrade` itself.
- *
- * @param signal the scored opportunity.
- * @param config active risk configuration.
- * @returns the leverage `planTrade` would use for this signal today, or null when the signal would not qualify.
  */
 export function previewLeverage(signal: Signal, config: RiskConfig): number | null {
   if (
-    !Number.isFinite(signal.confidence) || signal.confidence < config.minConfidence || signal.confidence > 1 ||
-    !Number.isFinite(config.minConfidence) || !Number.isFinite(config.maxLeverage) || config.maxLeverage < 1
-  ) return null;
+    !Number.isFinite(signal.confidence) ||
+    signal.confidence < config.minConfidence ||
+    signal.confidence > 1 ||
+    !Number.isFinite(config.minConfidence) ||
+    !Number.isFinite(config.maxLeverage) ||
+    config.maxLeverage < 1
+  ) {
+    return null;
+  }
   if (config.requireHigherAlignment && !signal.alignedWithHigher) return null;
   const geometry = stopGeometry(signal, config);
   if (!geometry) return null;
-  return leverageForStop(signal, config, geometry.stopDistancePct);
+
+  const caps = leverageCaps(signal, config);
+  const effectiveLev = caps.turboActive ? caps.volCap : config.maxLeverage;
+  const breakdown = computeLeverageBreakdown(
+    signal.symbol,
+    signal.side,
+    signal.price,
+    geometry.stopLoss,
+    signal.strategyType ?? 'SWING',
+    effectiveLev,
+    caps.turboActive
+  );
+  if (!breakdown || breakdown.liquidationBufferR < 3.0) return null;
+  signal.leverageBreakdown = breakdown;
+  return breakdown.selectedLeverage;
 }
 
 /**
@@ -504,8 +562,34 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig, 
   const lossFractionAtStop = stopDistancePct + feeRate * (entry + stopLoss) / entry;
   if (!Number.isFinite(lossFractionAtStop) || lossFractionAtStop <= 0) return null;
 
-  // 2. Risk budget scales with conviction, capped, and shrinks in drawdown.
-  const convictionScale = 0.5 + signal.confidence;
+  // 1. Personalized Leverage and Liquidation Buffer Step-Down
+  const caps = leverageCaps(signal, config);
+  const effectiveLev = caps.turboActive ? caps.volCap : config.maxLeverage;
+  const breakdown = computeLeverageBreakdown(
+    signal.symbol,
+    signal.side,
+    entry,
+    stopLoss,
+    signal.strategyType ?? 'SWING',
+    effectiveLev,
+    caps.turboActive
+  );
+  if (!breakdown || breakdown.liquidationBufferR < 3.0) return null;
+  const leverage = breakdown.selectedLeverage;
+
+  // 2. Risk budget with dynamic MTF multipliers
+  const scoreMultiplier = signal.setupScore
+    ? signal.setupScore.multiplier
+    : signal.confidence >= 0.8
+      ? 1.0
+      : signal.confidence >= 0.7
+        ? 0.75
+        : 0.5;
+  const strategyMultiplier =
+    signal.strategyType === 'PULLBACK' ? 1.0 : signal.strategyType === 'REVERSAL' ? 0.5 : 0.75;
+  const volMultiplier = signal.atrPct > 0.03 ? 0.75 : 1.0;
+  const regimeMultiplier = signal.regime === 'CHOP' ? 0.7 : 1.0;
+
   // Progressive drawdown governor: scales back risk gradually to preserve banked profits.
   const drawdownScale =
     account.drawdownPct >= 0.2
@@ -515,7 +599,16 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig, 
         : account.drawdownPct >= 0.1
           ? 0.5
           : 1;
-  const riskPct = Math.min(config.maxRiskPct, config.baseRiskPct * convictionScale * drawdownScale);
+
+  const riskPct = Math.min(
+    config.maxRiskPct,
+    config.baseRiskPct *
+      scoreMultiplier *
+      strategyMultiplier *
+      volMultiplier *
+      regimeMultiplier *
+      drawdownScale
+  );
   const riskAmount = account.equity * riskPct;
   if (!Number.isFinite(riskAmount) || riskAmount <= 0) return null;
 
@@ -530,12 +623,6 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig, 
   );
   if (!Number.isFinite(maxMarginByPortfolio)) return null;
   // Never commit more than one trade's fair share of the portfolio budget.
-  // When `targetStakePct` is set it IS that share (e.g. 20% per user
-  // request) — using it directly here, rather than dividing the total budget
-  // by `maxOpenPositions`, lets a single high-conviction trade actually reach
-  // the full 20% ceiling instead of being capped at 1/10th of the budget just
-  // because up to 10 slots exist. Falls back to an equal split when no target
-  // stake is configured.
   const perTradeCap =
     account.equity *
     (Number.isFinite(config.targetStakePct) && (config.targetStakePct as number) > 0
@@ -545,28 +632,8 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig, 
   const minTradeFloor = Math.max(MIN_MARGIN, config.minTradeMarginUsdt ?? 0);
   const freeMargin = Math.min(account.balance, maxMarginByPortfolio, perTradeCap);
   if (!Number.isFinite(freeMargin) || freeMargin < minTradeFloor) return null;
-  // 5. Cap leverage so the stop loss always sits inside the liquidation price,
-  //    then apply the volatility, conviction and configured caps on top.
-  // Scaled alongside maxLeverage (15x default): high volatility still caps
-  // hardest (8x), medium volatility next (12x), calm markets may use the full
-  // configured ceiling. Turbo mode raises the calm/medium bands — see
-  // `leverageCaps` — the 8x high-volatility floor is never relaxed.
-  const leverage = leverageForStop(signal, config, stopDistancePct);
-  if (leverage === null) return null;
 
-  // Take the highest safe leverage rather than the lowest that fits. The loss at
-  // the stop is identical either way — the stop defines the risk — but higher
-  // leverage locks up far less collateral, keeping capital free for other setups.
-  // The caps above guarantee the stop still fires before liquidation.
-
-  // Optional target stake as a fraction of equity — see `targetStakePct` doc
-  // comment on RiskConfig. Only scales the stake UP: it raises the floor a
-  // trade is allowed to use, it never overrides the hard caps above. Still
-  // respects the drawdown throttle — a flat stake that ignored drawdown would
-  // undo the exact protection `drawdownScale` exists to provide.
-  //
-  // Sizing baseline leverage calibrated at 8x so that positions at higher leverage
-  // scale down dollar risk at the stop.
+  // Baseline leverage sizing
   const baselineLeverage = 8;
   let stakeFloor = 0;
   if (Number.isFinite(config.targetStakePct) && (config.targetStakePct as number) > 0) {
@@ -661,15 +728,14 @@ export function planTrade(signal: Signal, account: Account, config: RiskConfig, 
     confidence: round(signal.confidence, 3),
     regime: signal.regime,
     reasons,
+    strategyType: signal.strategyType,
+    setupScore: signal.setupScore,
+    leverageBreakdown: breakdown,
   };
 }
 
 /**
- * Choose the profit ladder for a setup.
- *
- * Range trades are cut short because price is expected to turn at the boundary.
- * Trend trades run further, and a trade confirmed by the higher timeframe keeps
- * a runner open for the move to extend into.
+ * Choose the profit ladder for a setup according to strategy type or regime.
  *
  * @param signal the scored opportunity.
  * @returns target levels as reward multiples and the portion closed at each.
@@ -678,8 +744,34 @@ function targetLadder(
   signal: Signal,
   config: RiskConfig
 ): { rMultiple: number; portion: number }[] {
+  const first = config.firstTargetR ?? 1.5;
+  if (signal.strategyType === 'SWING') {
+    return [
+      { rMultiple: first, portion: config.firstTargetPortion ?? 0.50 },
+      { rMultiple: 2.5, portion: 0.25 },
+      { rMultiple: 3.5, portion: 0.25 },
+    ];
+  }
+  if (signal.strategyType === 'PULLBACK') {
+    return [
+      { rMultiple: first, portion: 0.50 },
+      { rMultiple: 2.5, portion: 0.50 },
+    ];
+  }
+  if (signal.strategyType === 'BREAKOUT') {
+    return [
+      { rMultiple: Math.max(first, 1.5), portion: 0.50 },
+      { rMultiple: 3.5, portion: 0.50 },
+    ];
+  }
+  if (signal.strategyType === 'REVERSAL') {
+    return [
+      { rMultiple: first, portion: 0.50 },
+      { rMultiple: 2.5, portion: 0.50 },
+    ];
+  }
+
   const turbo = Boolean(config.turboMode);
-  const first = config.firstTargetR;
   // Turbo banks more at the first rung so margin frees up sooner for the next
   // setup — the point of the mode on a small balance is capital velocity, not
   // riding every runner to the end.

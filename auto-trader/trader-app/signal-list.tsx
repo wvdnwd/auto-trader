@@ -253,22 +253,69 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
                 <span className={`${styles.tag} ${s.side === 'LONG' ? styles.long : styles.short}`}>
                   {s.side}
                 </span>
-                <span className={`${styles.tag} ${styles.neutral}`}>{s.regime}</span>
-                {s.alignedWithHigher ? (
-                  <span className={`${styles.tag} ${styles.safe}`}>1u ✓ {s.higherRegime}</span>
-                ) : s.higherRegime === 'CHOP' ? (
-                  <span className={`${styles.tag} ${styles.amber}`}>1u CHOP</span>
-                ) : (
-                  <span className={`${styles.tag} ${styles.neutral}`}>1u {s.higherRegime}</span>
+                {s.strategyType && (
+                  <span
+                    className={`${styles.tag} ${
+                      s.strategyType === 'SWING'
+                        ? styles.lev
+                        : s.strategyType === 'PULLBACK'
+                          ? styles.safe
+                          : s.strategyType === 'BREAKOUT'
+                            ? styles.amber
+                            : styles.short
+                    }`}
+                    title={`MTF Strategie: ${s.strategyType}`}
+                  >
+                    {s.strategyType}
+                  </span>
                 )}
-                {s.plannedLeverage !== null && (
+                {s.trend4H && (
+                  <span
+                    className={`${styles.tag} ${s.trend4H === 'BULLISH' ? styles.safe : s.trend4H === 'BEARISH' ? styles.short : styles.neutral}`}
+                    title={`4H Trend: ${s.trend4H}`}
+                  >
+                    4H: {s.trend4H}
+                  </span>
+                )}
+                {s.trend1H && (
+                  <span
+                    className={`${styles.tag} ${s.trend1H === 'BULLISH' ? styles.safe : s.trend1H === 'BEARISH' ? styles.short : styles.neutral}`}
+                    title={`1H Trend: ${s.trend1H}`}
+                  >
+                    1H: {s.trend1H}
+                  </span>
+                )}
+                {s.setupScore && (
+                  <span
+                    className={`${styles.tag} ${s.setupScore.total >= 80 ? styles.safe : s.setupScore.total >= 70 ? styles.amber : styles.neutral}`}
+                    title={`MTF Score: ${s.setupScore.total}/100 (${s.setupScore.multiplier * 100}% risico)\n${s.setupScore.details.join('\n')}`}
+                  >
+                    Score {s.setupScore.total}/100
+                  </span>
+                )}
+                {s.blockReasonCode && (
+                  <span
+                    className={`${styles.tag} ${styles.short}`}
+                    title={`Geblokkeerd: ${s.blockReasonCode}`}
+                  >
+                    ⛔ {s.blockReasonCode}
+                  </span>
+                )}
+                {s.leverageBreakdown ? (
+                  <span
+                    className={`${styles.tag} ${styles.lev}`}
+                    title={`Klasse: ${s.leverageBreakdown.leverageClass} · Liq buffer: ${s.leverageBreakdown.liquidationBufferR.toFixed(1)}R (min: ${s.leverageBreakdown.requiredBufferR}R)\nLiq prijs: $${fmtPrice(s.leverageBreakdown.liquidationPrice)}${s.leverageBreakdown.steppedDown ? '\nStatus: Hefboom verlaagd wegens liquidatiebuffer' : ''}`}
+                  >
+                    {s.leverageBreakdown.selectedLeverage}x ({s.leverageBreakdown.liquidationBufferR.toFixed(1)}R liq)
+                  </span>
+                ) : s.plannedLeverage !== null ? (
                   <span
                     className={`${styles.tag} ${styles.lev}`}
                     title="Hefboom die de engine nu zou gebruiken voor dit signaal"
                   >
                     {s.plannedLeverage}x
                   </span>
-                )}
+                ) : null}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                 <span className={`${styles.pnl} ${passes ? styles.up : ''}`} style={{ fontSize: '0.85rem', fontWeight: 700 }}>
