@@ -284,7 +284,7 @@ describe('take profit ladder', () => {
 
   it('boosts leverage in turbo mode beyond maxLeverage when volatility allows', () => {
     const calmSignal = { ...signal, atrPct: 0.005, confidence: 0.85 };
-    const normalPlan = planTrade(calmSignal, account, DEFAULT_RISK)!;
+    const normalPlan = planTrade(calmSignal, account, { ...DEFAULT_RISK, turboMode: false })!;
     const turboPlan = planTrade(calmSignal, account, { ...DEFAULT_RISK, turboMode: true })!;
 
     expect(normalPlan.leverage).toBeLessThanOrEqual(DEFAULT_RISK.maxLeverage);

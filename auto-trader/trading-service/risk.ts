@@ -23,17 +23,17 @@ import { FEE } from './exits.js';
  * - minScore: 70 (Reversal minScore: 80)
  */
 export const DEFAULT_RISK: RiskConfig = {
-  baseRiskPct: 0.025,
-  maxRiskPct: 0.035,
+  baseRiskPct: 0.035,
+  maxRiskPct: 0.050,
   maxLeverage: 20,
-  minLeverage: 2,
+  minLeverage: 3,
   maxOpenPositions: 3,
   maxTotalMarginPct: 0.95,
   maxDrawdownPct: 0.25,
-  dailyLossLimitPct: 0.035,
-  minConfidence: 0.54,
-  maxPositionHours: 36,
-  maxStaleHours: 12,
+  dailyLossLimitPct: 0.050,
+  minConfidence: 0.50,
+  maxPositionHours: 48,
+  maxStaleHours: 16,
   uncertaintyExitEnabled: true,
   profitLockingEnabled: true,
   climaxExitEnabled: true,
@@ -41,25 +41,25 @@ export const DEFAULT_RISK: RiskConfig = {
   pullbackEntryEnabled: true,
   dynamicChandelierTrailing: true,
   atrStopMultiple: 1.8,
-  trailArmR: 1.5,
+  trailArmR: 2.0,
   trailGiveback: 0.75,
-  firstTargetR: 1.2,
-  firstTargetPortion: 0.6,
-  finalTargetR: 3.5,
+  firstTargetR: 2.0,
+  firstTargetPortion: 0.40,
+  finalTargetR: 5.0,
   breakEvenAfterFirst: true,
   requireHigherAlignment: true,
-  maxSameSidePositions: 2,
+  maxSameSidePositions: 3,
   maxPerGroup: 2,
-  minStakePct: 0.20,
-  targetStakePct: 0.28,
-  highConvictionConfidence: 0.7,
+  minStakePct: 0.30,
+  targetStakePct: 0.45,
+  highConvictionConfidence: 0.70,
   maxOverflowPositions: 0,
   minTradeMarginUsdt: 50,
   rsFilterEnabled: false,
   maxFundingRateLong: 0.0008,
   minFundingRateShort: -0.0008,
   reversal15mRequired: true,
-  chopPauseStreak: 40,
+  chopPauseStreak: 60,
   turboMode: false,
   trendFlipProtection: true,
   // Half the remaining size comes off on the first adverse regime flip — enough
@@ -70,7 +70,7 @@ export const DEFAULT_RISK: RiskConfig = {
   // Bitcoin Gatekeeper: blocks altcoin trades that fight Bitcoin's dominant trend.
   btcFilterEnabled: true,
   // Minimum minutes between consecutive entries to prevent trade clustering on spikes.
-  entryCooldownMinutes: 15,
+  entryCooldownMinutes: 10,
   // Minimum 24h quote volume (USDT) to trade a coin — protects against illiquid tokens.
   minQuoteVolume24h: 1_000_000,
   // Lock this many R beyond exact round-trip fees after TP1; exits clamp monotonically.
@@ -91,17 +91,17 @@ export const DEFAULT_RISK: RiskConfig = {
   breakoutBypassEnabled: true,
   // Dynamic Altcoin Runners: expand far target to 5.0R on strong breakout runners.
   dynamicRunnersEnabled: true,
-  // Stagnation Exit: close trades that stagnate around break-even after 2.5h without progress towards TP1.
+  // Stagnation Exit: close trades that stagnate around break-even after 4h without progress towards TP1.
   stagnationExitEnabled: true,
-  stagnationHours: 2.5,
+  stagnationHours: 4.0,
   stagnationMaxR: 0.35,
   // Spread & Slippage Shield: reject orders if bid-ask spread exceeds 0.15%.
   spreadShieldEnabled: true,
   maxSpreadPct: 0.0015,
-  // BTC Flash-Dump circuit breaker: drop >1.2% in short window blocks new longs.
-  btcFlashDumpThreshold: -0.012,
-  // Early Profit Protection: move stop to break-even once +1.1R is touched.
-  earlyBreakEvenR: 1.1,
+  // BTC Flash-Dump circuit breaker: drop >1.8% in short window blocks new longs.
+  btcFlashDumpThreshold: -0.018,
+  // Early Profit Protection: move stop to break-even once +1.6R is touched.
+  earlyBreakEvenR: 1.6,
   // BTC Chop Filter: pause altcoin entries when Bitcoin is in CHOP (sideways/directionless).
   btcChopFilterEnabled: false,
   // Standby Mode: pause opening new positions while continuing to manage existing positions.
@@ -126,20 +126,20 @@ export const DEFAULT_RISK: RiskConfig = {
   zoneMergeAtr: 0.25,
   breakoutBufferAtr: 0.15,
   stopBufferAtr: 0.20,
-  maxPortfolioHeat: 0.050,
-  maxCorrelatedRisk: 0.030,
+  maxPortfolioHeat: 0.080,
+  maxCorrelatedRisk: 0.050,
   maxPositionsPerSymbol: 1,
-  minScore: 70,
-  minReversalScore: 80,
+  minScore: 65,
+  minReversalScore: 72,
   goldenZoneLow: 0.618,
   goldenZoneHigh: 0.650,
   minimumRrSwing: 2.0,
   minimumRrPullback: 1.5,
   minimumRrBreakout: 2.0,
-  cooldownTpMinutes: 15,
-  cooldownBeMinutes: 30,
-  cooldownSlMinutes: 60,
-  cooldownFakeoutMinutes: 120,
+  cooldownTpMinutes: 5,
+  cooldownBeMinutes: 15,
+  cooldownSlMinutes: 30,
+  cooldownFakeoutMinutes: 45,
   newsTradingEnabled: true,
   newsCatalystBypassPullback: true,
   newsAdversePositionProtect: true,
@@ -237,12 +237,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'MEME',
       atrStopMultiple: 1.8,
-      firstTargetR: 1.2,
-      firstTargetPortion: 0.60,
-      finalTargetR: 3.5,
-      earlyBreakEvenR: 1.1,
-      maxLeverageCap: 5,
-      description: 'Meme/Hyper-Volatiel: Snelle 60% winstbank op 1.2R, strakke stop achter wicks',
+      firstTargetR: 1.8,
+      firstTargetPortion: 0.40,
+      finalTargetR: 4.5,
+      earlyBreakEvenR: 1.5,
+      maxLeverageCap: 6,
+      description: 'Meme/Hyper-Volatiel: 40% winstbank op 1.8R, 60% runner tot 4.5R',
     };
   }
 
@@ -251,12 +251,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'LOW_LEVERAGE',
       atrStopMultiple: 1.8,
-      firstTargetR: 1.2,
-      firstTargetPortion: 0.60,
-      finalTargetR: 2.5,
-      earlyBreakEvenR: 1.1,
+      firstTargetR: 1.8,
+      firstTargetPortion: 0.45,
+      finalTargetR: 4.0,
+      earlyBreakEvenR: 1.5,
       maxLeverageCap: 5,
-      description: 'Low-Leverage Alt: 5x max hefboom op Hyperliquid, snelle 60% bank op 1.2R, wicks filteren',
+      description: 'Low-Leverage Alt: 5x max hefboom op Hyperliquid, 45% bank op 1.8R, runner tot 4R',
     };
   }
 
@@ -265,12 +265,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'AI_TECH',
       atrStopMultiple: 1.8,
-      firstTargetR: 1.25,
-      firstTargetPortion: 0.55,
-      finalTargetR: 3.8,
-      earlyBreakEvenR: 1.15,
-      maxLeverageCap: 5,
-      description: 'AI / Tech Mover: Snelle winstname op 1.25R, trailing runner tot 3.8R',
+      firstTargetR: 2.0,
+      firstTargetPortion: 0.40,
+      finalTargetR: 5.0,
+      earlyBreakEvenR: 1.6,
+      maxLeverageCap: 8,
+      description: 'AI / Tech Mover: 40% winstname op 2.0R, trailing runner tot 5.0R',
     };
   }
 
@@ -279,12 +279,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'GAMING',
       atrStopMultiple: 1.8,
-      firstTargetR: 1.2,
-      firstTargetPortion: 0.60,
-      finalTargetR: 4.0,
-      earlyBreakEvenR: 1.1,
-      maxLeverageCap: 5,
-      description: 'Gaming/Metaverse: Narratief-gestuurd, snelle 60% bank op 1.2R, runner tot 4R bij uitbraak',
+      firstTargetR: 2.0,
+      firstTargetPortion: 0.40,
+      finalTargetR: 5.0,
+      earlyBreakEvenR: 1.6,
+      maxLeverageCap: 8,
+      description: 'Gaming/Metaverse: Narratief-gestuurd, 40% bank op 2.0R, runner tot 5R bij uitbraak',
     };
   }
 
@@ -293,12 +293,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'DEFI',
       atrStopMultiple: 2.0,
-      firstTargetR: 1.25,
-      firstTargetPortion: 0.55,
-      finalTargetR: 4.0,
-      earlyBreakEvenR: 1.2,
+      firstTargetR: 2.0,
+      firstTargetPortion: 0.40,
+      finalTargetR: 5.0,
+      earlyBreakEvenR: 1.6,
       maxLeverageCap: 10,
-      description: 'DeFi Blue-Chip: 55% bank op 1.25R, 2.0 ATR stop voor liquiditeitspieken, runner tot 4R',
+      description: 'DeFi Blue-Chip: 40% bank op 2.0R, 2.0 ATR stop voor liquiditeitspieken, runner tot 5R',
     };
   }
 
@@ -307,12 +307,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'LAYER2',
       atrStopMultiple: 2.0,
-      firstTargetR: 1.3,
-      firstTargetPortion: 0.50,
-      finalTargetR: 4.0,
-      earlyBreakEvenR: 1.2,
+      firstTargetR: 2.0,
+      firstTargetPortion: 0.40,
+      finalTargetR: 5.0,
+      earlyBreakEvenR: 1.6,
       maxLeverageCap: 10,
-      description: 'Layer 2: ETH-gecorreleerd, 50% bank op 1.3R, runner tot 4R, 10x max leverage',
+      description: 'Layer 2: ETH-gecorreleerd, 40% bank op 2.0R, runner tot 5R, 10x max leverage',
     };
   }
 
@@ -321,12 +321,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'LAYER1',
       atrStopMultiple: 2.0,
-      firstTargetR: 1.3,
-      firstTargetPortion: 0.50,
-      finalTargetR: 4.5,
-      earlyBreakEvenR: 1.2,
+      firstTargetR: 2.0,
+      firstTargetPortion: 0.40,
+      finalTargetR: 5.0,
+      earlyBreakEvenR: 1.6,
       maxLeverageCap: 15,
-      description: 'Layer 1 Momentum: 50% bank op 1.3R, ruime runner tot 4.5R voor trendopvolging',
+      description: 'Layer 1 Momentum: 40% bank op 2.0R, ruime runner tot 5.0R voor trendopvolging',
     };
   }
 
@@ -335,12 +335,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
     return {
       category: 'MAJOR',
       atrStopMultiple: 2.2,
-      firstTargetR: 1.5,
-      firstTargetPortion: 0.50,
-      finalTargetR: 3.5,
-      earlyBreakEvenR: 1.2,
+      firstTargetR: 1.8,
+      firstTargetPortion: 0.40,
+      finalTargetR: 4.5,
+      earlyBreakEvenR: 1.5,
       maxLeverageCap: 25,
-      description: 'Major: Hoge liquiditeit, standaard 1.5R/3.5R rungs en tot 20x hefboom',
+      description: 'Major: Hoge liquiditeit, standaard 1.8R/4.5R rungs en tot 20x hefboom',
     };
   }
 
@@ -348,12 +348,12 @@ export function getCoinProfile(symbol: string): CoinProfile {
   return {
     category: 'ALT',
     atrStopMultiple: 1.8,
-    firstTargetR: 1.25,
-    firstTargetPortion: 0.55,
-    finalTargetR: 3.5,
-    earlyBreakEvenR: 1.2,
+    firstTargetR: 2.0,
+    firstTargetPortion: 0.40,
+    finalTargetR: 5.0,
+    earlyBreakEvenR: 1.6,
     maxLeverageCap: 10,
-    description: 'Standaard Alt: Snelle 55% bank op 1.25R, strakke 1.8 ATR stop',
+    description: 'Standaard Alt: 40% bank op 2.0R, 60% runner tot 5.0R',
   };
 }
 

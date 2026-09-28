@@ -2413,9 +2413,9 @@ export class Engine {
         }
       }
 
-      // MTF Setup Score Check: Score < 70 = NO TRADE. Reversal requires >= 80.
-      const minScore = this.risk.minScore ?? 70;
-      const minReversalScore = this.risk.minReversalScore ?? 80;
+      // MTF Setup Score Check: Score < 65 = NO TRADE. Reversal requires >= 72.
+      const minScore = this.risk.minScore ?? 65;
+      const minReversalScore = this.risk.minReversalScore ?? 72;
       const score = signal.setupScore?.total ?? Math.round(signal.confidence * 100);
 
       if (score < minScore) {
