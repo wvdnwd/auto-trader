@@ -86,6 +86,8 @@ export const MEME_UNIVERSE = [
   'PEPE_USDT',
   'WIF_USDT',
   '1000BONK_USDT',
+  'FLOKI_USDT',
+  '1000FLOKI_USDT',
   'FARTCOIN_USDT',
   'PENGU_USDT',
   'SPX_USDT',
@@ -98,6 +100,42 @@ export const MEME_UNIVERSE = [
   'MEW_USDT',
   'GOAT_USDT',
   'TRUMP_USDT',
+  'PURR_USDT',
+  'CHILLGUY_USDT',
+  'MELANIA_USDT',
+  'ANIME_USDT',
+  'VINE_USDT',
+  'PUMP_USDT',
+  'BABY_USDT',
+  '1000DOGS_USDT',
+  'CATI_USDT',
+  'HMSTR_USDT',
+  'ACT_USDT',
+  'USELESS_USDT',
+  '1000NEIRO_USDT',
+  'NEIROETH_USDT',
+  '1000000MOG_USDT',
+];
+
+/** AI & Agent coins — high-momentum narrative tokens */
+export const AI_UNIVERSE = [
+  'TAO_USDT',
+  'FET_USDT',
+  'RENDER_USDT',
+  'WLD_USDT',
+  'VIRTUAL_USDT',
+  'AI16Z_USDT',
+  'AIXBT_USDT',
+  'AI_USDT',
+  'IO_USDT',
+  'ZEREBRO_USDT',
+  'GRIFFAIN_USDT',
+  'KAITO_USDT',
+  'PROMPT_USDT',
+  'ARKM_USDT',
+  'ATH_USDT',
+  'AIOZ_USDT',
+  'BIO_USDT',
 ];
 
 /** Gaming & Metaverse — high-beta narrative coins, ATR-based stops */
@@ -107,9 +145,18 @@ export const GAMING_UNIVERSE = [
   'IMX_USDT',
   'GALA_USDT',
   'YGG_USDT',
+  'BIGTIME_USDT',
+  'PIXEL_USDT',
+  'ACE_USDT',
+  'MAVIA_USDT',
+  'ILV_USDT',
+  'SUPER_USDT',
+  'BEAM_USDT',
+  'RON_USDT',
+  'PRIME_USDT',
 ];
 
-/** DeFi blue-chips — liquidity-sensitive, TP runners on breakouts */
+/** DeFi blue-chips & Hyperliquid ecosystem — liquidity-sensitive, TP runners on breakouts */
 export const DEFI_UNIVERSE = [
   'AAVE_USDT',
   'UNI_USDT',
@@ -126,6 +173,17 @@ export const DEFI_UNIVERSE = [
   'ONDO_USDT',
   'HYPE_USDT',
   'CAKE_USDT',
+  'LINK_USDT',
+  'MORPHO_USDT',
+  'SYRUP_USDT',
+  'RESOLV_USDT',
+  'AERO_USDT',
+  'RAY_USDT',
+  'SUSHI_USDT',
+  'COMP_USDT',
+  'PYTH_USDT',
+  'JTO_USDT',
+  'BLUR_USDT',
 ];
 
 /** Layer 2 / Scaling tokens */
@@ -135,19 +193,21 @@ export const LAYER2_UNIVERSE = [
   'STRK_USDT',
   'POL_USDT',
   'MANTA_USDT',
+  'ZK_USDT',
+  'BLAST_USDT',
+  'SCR_USDT',
+  'LINEA_USDT',
+  'ZORA_USDT',
+  'EIGEN_USDT',
+  'ALT_USDT',
+  'DYM_USDT',
+  'TST_USDT',
+  'LAYER_USDT',
+  'W_USDT',
 ];
 
-export const CORE_UNIVERSE = [
-  // ── Majors ───────────────────────────────────────────────────────────────
-  'BTC_USDT',
-  'ETH_USDT',
-  'BNB_USDT',
-  'XRP_USDT',
-  'LTC_USDT',
-  'BCH_USDT',
-  'ETC_USDT',
-
-  // ── Layer 1 ──────────────────────────────────────────────────────────────
+/** Layer 1 high-beta and major chains */
+export const LAYER1_UNIVERSE = [
   'SOL_USDT',
   'AVAX_USDT',
   'ADA_USDT',
@@ -167,72 +227,55 @@ export const CORE_UNIVERSE = [
   'ALGO_USDT',
   'FTM_USDT',
   'AR_USDT',
-  'DOGE_USDT',
-
-  // ── Layer 2 / Scaling ────────────────────────────────────────────────────
-  'ARB_USDT',
-  'OP_USDT',
-  'STRK_USDT',
-  'POL_USDT',
-  'MANTA_USDT',
-
-  // ── DeFi ─────────────────────────────────────────────────────────────────
-  'LINK_USDT',
-  'AAVE_USDT',
-  'UNI_USDT',
-  'CRV_USDT',
-  'MKR_USDT',
-  'SNX_USDT',
-  'JUP_USDT',
-  'PENDLE_USDT',
-  'GMX_USDT',
-  'DYDX_USDT',
-  'ENA_USDT',
-  'ETHFI_USDT',
-  'LDO_USDT',
-  'ONDO_USDT',
-  'HYPE_USDT',
-  'CAKE_USDT',
-
-  // ── AI / Tech ─────────────────────────────────────────────────────────────
-  'TAO_USDT',
-  'FET_USDT',
-  'RENDER_USDT',
-  'WLD_USDT',
-  'VIRTUAL_USDT',
-  'AI16Z_USDT',
-  'AIXBT_USDT',
-
-  // ── Gaming / Metaverse ────────────────────────────────────────────────────
-  'AXS_USDT',
-  'SAND_USDT',
-  'IMX_USDT',
-  'GALA_USDT',
-  'YGG_USDT',
-
-  // ── Meme coins ────────────────────────────────────────────────────────────
-  'SHIB_USDT',
-  'PEPE_USDT',
-  'WIF_USDT',
-  '1000BONK_USDT',
-  'FARTCOIN_USDT',
-  'PENGU_USDT',
-  'SPX_USDT',
-  'POPCAT_USDT',
-  'BOME_USDT',
-  'TURBO_USDT',
-  'PNUT_USDT',
-  'MOODENG_USDT',
-  'BRETT_USDT',
-  'MEW_USDT',
-  'GOAT_USDT',
-  'TRUMP_USDT',
-
-  // ── Legacy Low-Leverage Alts ──────────────────────────────────────────────
-  'DASH_USDT',
-  'ZEC_USDT',
-  'SAGA_USDT',
+  'BERA_USDT',
+  'MON_USDT',
+  'IP_USDT',
+  'S_USDT',
+  'MOVE_USDT',
+  'OM_USDT',
+  'TRX_USDT',
+  'RUNE_USDT',
+  'STX_USDT',
+  'MINA_USDT',
+  'CFX_USDT',
+  'POLYX_USDT',
 ];
+
+export const CORE_UNIVERSE = Array.from(
+  new Set([
+    // ── Majors ───────────────────────────────────────────────────────────────
+    'BTC_USDT',
+    'ETH_USDT',
+    'BNB_USDT',
+    'XRP_USDT',
+    'LTC_USDT',
+    'BCH_USDT',
+    'ETC_USDT',
+
+    // ── Layer 1 ──────────────────────────────────────────────────────────────
+    ...LAYER1_UNIVERSE,
+
+    // ── Layer 2 / Scaling ────────────────────────────────────────────────────
+    ...LAYER2_UNIVERSE,
+
+    // ── DeFi ─────────────────────────────────────────────────────────────────
+    ...DEFI_UNIVERSE,
+
+    // ── AI / Tech ─────────────────────────────────────────────────────────────
+    ...AI_UNIVERSE,
+
+    // ── Gaming / Metaverse ────────────────────────────────────────────────────
+    ...GAMING_UNIVERSE,
+
+    // ── Meme coins ────────────────────────────────────────────────────────────
+    ...MEME_UNIVERSE,
+
+    // ── Legacy Low-Leverage Alts ──────────────────────────────────────────────
+    'DASH_USDT',
+    'ZEC_USDT',
+    'SAGA_USDT',
+  ])
+);
 
 /**
  * Entry timeframe, with the timeframe used to confirm it.
@@ -2863,18 +2906,35 @@ export class Engine {
         t.lastPrice > 0
     );
 
-    // 2. Discover Coins in Play: Top 24h Gainers (+%) and Top 24h Losers (-%)
+    // 2. Discover Coins in Play: Top 24h Gainers (+%), Top 24h Losers (-%), and Volume Leaders
     const withChange = liquidTickers.filter((t) => Number.isFinite(t.changeRate24h));
     const topGainers = [...withChange]
       .filter((t) => t.changeRate24h > 0)
       .sort((a, b) => b.changeRate24h - a.changeRate24h)
-      .slice(0, 6);
+      .slice(0, 12);
     const topLosers = [...withChange]
       .filter((t) => t.changeRate24h < 0)
       .sort((a, b) => a.changeRate24h - b.changeRate24h)
+      .slice(0, 12);
+    const topVolumeLeaders = [...liquidTickers]
+      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+      .slice(0, 15);
+    const extremeFunding = liquidTickers
+      .filter((t) => Number.isFinite(t.fundingRate) && t.fundingRate < -0.0003)
+      .sort((a, b) => a.fundingRate - b.fundingRate)
       .slice(0, 6);
 
-    // 3. Assemble priority candidate universe (majors + open positions + top movers + core universe)
+    const moverRoleMap = new Map<string, 'TOP_GAINER' | 'TOP_LOSER' | 'VOLUME_LEADER' | 'SHORT_SQUEEZE'>();
+    for (const g of topGainers) moverRoleMap.set(g.symbol, 'TOP_GAINER');
+    for (const l of topLosers) moverRoleMap.set(l.symbol, 'TOP_LOSER');
+    for (const v of topVolumeLeaders) {
+      if (!moverRoleMap.has(v.symbol)) moverRoleMap.set(v.symbol, 'VOLUME_LEADER');
+    }
+    for (const f of extremeFunding) {
+      if (!moverRoleMap.has(f.symbol)) moverRoleMap.set(f.symbol, 'SHORT_SQUEEZE');
+    }
+
+    // 3. Assemble priority candidate universe (majors + open positions + top movers + sector reps + core universe)
     const prioritySymbols = new Set<string>();
 
     // A. Majors: BTC, ETH, SOL
@@ -2891,7 +2951,7 @@ export class Engine {
     // In restricted test environments (where BTC is omitted from universe), only scan allowed symbols
     const isRestrictedUniverse = !allowed.has('BTC_USDT');
 
-    // C. Top 6 Gainers (+%) & Top 6 Losers (-%)
+    // C. Top 12 Gainers (+%) & Top 12 Losers (-%)
     for (const g of topGainers) {
       if (!isRestrictedUniverse || allowed.has(g.symbol)) prioritySymbols.add(g.symbol);
     }
@@ -2899,12 +2959,40 @@ export class Engine {
       if (!isRestrictedUniverse || allowed.has(l.symbol)) prioritySymbols.add(l.symbol);
     }
 
-    // D. Core allowed universe markets (highest volume first, fill up to 60)
+    // D. Top Volume Leaders & Short Squeeze candidates
+    for (const v of topVolumeLeaders) {
+      if (!isRestrictedUniverse || allowed.has(v.symbol)) prioritySymbols.add(v.symbol);
+    }
+    for (const f of extremeFunding) {
+      if (!isRestrictedUniverse || allowed.has(f.symbol)) prioritySymbols.add(f.symbol);
+    }
+
+    // E. Sector Representation: Ensure top liquid coins from each sector are scanned
+    const sectorLists = [
+      MEME_UNIVERSE,
+      AI_UNIVERSE,
+      DEFI_UNIVERSE,
+      LAYER1_UNIVERSE,
+      LAYER2_UNIVERSE,
+      GAMING_UNIVERSE,
+    ];
+    for (const sector of sectorLists) {
+      const liquidSector = sector
+        .map((s) => tickerMap.get(s))
+        .filter((t): t is Ticker => Boolean(t && t.quoteVolume24h >= minVol))
+        .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+        .slice(0, 5);
+      for (const t of liquidSector) {
+        if (!isRestrictedUniverse || allowed.has(t.symbol)) prioritySymbols.add(t.symbol);
+      }
+    }
+
+    // F. Core allowed universe markets (highest volume first, fill up to 90)
     const coreLiquid = liquidTickers
       .filter((t) => allowed.has(t.symbol))
       .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
     for (const t of coreLiquid) {
-      if (prioritySymbols.size >= 60) break;
+      if (prioritySymbols.size >= 90) break;
       prioritySymbols.add(t.symbol);
     }
 
@@ -2927,7 +3015,7 @@ export class Engine {
       this.store.learning(),
     ]);
     const results: Array<ReturnType<typeof buildSignal> | null> = [];
-    const BATCH_SIZE = 5;
+    const BATCH_SIZE = 8;
     for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
       const batch = candidates.slice(i, i + BATCH_SIZE);
       const batchResults = await Promise.all(
@@ -2966,7 +3054,7 @@ export class Engine {
       );
       results.push(...batchResults);
       if (i + BATCH_SIZE < candidates.length) {
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 60));
       }
     }
 
@@ -2984,7 +3072,16 @@ export class Engine {
     return rankCandidates(
       results
         .filter((s): s is Signal => s !== null)
-        .map((s) => ({ ...s, plannedLeverage: previewLeverage(s, this.risk) })),
+        .map((s) => {
+          const profile = getCoinProfile(s.symbol);
+          const moverRole = moverRoleMap.get(s.symbol) || 'NORMAL';
+          return {
+            ...s,
+            category: profile.category,
+            moverRole,
+            plannedLeverage: previewLeverage(s, this.risk),
+          };
+        }),
       learning,
       currentSession
     );

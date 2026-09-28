@@ -177,7 +177,7 @@ export class MarketScout {
         .filter(([, until]) => until > now)
         .map(([symbol]) => symbol)
     );
-    const minVol = DEFAULT_RISK.minQuoteVolume24h ?? 5_000_000;
+    const minVol = DEFAULT_RISK.minQuoteVolume24h ?? 1_000_000;
     const tickers = await this.market.tickers();
     return tickers
       .filter(
@@ -190,6 +190,10 @@ export class MarketScout {
           !this.pending.has(t.symbol)
       )
       .sort((a, b) => {
+        const aMoverScore = (1 + Math.abs(a.changeRate24h ?? 0) * 10) * a.quoteVolume24h;
+        const bMoverScore = (1 + Math.abs(b.changeRate24h ?? 0) * 10) * b.quoteVolume24h;
+        const byScore = bMoverScore - aMoverScore;
+        if (byScore !== 0) return byScore;
         const byVolume = b.quoteVolume24h - a.quoteVolume24h;
         if (byVolume !== 0) return byVolume;
         return a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0;

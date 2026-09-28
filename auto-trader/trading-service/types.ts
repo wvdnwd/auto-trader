@@ -193,6 +193,14 @@ export type Signal = {
   blockReasonCode?: BlockReasonCode;
   /** Trigger candle on 15m/5m that confirmed the entry. */
   triggerCandle?: { high: number; low: number; time: number };
+  /** 24-hour price change percentage, e.g. +0.082 = +8.2%. */
+  changeRate24h?: number;
+  /** 24-hour quote volume in USD/USDC. */
+  quoteVolume24h?: number;
+  /** Role in the market mover discovery: TOP_GAINER, TOP_LOSER, VOLUME_LEADER, SHORT_SQUEEZE, or NORMAL. */
+  moverRole?: 'TOP_GAINER' | 'TOP_LOSER' | 'VOLUME_LEADER' | 'SHORT_SQUEEZE' | 'NORMAL';
+  /** Sector category, e.g. MEME, AI_TECH, DEFI, LAYER1, LAYER2, GAMING, MAJOR, ALT. */
+  category?: string;
 };
 
 export type PivotType = 'HH' | 'HL' | 'LH' | 'LL';

@@ -62,7 +62,11 @@ export function normalizeCoin(symbol: string): string {
   if (clean === 'PEPE' || clean === '1000PEPE') return 'kPEPE';
   if (clean === 'BONK' || clean === '1000BONK') return 'kBONK';
   if (clean === 'SHIB' || clean === '1000SHIB') return 'kSHIB';
+  if (clean === 'FLOKI' || clean === '1000FLOKI') return 'kFLOKI';
   if (clean === 'MOG' || clean === '1000000MOG') return 'kMOG';
+  if (clean === 'DOGS' || clean === '1000DOGS') return 'kDOGS';
+  if (clean === 'NEIRO' || clean === '1000NEIRO') return 'kNEIRO';
+  if (clean === 'LUNC' || clean === '1000LUNC') return 'kLUNC';
   return clean;
 }
 
@@ -101,7 +105,11 @@ function toBinanceSymbol(symbol: string): string {
   if (coin === 'kPEPE') return '1000PEPEUSDT';
   if (coin === 'kBONK') return '1000BONKUSDT';
   if (coin === 'kSHIB') return '1000SHIBUSDT';
+  if (coin === 'kFLOKI') return '1000FLOKIUSDT';
   if (coin === 'kMOG') return '1000MOGUSDT';
+  if (coin === 'kDOGS') return '1000DOGSUSDT';
+  if (coin === 'kNEIRO') return '1000NEIROUSDT';
+  if (coin === 'kLUNC') return '1000LUNCUSDT';
   return `${coin}USDT`;
 }
 
@@ -334,8 +342,20 @@ export class MarketData {
           data.push({ symbol: 'BONK_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
         } else if (u.name === 'kSHIB') {
           data.push({ symbol: 'SHIB_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kFLOKI') {
+          data.push({ symbol: '1000FLOKI_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+          data.push({ symbol: 'FLOKI_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
         } else if (u.name === 'kMOG') {
           data.push({ symbol: '1000000MOG_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kDOGS') {
+          data.push({ symbol: '1000DOGS_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+          data.push({ symbol: 'DOGS_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kNEIRO') {
+          data.push({ symbol: '1000NEIRO_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+          data.push({ symbol: 'NEIRO_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+        } else if (u.name === 'kLUNC') {
+          data.push({ symbol: '1000LUNC_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
+          data.push({ symbol: 'LUNC_USDT', lastPrice, bid1, ask1, spreadPct, quoteVolume24h, changeRate24h, fundingRate });
         }
       }
 

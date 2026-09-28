@@ -20,6 +20,7 @@ import type {
 } from './exchange-adapter.js';
 import type { Side } from './types.js';
 import { ErrorLogger } from './error-logger.js';
+import { normalizeCoin } from './market-data.js';
 
 export const HYPERLIQUID_MAINNET_API = MAINNET_API_URL;
 export const HYPERLIQUID_TESTNET_API = TESTNET_API_URL;
@@ -621,7 +622,7 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
   }
 
   private normalizeCoin(symbol: string): string {
-    return symbol.replace(/_USDT$|_USDC$/i, '').toUpperCase();
+    return normalizeCoin(symbol);
   }
 
   private assertArmed(): void {

@@ -187,6 +187,8 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
   const [inlineLoading, setInlineLoading] = useState<Record<string, boolean>>({});
   const [inlineError, setInlineError] = useState<Record<string, string | null>>({});
   const [showAllChecks, setShowAllChecks] = useState<Record<string, boolean>>({});
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'TOP_GAINER' | 'TOP_LOSER' | 'VOLUME_LEADER' | 'MEME' | 'AI_TECH' | 'DEFI' | 'LAYER1_2'>('ALL');
+  const [visibleCount, setVisibleCount] = useState(25);
   const mounted = useRef(false);
   const requestIds = useRef<Record<string, number>>({});
 
@@ -236,35 +238,157 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
     return <p className={styles.empty}>Nog geen scan uitgevoerd — even geduld.</p>;
   }
 
-  return (
-    <div className={styles.rows}>
-      {signals.slice(0, 10).map((s) => {
-        const passes = s.confidence >= threshold;
-        const isExpanded = expandedSymbol === s.symbol;
-        const chartData = inlineChart[s.symbol];
-        const loading = inlineLoading[s.symbol];
-        const err = inlineError[s.symbol];
-        const passedChecks = s.checks?.filter((c) => c.passed) || [];
-        const failedChecks = s.checks?.filter((c) => !c.passed) || [];
-        const isChecksExpanded = Boolean(showAllChecks[s.symbol]);
-        const outbreakInfo = getOutbreakInfo(s);
-        const fibInfo = getFibPullbackInfo(s);
-        const actionPlan = getActionPlan(s, threshold);
+  const filteredSignals = signals.filter((s) => {
+    if (categoryFilter === 'ALL') return true;
+    if (categoryFilter === 'TOP_GAINER') {
+      return s.moverRole === 'TOP_GAINER' || (s.changeRate24h !== undefined && s.changeRate24h > 0.05);
+    }
+    if (categoryFilter === 'TOP_LOSER') {
+      return s.moverRole === 'TOP_LOSER' || (s.changeRate24h !== undefined && s.changeRate24h < -0.05);
+    }
+    if (categoryFilter === 'VOLUME_LEADER') {
+      return s.moverRole === 'VOLUME_LEADER';
+    }
+    if (categoryFilter === 'MEME') {
+      return s.category === 'MEME';
+    }
+    if (categoryFilter === 'AI_TECH') {
+      return s.category === 'AI_TECH';
+    }
+    if (categoryFilter === 'DEFI') {
+      return s.category === 'DEFI';
+    }
+    if (categoryFilter === 'LAYER1_2') {
+      return s.category === 'LAYER1' || s.category === 'LAYER2';
+    }
+    return true;
+  });
 
-        return (
-          <div key={s.symbol} className={styles.signal}>
-            <div className={styles.rowTop}>
-              <div className={styles.symbolWrap}>
-                <span className={styles.coinBadge} style={{ background: coinInfo(s.symbol).color }}>
-                  {splitSymbol(s.symbol).base.slice(0, 1)}
-                </span>
-                <span className={styles.symbolText}>
-                  <span className={styles.symbol}>{formatSymbol(s.symbol)}</span>
-                  <span className={styles.coinName}>{coinInfo(s.symbol).name}</span>
-                </span>
-                <span className={`${styles.tag} ${s.side === 'LONG' ? styles.long : styles.short}`}>
-                  {s.side}
-                </span>
+  return (
+    <div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.85rem', alignItems: 'center' }}>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'ALL' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('ALL')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem' }}
+        >
+          Alles ({signals.length})
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'TOP_GAINER' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('TOP_GAINER')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem', color: categoryFilter === 'TOP_GAINER' ? undefined : 'var(--green)' }}
+        >
+          🚀 Meest Gestegen
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'TOP_LOSER' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('TOP_LOSER')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem', color: categoryFilter === 'TOP_LOSER' ? undefined : 'var(--red)' }}
+        >
+          🩸 Meest Gezakt
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'VOLUME_LEADER' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('VOLUME_LEADER')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem' }}
+        >
+          💧 Hoog Volume
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'AI_TECH' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('AI_TECH')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem' }}
+        >
+          🤖 AI & Tech
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'MEME' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('MEME')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem' }}
+        >
+          🐕 Memes
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'DEFI' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('DEFI')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem' }}
+        >
+          🏦 DeFi
+        </button>
+        <button
+          type="button"
+          className={`${styles.tab} ${categoryFilter === 'LAYER1_2' ? styles.tabOn : ''}`}
+          onClick={() => setCategoryFilter('LAYER1_2')}
+          style={{ padding: '0.28rem 0.65rem', fontSize: '0.74rem' }}
+        >
+          ⚡ Layer 1 & 2
+        </button>
+      </div>
+
+      <div className={styles.rows}>
+        {filteredSignals.slice(0, visibleCount).map((s) => {
+          const passes = s.confidence >= threshold;
+          const isExpanded = expandedSymbol === s.symbol;
+          const chartData = inlineChart[s.symbol];
+          const loading = inlineLoading[s.symbol];
+          const err = inlineError[s.symbol];
+          const passedChecks = s.checks?.filter((c) => c.passed) || [];
+          const failedChecks = s.checks?.filter((c) => !c.passed) || [];
+          const isChecksExpanded = Boolean(showAllChecks[s.symbol]);
+          const outbreakInfo = getOutbreakInfo(s);
+          const fibInfo = getFibPullbackInfo(s);
+          const actionPlan = getActionPlan(s, threshold);
+
+          return (
+            <div key={s.symbol} className={styles.signal}>
+              <div className={styles.rowTop}>
+                <div className={styles.symbolWrap}>
+                  <span className={styles.coinBadge} style={{ background: coinInfo(s.symbol).color }}>
+                    {splitSymbol(s.symbol).base.slice(0, 1)}
+                  </span>
+                  <span className={styles.symbolText}>
+                    <span className={styles.symbol}>{formatSymbol(s.symbol)}</span>
+                    <span className={styles.coinName}>{coinInfo(s.symbol).name}</span>
+                  </span>
+                  {s.changeRate24h !== undefined && (
+                    <span
+                      className={`${styles.tag} ${s.changeRate24h >= 0 ? styles.safe : styles.short}`}
+                      title="24-uurs koersverandering"
+                    >
+                      {s.changeRate24h >= 0 ? '+' : ''}{(s.changeRate24h * 100).toFixed(1)}%
+                    </span>
+                  )}
+                  {s.moverRole === 'TOP_GAINER' && (
+                    <span className={`${styles.tag} ${styles.safe}`} title="Top 12 Stijger op Hyperliquid">
+                      🚀 Top Stijger
+                    </span>
+                  )}
+                  {s.moverRole === 'TOP_LOSER' && (
+                    <span className={`${styles.tag} ${styles.short}`} title="Top 12 Daler op Hyperliquid (dip/reversal potentie)">
+                      🩸 Top Zakker
+                    </span>
+                  )}
+                  {s.moverRole === 'SHORT_SQUEEZE' && (
+                    <span className={`${styles.tag} ${styles.amber}`} title="Hoge negatieve funding — potentiële short squeeze">
+                      ⚡ Short Squeeze
+                    </span>
+                  )}
+                  {s.category && (
+                    <span className={`${styles.tag} ${styles.neutral}`} title={`Sector: ${s.category}`}>
+                      {s.category}
+                    </span>
+                  )}
+                  <span className={`${styles.tag} ${s.side === 'LONG' ? styles.long : styles.short}`}>
+                    {s.side}
+                  </span>
                 {s.strategyType && (
                   <span
                     className={`${styles.tag} ${
@@ -594,6 +718,19 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
           </div>
         );
       })}
+      </div>
+      {filteredSignals.length > visibleCount && (
+        <div style={{ textAlign: 'center', marginTop: '0.8rem' }}>
+          <button
+            type="button"
+            className={`${styles.btn} ${styles.btnSmall}`}
+            onClick={() => setVisibleCount((prev) => prev + 25)}
+            style={{ fontSize: '0.78rem', padding: '0.35rem 0.9rem' }}
+          >
+            Toon meer markten ({visibleCount} van {filteredSignals.length})
+          </button>
+        </div>
+      )}
     </div>
   );
 }

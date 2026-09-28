@@ -1208,6 +1208,8 @@ export function buildSignal(
     trend1H: trend1HInfo.trend,
     zone4H: relevantZone,
     triggerCandle: struct15m.triggerCandle ?? undefined,
+    changeRate24h: ticker.changeRate24h,
+    quoteVolume24h: ticker.quoteVolume24h,
   };
 }
 
