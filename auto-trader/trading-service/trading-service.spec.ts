@@ -283,12 +283,14 @@ describe('engine lifecycle', () => {
     expect(openFirst.length).toBe(2);
 
     // Simulate TP1 bookkeeping, but release capacity only with a fee-covered stop.
+    const raisedStops: number[] = [];
     for (const pos of openFirst) {
       if (pos.takeProfits && pos.takeProfits[0]) pos.takeProfits[0].hit = true;
       pos.breakEven = true;
       const feeCoveredStop = pos.side === 'LONG'
         ? pos.entry * ((1 + FEE) / (1 - FEE))
         : pos.entry * ((1 - FEE) / (1 + FEE));
+      raisedStops.push(feeCoveredStop);
       const remainingQuantity = pos.quantity * 0.55;
       await store.updatePosition(pos.id, {
         breakEven: true,
@@ -301,8 +303,9 @@ describe('engine lifecycle', () => {
     }
 
     // Keep the simulated market above the newly raised LONG stops, but below TP1.
-    // At the default mark of 100 these fee-covered stops would already be hit.
-    const highestProtectedStop = Math.max(...openFirst.map((pos) => pos.stopLoss));
+    // `openFirst` is a pre-update snapshot (updatePosition does not mutate it), so
+    // read the fee-covered stops we just persisted rather than the original stops.
+    const highestProtectedStop = Math.max(...raisedStops);
     const nearestFirstTarget = Math.min(...openFirst.map((pos) => pos.takeProfits[0].price));
     market.price$ = (highestProtectedStop + nearestFirstTarget) / 2;
 

@@ -333,6 +333,8 @@ async function runSniperBacktest() {
           if (trailStop < pos.stopLoss) pos.stopLoss = trailStop;
         }
       }
+
+
     }
 
     // Update peak equity

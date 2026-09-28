@@ -40,11 +40,11 @@ export const DEFAULT_RISK: RiskConfig = {
   microTiming15mEnabled: true,
   pullbackEntryEnabled: true,
   dynamicChandelierTrailing: true,
-  atrStopMultiple: 1.8,
+  atrStopMultiple: 1.6,
   trailArmR: 2.0,
   trailGiveback: 0.75,
-  firstTargetR: 2.0,
-  firstTargetPortion: 0.40,
+  firstTargetR: 1.1,
+  firstTargetPortion: 0.65,
   finalTargetR: 5.0,
   breakEvenAfterFirst: true,
   requireHigherAlignment: true,
@@ -136,7 +136,7 @@ export const DEFAULT_RISK: RiskConfig = {
   minimumRrSwing: 2.0,
   minimumRrPullback: 1.5,
   minimumRrBreakout: 2.0,
-  minReturnOnMargin: 0.35,
+  minReturnOnMargin: 0.20,
   cooldownTpMinutes: 5,
   cooldownBeMinutes: 15,
   cooldownSlMinutes: 30,
@@ -1170,13 +1170,13 @@ function targetLadder(
 
   if (isRunnerCandidate) {
     // 3-Rung Dynamic Runner Ladder:
-    // TP1: first target (1.8R - 2.0R, 40%) -> locks in initial gain & moves stop to break-even + fee buffer.
-    // TP2: intermediate target (3.5R - 4.5R, 35%) -> locks in solid second tranche profit.
+    // TP1: first target (1.1R, 65%) -> locks in initial gain & moves stop to break-even + fee buffer.
+    // TP2: intermediate target, sized from the remainder after TP1 and the runner rung.
     // TP3: dynamic runner target (10.0R, 25%) -> rides the parabolic trend with Chandelier ATR trailing stop!
     const midR = round(first + Math.max(1.5, (final - first) * 0.8), 1);
     return [
-      { rMultiple: first, portion: 0.40 },
-      { rMultiple: midR, portion: 0.35 },
+      { rMultiple: first, portion },
+      { rMultiple: midR, portion: Number((1 - portion - 0.25).toFixed(2)) },
       { rMultiple: runnerTargetR, portion: 0.25, isRunner: true },
     ];
   }
