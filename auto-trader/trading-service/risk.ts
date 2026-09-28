@@ -145,6 +145,9 @@ export const DEFAULT_RISK: RiskConfig = {
   newsCatalystBypassPullback: true,
   newsAdversePositionProtect: true,
   macroShieldEnabled: true,
+  runnerTargetR: 10.0,
+  compoundingEnabled: true,
+  antiMartingaleEnabled: true,
 };
 
 /**
@@ -866,7 +869,8 @@ export function planTrade(
   account: Account,
   config: RiskConfig,
   feeRate = FEE,
-  exchangeMaxLeverage?: number
+  exchangeMaxLeverage?: number,
+  winStreak = 0
 ): TradePlan | null {
   if (!Number.isFinite(signal.confidence) || signal.confidence < 0 || signal.confidence > 1) return null;
   if (!Number.isFinite(signal.price) || signal.price <= 0) return null;
@@ -983,9 +987,37 @@ export function planTrade(
   const baselineLeverage = 8;
   let stakeFloor = 0;
   if (Number.isFinite(config.targetStakePct) && (config.targetStakePct as number) > 0) {
-    const stakePct = confidenceScaledStakePct(signal.confidence, config);
+    let stakePct = confidenceScaledStakePct(signal.confidence, config);
+
+    // Auto-Compounding & Saldo-Schaling:
+    // Scale position stake dynamically as equity compounds.
+    // Small accounts (<= $250): keep stake around 40-45% for capital efficiency.
+    // Mid accounts ($250 - $1,000): scale gracefully to ~35-40%.
+    // Large accounts (> $1,000): scale to ~25-30% for broader multi-position diversification.
+    if (config.compoundingEnabled !== false) {
+      if (account.equity > 1000) {
+        stakePct = Math.max(0.20, stakePct * 0.70);
+      } else if (account.equity > 250) {
+        stakePct = Math.max(0.25, stakePct * 0.85);
+      }
+    }
+
+    // Anti-Martingale win streak accelerator:
+    // When on a hot winning streak (>= 2 consecutive wins), scale stake up by +10% to +25%.
+    // Reset immediately back to baseline upon any loss.
+    if (config.antiMartingaleEnabled !== false && winStreak >= 2) {
+      const streakBonus = Math.min(0.25, (winStreak - 1) * 0.10);
+      stakePct = Math.min(config.maxTotalMarginPct / Math.min(2, config.maxOpenPositions), stakePct * (1 + streakBonus));
+    }
+
     const leverageAdjustedStakePct = stakePct * Math.min(1, baselineLeverage / leverage);
-    stakeFloor = Math.min(freeMargin, account.equity * leverageAdjustedStakePct * drawdownScale);
+    let rawStake = account.equity * leverageAdjustedStakePct * drawdownScale;
+    // On small accounts (<= $500) where capital compounding is enabled, guarantee stake floor reaches
+    // the target stake or at least minTradeFloor so small balances are not artificially barred
+    if (config.compoundingEnabled !== false && account.equity <= 500 && freeMargin >= minTradeFloor) {
+      rawStake = Math.max(rawStake, Math.min(freeMargin, account.equity * stakePct * drawdownScale));
+    }
+    stakeFloor = Math.min(freeMargin, rawStake);
   }
 
   // 6. Size the position, never exceeding the collateral available. The
@@ -994,11 +1026,17 @@ export function planTrade(
   const riskSizedMargin = Math.min(freeMargin, maxNotionalForRisk / leverage);
   let margin = Math.min(freeMargin, Math.max(riskSizedMargin, stakeFloor));
   if (margin < minTradeFloor) return null;
-  // This final cap also constrains the target-stake floor. Floor, rather than
-  // round, so cent precision can never move margin above the risk allowance.
-  margin = floorTo(Math.min(margin, maxNotionalForRisk / leverage), 2);
+
+  // On accounts where equity <= $500, stakeFloor drives margin so small balances can compound.
+  // On large accounts (> $500), cap by risk budget so dollar risk does not exceed maxRiskPct.
+  if (account.equity > 500) {
+    margin = floorTo(Math.min(margin, maxNotionalForRisk / leverage), 2);
+  } else {
+    margin = floorTo(margin, 2);
+  }
   if (margin < minTradeFloor) return null;
-  const notional = floorTo(Math.min(margin * leverage, maxNotionalForRisk), 2);
+
+  const notional = floorTo(Math.min(margin * leverage, Math.max(maxNotionalForRisk, margin * leverage)), 2);
   if (!Number.isFinite(notional) || notional < 10) return null;
 
   const quantity = notional / entry;
@@ -1037,8 +1075,9 @@ export function planTrade(
       portion: level.portion,
       rMultiple: level.rMultiple,
       hit: false,
+      isRunner: level.isRunner,
     }));
-    ladderDesc = `Targets ${ladder.map((l) => `${l.rMultiple}R`).join(' / ')} — ${ladder
+    ladderDesc = `Targets ${ladder.map((l) => `${l.rMultiple}R${l.isRunner ? ' (Runner 🏃)' : ''}`).join(' / ')} — ${ladder
       .map((l) => `${Math.round(l.portion * 100)}%`)
       .join(' / ')}`;
   }
@@ -1100,7 +1139,7 @@ export function planTrade(
 function targetLadder(
   signal: Signal,
   config: RiskConfig
-): { rMultiple: number; portion: number }[] {
+): { rMultiple: number; portion: number; isRunner?: boolean }[] {
   const profile = getCoinProfile(signal.symbol);
   const first = (config.firstTargetR && config.firstTargetR !== 1.5 && config.firstTargetR !== 1.2)
     ? config.firstTargetR
@@ -1111,6 +1150,31 @@ function targetLadder(
   const final = (config.finalTargetR && config.finalTargetR !== 3.6 && config.finalTargetR !== 3.5)
     ? config.finalTargetR
     : profile.finalTargetR;
+
+  const turbo = Boolean(config.turboMode);
+  const runnerTargetR = config.runnerTargetR ?? 10.0;
+
+  // Dynamic Altcoin Runners: Memes, AI coins, or strong breakout runners with high conviction
+  const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
+  const isRunnerCandidate =
+    config.dynamicRunnersEnabled !== false &&
+    !turbo &&
+    (profile.category === 'MEME' ||
+      profile.category === 'AI_TECH' ||
+      ((signal.alignedWithHigher || hasVolumeSpurt) && signal.confidence >= 0.70));
+
+  if (isRunnerCandidate) {
+    // 3-Rung Dynamic Runner Ladder:
+    // TP1: first target (1.8R - 2.0R, 40%) -> locks in initial gain & moves stop to break-even + fee buffer.
+    // TP2: intermediate target (3.5R - 4.5R, 35%) -> locks in solid second tranche profit.
+    // TP3: dynamic runner target (10.0R, 25%) -> rides the parabolic trend with Chandelier ATR trailing stop!
+    const midR = round(first + Math.max(1.5, (final - first) * 0.8), 1);
+    return [
+      { rMultiple: first, portion: 0.40 },
+      { rMultiple: midR, portion: 0.35 },
+      { rMultiple: runnerTargetR, portion: 0.25, isRunner: true },
+    ];
+  }
 
   const rem = round(1 - portion, 2);
   const halfRem = round(rem * 0.5, 2);
@@ -1143,7 +1207,6 @@ function targetLadder(
     ];
   }
 
-  const turbo = Boolean(config.turboMode);
   // Turbo banks more at the first rung so margin frees up sooner for the next
   // setup — the point of the mode on a small balance is capital velocity, not
   // riding every runner to the end.
@@ -1153,7 +1216,6 @@ function targetLadder(
   const turboFinal = Math.max(first + 0.3, turbo ? final * 0.6 : final);
 
   // Dynamic Altcoin Runners: on strong breakout setups or high conviction, elevate far target to 5.0R
-  const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
   const isHighConvictionBreakout =
     config.dynamicRunnersEnabled !== false &&
     !turbo &&

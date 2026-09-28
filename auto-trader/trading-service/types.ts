@@ -307,6 +307,8 @@ export type TakeProfitLevel = {
   hitAt?: number;
   /** Realised pnl booked at this level. */
   realised?: number;
+  /** True when this tranche is a dynamic trailing runner (aiming for 10R+). */
+  isRunner?: boolean;
 };
 
 /**
@@ -452,6 +454,8 @@ export type Position = {
   troughR?: number;
   /** Portfolio cluster risk multiplier applied at entry. */
   clusterRiskMultiplier?: number;
+  /** True when this position has reached runner territory and is actively trailed by Chandelier ATR. */
+  isRunner?: boolean;
 };
 
 /** Post-mortem diagnosis of a completed trade. */
@@ -824,6 +828,12 @@ export type RiskConfig = {
   newsAdversePositionProtect?: boolean;
   /** Pause new entries around high-impact macro-economic events (CPI, FOMC, NFP) (default true). */
   macroShieldEnabled?: boolean;
+  /** Far target in R for dynamic runner tranches on Memes/AI (default 10.0R). */
+  runnerTargetR?: number;
+  /** Auto-compounding: scale position margin dynamically with account equity growth (default true). */
+  compoundingEnabled?: boolean;
+  /** Anti-Martingale stake scaling: scale stake up after consecutive wins, drop to baseline on loss (default true). */
+  antiMartingaleEnabled?: boolean;
 };
 
 /**

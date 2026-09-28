@@ -443,3 +443,58 @@ describe('position derisking', () => {
     expect(isPositionDerisked({ ...openLong, side: 'SHORT', stopLoss: 99.9 }, feeRate)).toBe(false);
   });
 });
+
+describe('Dynamic Runners & Auto-Compounding', () => {
+  it('assigns 10R dynamic runner target to Meme and AI coins', () => {
+    const memeSignal: Signal = {
+      ...signal,
+      symbol: 'PEPE_USDT',
+      confidence: 0.75,
+      price: 0.00001,
+      atrPct: 0.03,
+      checks: [{ name: 'Volume Spurt', passed: true, detail: '2.5x volume' }],
+    };
+    const plan = planTrade(memeSignal, account, DEFAULT_RISK);
+    expect(plan).not.toBeNull();
+    const runnerTp = plan!.takeProfits.find((tp) => tp.isRunner);
+    expect(runnerTp).toBeDefined();
+    expect(runnerTp!.rMultiple).toBe(10.0);
+    expect(runnerTp!.portion).toBe(0.25);
+  });
+
+  it('compounds position margin on smaller accounts without premature clamping', () => {
+    const smallAccount: Account = {
+      ...account,
+      balance: 106,
+      equity: 106,
+    };
+    const memeSignal: Signal = {
+      ...signal,
+      symbol: 'DOGE_USDT',
+      confidence: 0.80,
+      price: 0.20,
+      atrPct: 0.02,
+    };
+    const plan = planTrade(memeSignal, smallAccount, { ...DEFAULT_RISK, minTradeMarginUsdt: 40 });
+    expect(plan).not.toBeNull();
+    expect(plan!.margin).toBeGreaterThanOrEqual(40);
+  });
+
+  it('scales up stake on consecutive win streaks (Anti-Martingale)', () => {
+    const smallAccount: Account = {
+      ...account,
+      balance: 200,
+      equity: 200,
+    };
+    const testSignal: Signal = {
+      ...signal,
+      confidence: 0.75,
+    };
+    const basePlan = planTrade(testSignal, smallAccount, DEFAULT_RISK, undefined, undefined, 0);
+    const streakPlan = planTrade(testSignal, smallAccount, DEFAULT_RISK, undefined, undefined, 3);
+    expect(basePlan).not.toBeNull();
+    expect(streakPlan).not.toBeNull();
+    expect(streakPlan!.margin).toBeGreaterThanOrEqual(basePlan!.margin);
+  });
+});
+

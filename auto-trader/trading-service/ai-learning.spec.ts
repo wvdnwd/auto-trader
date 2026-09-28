@@ -204,4 +204,15 @@ describe('AI Learning Module', () => {
       expect(res.reason).toContain('BTC');
     });
   });
+
+  describe('6. Offline Pre-trained Brain Loader', () => {
+    it('successfully loads pre-trained AI brain weights and profiles from disk', async () => {
+      const { loadPretrainedBrain } = await import('./ai-learning.js');
+      const brain = loadPretrainedBrain();
+      expect(brain).not.toBeNull();
+      expect(brain?.factorStats).toBeDefined();
+      expect(Object.keys(brain?.factorStats || {}).length).toBeGreaterThan(0);
+    });
+  });
 });
+

@@ -45,6 +45,7 @@ function parseArgs() {
   const args = process.argv.slice(2);
   let symbols = DEFAULT_SYMBOLS;
   let limit = 750;
+  let pushUrl = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--symbols' && args[i + 1]) {
@@ -53,9 +54,14 @@ function parseArgs() {
     } else if (args[i] === '--bars' && args[i + 1]) {
       limit = Math.min(1500, Math.max(100, Number(args[i + 1]) || 750));
       i++;
+    } else if (args[i] === '--push' && args[i + 1]) {
+      pushUrl = args[i + 1];
+      i++;
+    } else if (args[i] === '--sync') {
+      pushUrl = 'http://192.168.1.91:3000';
     }
   }
-  return { symbols, limit };
+  return { symbols, limit, pushUrl };
 }
 
 function toBinanceSymbol(sym) {
@@ -188,7 +194,7 @@ function round(val, dec = 2) {
 }
 
 async function trainBrain() {
-  const { symbols, limit } = parseArgs();
+  const { symbols, limit, pushUrl } = parseArgs();
   console.log('='.repeat(70));
   console.log('🧠 TRADERR AI BRAIN TRAINER — MULTI-TIMEFRAME KNOWLEDGE BUILDER');
   console.log('='.repeat(70));
@@ -506,6 +512,15 @@ async function trainBrain() {
   fs.writeFileSync(aiLearningPath, JSON.stringify(learnedPayload, null, 2), 'utf8');
   console.log(`\n💾 Kennis opgeslagen in: ${aiLearningPath}`);
 
+  // Persist into component package so it is tracked in git and automatically deployed with code
+  const componentBrainPath = path.resolve(process.cwd(), 'auto-trader/trading-service/ai-brain.json');
+  try {
+    fs.writeFileSync(componentBrainPath, JSON.stringify(learnedPayload, null, 2), 'utf8');
+    console.log(`💾 Gebundeld in component: ${componentBrainPath}`);
+  } catch (e) {
+    // non-fatal if path differs
+  }
+
   // Merge into store-main.json if present
   const storeMainPath = path.resolve(dataDir, 'store-main.json');
   if (fs.existsSync(storeMainPath)) {
@@ -522,11 +537,31 @@ async function trainBrain() {
     }
   }
 
+  // Push directly to Pi / remote node via HTTP endpoint if specified
+  if (pushUrl) {
+    console.log(`\n📡 Live synchroniseren naar trading node: ${pushUrl}...`);
+    try {
+      const endpoint = pushUrl.replace(/\/+$/, '') + '/learning/import-brain';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(learnedPayload),
+      });
+      if (res.ok) {
+        console.log(`✅ AI Brain direct live overgezet naar node (${pushUrl}) zonder herstart!`);
+      } else {
+        console.warn(`⚠️ Synchronisatie faalde (${res.status}): ${await res.text()}`);
+      }
+    } catch (err) {
+      console.warn(`⚠️ Kon niet direct verbinden met ${pushUrl}:`, err.message);
+    }
+  }
+
   console.log('\n' + '='.repeat(70));
   console.log('🚀 TRAINING VOLTOOID!');
-  console.log('Om deze AI kennis direct over te zetten naar je Raspberry Pi, voer uit:');
-  console.log('  scp data/store-main.json data/ai-learning.json wesleyvd23@192.168.1.91:~/traderr/data/');
-  console.log('Of draai gewoon deploy-to-pi.ps1 om de nieuwste code te publiceren!');
+  console.log('Gebruik een van de volgende opties om de AI kennis te laden:');
+  console.log('  1. Direct syncen via API: node scripts/train-brain.mjs --sync');
+  console.log('  2. Code deployen naar Pi: .\\deploy-to-pi.ps1');
   console.log('='.repeat(70) + '\n');
 }
 

@@ -1956,15 +1956,38 @@ export class Engine {
         }
       }
 
+      // Dynamic Runner Mode (10R+ Chandelier ATR trailing stop for Memes & AI coins)
+      const hasRunnerLevel = current.takeProfits?.some((tp) => tp.isRunner && !tp.hit);
+      const earlierTpsHit = (current.takeProfits?.filter((tp) => tp.hit).length ?? 0) >= 1;
+      const isMemeOrAi = profile.category === 'MEME' || profile.category === 'AI_TECH';
+      const posDir = direction(current);
+      const riskDist = current.initialRisk > 0 ? current.initialRisk : Math.abs(current.entry - current.stopLoss);
+      const currentR = riskDist > 0 ? (posDir * (price - current.entry)) / riskDist : 0;
+
       // Trailing stop: once the trade is far enough ahead, lock in and follow.
       const patch = trailPatch(current, price, this.exitTuning());
-      if (this.risk.dynamicChandelierTrailing !== false && (patch.trailingArmed || current.trailingArmed)) {
+
+      if (this.risk.dynamicRunnersEnabled !== false && !current.isRunner) {
+        if ((hasRunnerLevel && earlierTpsHit) || (isMemeOrAi && currentR >= 3.0)) {
+          patch.isRunner = true;
+          current.isRunner = true;
+          await this.log(
+            'trade',
+            `🏃 Dynamic Runner geactiveerd voor ${current.symbol}: eerdere doelen behaald — Chandelier ATR trailing stop volgt de resterende ${(
+              (((current.remainingQuantity ?? current.quantity) / current.quantity) * 100)
+            ).toFixed(0)}% positie richting 10R+!${current.live ? ' · 🔴 LIVE' : ''}`
+          );
+        }
+      }
+
+      if (this.risk.dynamicChandelierTrailing !== false && (patch.trailingArmed || current.trailingArmed || current.isRunner)) {
         const peak = patch.extreme ?? current.extreme ?? price;
         const currentAtr = latest?.atrPct
           ? latest.atrPct * price
           : (current.initialRisk ? current.initialRisk / (this.risk.atrStopMultiple || 2) : 0);
         if (currentAtr > 0) {
-          const chStop = chandelierStop(current, peak, currentAtr, 1.5);
+          const atrMult = isMemeOrAi ? 1.8 : 1.5;
+          const chStop = chandelierStop(current, peak, currentAtr, atrMult);
           const dir = direction(current);
           const existingStop = patch.stopLoss ?? current.stopLoss;
           const isChandelierBetter = dir === 1 ? chStop > existingStop : chStop < existingStop;
@@ -2406,6 +2429,23 @@ export class Engine {
       },
     }).catch(() => {});
 
+    // Compute win streak from recent closed trades for Anti-Martingale compounding
+    const closedRecent = await this.store.positions('CLOSED', 10);
+    let winStreak = 0;
+    for (const p of closedRecent) {
+      if ((p.pnl ?? 0) > 0 || p.postMortem?.verdict === 'WIN') {
+        winStreak++;
+      } else {
+        break;
+      }
+    }
+    if (winStreak >= 2) {
+      await this.log(
+        'info',
+        `🔥 Win Streak actief: ${winStreak} opeenvolgende winsten! Anti-Martingale schaling (+${Math.min(25, (winStreak - 1) * 10)}% inleg) geactiveerd.`
+      );
+    }
+
     for (const signal of prioritizedSignals) {
       if (slots <= 0 && overflow <= 0) break;
 
@@ -2781,9 +2821,9 @@ export class Engine {
         continue;
       }
       const detail = await this.market.contractDetail(signal.symbol).catch(() => null);
-      const plan = planTrade(signal, account, this.risk, FEE, detail?.maxLeverage);
+      const plan = planTrade(signal, account, this.risk, FEE, detail?.maxLeverage, winStreak);
       if (!plan) {
-        const rawPlan = planTrade(signal, account, { ...this.risk, minReturnOnMargin: 0 }, FEE, detail?.maxLeverage);
+        const rawPlan = planTrade(signal, account, { ...this.risk, minReturnOnMargin: 0 }, FEE, detail?.maxLeverage, winStreak);
         if (rawPlan && rawPlan.margin > 0) {
           const dir = signal.side === 'LONG' ? 1 : -1;
           const potProfit = rawPlan.takeProfits.reduce((acc, tp) => {
@@ -3939,7 +3979,7 @@ export class Engine {
       this.account(),
       this.market.contractDetail(executionSignal.symbol).catch(() => null),
     ]);
-    const executionPlan = planTrade(executionSignal, account, this.risk, FEE, detail?.maxLeverage);
+    const executionPlan = planTrade(executionSignal, account, this.risk, FEE, detail?.maxLeverage, 0);
     if (
       !executionPlan || executionPlan.symbol !== signal.symbol || executionPlan.side !== signal.side ||
       executionPlan.entry !== fresh || !this.planMatchesAcceptedEntry(executionPlan, fresh, account.equity)

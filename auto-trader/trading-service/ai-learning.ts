@@ -402,3 +402,45 @@ export function evaluateClusterRisk(
     reason: reasons.length > 0 ? reasons.join('; ') : undefined,
   };
 }
+
+// ============================================================================
+// 6. OFFLINE / PRETRAINED AI BRAIN LOADER
+// ============================================================================
+
+import fs from 'node:fs';
+import path from 'node:path';
+import type { LearningState } from './types.js';
+
+/**
+ * Load offline pre-trained AI brain weights, session edge matrix, and coin DNA profiles.
+ * Used when running on Raspberry Pi or starting fresh before live trades have accumulated.
+ */
+export function loadPretrainedBrain(): Partial<LearningState> | null {
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'auto-trader/trading-service/ai-brain.json'),
+    path.resolve(process.cwd(), 'data/ai-learning.json'),
+    path.resolve(process.cwd(), 'data/store-main.json'),
+    path.resolve(process.cwd(), 'ai-brain.json'),
+  ];
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const raw = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      const payload = raw?.learning ? raw.learning : raw;
+      if (payload && (payload.factorStats || payload.sessionStats || payload.coinDNA)) {
+        return {
+          factorStats: payload.factorStats || {},
+          penalties: payload.penalties || {},
+          sessionStats: payload.sessionStats || {},
+          coinDNA: payload.coinDNA || {},
+          mfeMaeStats: payload.mfeMaeStats,
+          clusterStatus: payload.clusterStatus,
+        };
+      }
+    } catch {
+      // ignore and check next path
+    }
+  }
+  return null;
+}

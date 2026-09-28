@@ -3,6 +3,7 @@ import path from 'node:path';
 import mongoose from 'mongoose';
 import { AccountModel, EventModel, ExchangeCredentialsModel, PositionModel, ScoutModel } from './models.js';
 import type { EngineEvent, LearningState, Position, Side } from './types.js';
+import { loadPretrainedBrain } from './ai-learning.js';
 
 const STARTING_BALANCE = Number(process.env.PAPER_START_BALANCE || 10_000);
 
@@ -98,7 +99,20 @@ export class Store {
   private loadMemoryState(): void {
     if (process.env.NODE_ENV === 'test' || process.env.VITEST) return;
     const p = getStoreStateFilePath();
-    if (!fs.existsSync(p)) return;
+    if (!fs.existsSync(p)) {
+      const pretrained = loadPretrainedBrain();
+      if (pretrained) {
+        this.memory.learning = {
+          ...this.memory.learning,
+          ...pretrained,
+          factorStats: { ...this.memory.learning.factorStats, ...(pretrained.factorStats || {}) },
+          sessionStats: { ...this.memory.learning.sessionStats, ...(pretrained.sessionStats || {}) },
+          coinDNA: { ...this.memory.learning.coinDNA, ...(pretrained.coinDNA || {}) },
+          mfeMaeStats: pretrained.mfeMaeStats ?? this.memory.learning.mfeMaeStats,
+        };
+      }
+      return;
+    }
     const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown>;
     if (!isRecord(raw)) {
       throw new Error('Stored trading state is invalid');
@@ -177,6 +191,20 @@ export class Store {
           ? { ...this.memory.learning.mfeMaeStats, ...learning.mfeMaeStats }
           : this.memory.learning.mfeMaeStats,
       };
+    }
+    // Seed with offline pre-trained AI brain if factor stats are still empty
+    if (!this.memory.learning.factorStats || Object.keys(this.memory.learning.factorStats).length === 0) {
+      const pretrained = loadPretrainedBrain();
+      if (pretrained) {
+        this.memory.learning = {
+          ...this.memory.learning,
+          ...pretrained,
+          factorStats: { ...this.memory.learning.factorStats, ...(pretrained.factorStats || {}) },
+          sessionStats: { ...this.memory.learning.sessionStats, ...(pretrained.sessionStats || {}) },
+          coinDNA: { ...this.memory.learning.coinDNA, ...(pretrained.coinDNA || {}) },
+          mfeMaeStats: pretrained.mfeMaeStats ?? this.memory.learning.mfeMaeStats,
+        };
+      }
     }
   }
 

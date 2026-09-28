@@ -636,6 +636,25 @@ export class TradingService {
     return this.scout.dismiss(symbol);
   }
 
+  /**
+   * Import pre-trained AI brain weights, session statistics, and coin DNA into the live store.
+   */
+  async importLearningBrain(payload: Partial<LearningState>): Promise<void> {
+    await this.store.updateLearning(payload);
+    await this.store.addEvent({
+      at: Date.now(),
+      level: 'info',
+      message: `🧠 AI Brain model geïmporteerd (${Object.keys(payload.factorStats || {}).length} factoren, ${Object.keys(payload.coinDNA || {}).length} Coin DNA profielen)`,
+    });
+  }
+
+  /**
+   * Return the current adaptive self-learning state.
+   */
+  async learningState(): Promise<LearningState> {
+    return this.store.learning();
+  }
+
   /** Disabled: order probes bypass the adapter's live-execution gate. */
   async placeTestOrder(
     symbol: string,

@@ -381,6 +381,28 @@ export function run() {
     }
   });
 
+  app.post('/learning/import-brain', async (req, res) => {
+    try {
+      const payload = req.body;
+      if (!payload || typeof payload !== 'object') {
+        res.status(400).json({ error: 'Ongeldige brain payload' });
+        return;
+      }
+      await serviceFor(res).importLearningBrain(payload);
+      res.json({ ok: true, message: 'AI Brain model succesvol geïmporteerd' });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get('/learning/brain', async (_req, res) => {
+    try {
+      res.json(await serviceFor(res).learningState());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   app.post('/reset', async (_req, res) => {
     try {
       await serviceFor(res).reset();

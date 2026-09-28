@@ -1,0 +1,205 @@
+{
+  "factorStats": {
+    "Volume Spurt (Coin in Play)": {
+      "wins": 23,
+      "losses": 22,
+      "netR": -1.58,
+      "weightMultiplier": 1
+    },
+    "Fibonacci Golden Zone": {
+      "wins": 13,
+      "losses": 14,
+      "netR": -1.22,
+      "weightMultiplier": 0.99
+    },
+    "Sniper Pullback": {
+      "wins": 27,
+      "losses": 20,
+      "netR": 4,
+      "weightMultiplier": 1.04
+    },
+    "RSI Divergentie": {
+      "wins": 0,
+      "losses": 0,
+      "netR": 0,
+      "weightMultiplier": 1
+    },
+    "Asian Session Sweep": {
+      "wins": 10,
+      "losses": 5,
+      "netR": 3.78,
+      "weightMultiplier": 1.09
+    },
+    "15m Ommekeer-bevestiging": {
+      "wins": 10,
+      "losses": 19,
+      "netR": -10.66,
+      "weightMultiplier": 0.9
+    },
+    "Smart Pyramiding (2e tranche)": {
+      "wins": 0,
+      "losses": 0,
+      "netR": 0,
+      "weightMultiplier": 1
+    }
+  },
+  "penalties": {},
+  "sessionStats": {
+    "London Open (Europe)": {
+      "session": "London Open (Europe)",
+      "wins": 17,
+      "losses": 15,
+      "netR": -0.04,
+      "winRate": 0.53,
+      "edgeMultiplier": 1
+    },
+    "Asian (Tokyo/Sydney)": {
+      "session": "Asian (Tokyo/Sydney)",
+      "wins": 9,
+      "losses": 9,
+      "netR": -0.24,
+      "winRate": 0.5,
+      "edgeMultiplier": 1
+    },
+    "New York (US Overlap)": {
+      "session": "New York (US Overlap)",
+      "wins": 8,
+      "losses": 10,
+      "netR": -3.1,
+      "winRate": 0.44,
+      "edgeMultiplier": 1
+    },
+    "Late US / Pacific Transition": {
+      "session": "Late US / Pacific Transition",
+      "wins": 5,
+      "losses": 3,
+      "netR": 1.74,
+      "winRate": 0.63,
+      "edgeMultiplier": 1.15
+    }
+  },
+  "coinDNA": {
+    "BTC_USDT": {
+      "symbol": "BTC_USDT",
+      "totalTrades": 11,
+      "wins": 5,
+      "losses": 6,
+      "netR": -0.12,
+      "winRate": 0.45,
+      "avgDurationMinutes": 660,
+      "avgMfeR": 1.66,
+      "avgMaeR": -0.79,
+      "volatilityTier": "MAJOR",
+      "stopLossMultiplier": 1,
+      "takeProfitMultiplier": 0.85
+    },
+    "ETH_USDT": {
+      "symbol": "ETH_USDT",
+      "totalTrades": 11,
+      "wins": 4,
+      "losses": 7,
+      "netR": -4.12,
+      "winRate": 0.36,
+      "avgDurationMinutes": 584,
+      "avgMfeR": 1.03,
+      "avgMaeR": -0.96,
+      "volatilityTier": "MAJOR",
+      "stopLossMultiplier": 1.25,
+      "takeProfitMultiplier": 0.85
+    },
+    "SOL_USDT": {
+      "symbol": "SOL_USDT",
+      "totalTrades": 9,
+      "wins": 6,
+      "losses": 3,
+      "netR": 2.9,
+      "winRate": 0.67,
+      "avgDurationMinutes": 1147,
+      "avgMfeR": 2,
+      "avgMaeR": -0.89,
+      "volatilityTier": "MAJOR",
+      "stopLossMultiplier": 1.25,
+      "takeProfitMultiplier": 1
+    },
+    "DOGE_USDT": {
+      "symbol": "DOGE_USDT",
+      "totalTrades": 10,
+      "wins": 5,
+      "losses": 5,
+      "netR": -1.4,
+      "winRate": 0.5,
+      "avgDurationMinutes": 325,
+      "avgMfeR": 1.04,
+      "avgMaeR": -0.92,
+      "volatilityTier": "MEME",
+      "stopLossMultiplier": 1.25,
+      "takeProfitMultiplier": 0.85
+    },
+    "PEPE_USDT": {
+      "symbol": "PEPE_USDT",
+      "totalTrades": 9,
+      "wins": 4,
+      "losses": 5,
+      "netR": -0.98,
+      "winRate": 0.44,
+      "avgDurationMinutes": 314,
+      "avgMfeR": 1.17,
+      "avgMaeR": -0.78,
+      "volatilityTier": "MEME",
+      "stopLossMultiplier": 1.25,
+      "takeProfitMultiplier": 0.85
+    },
+    "NEAR_USDT": {
+      "symbol": "NEAR_USDT",
+      "totalTrades": 8,
+      "wins": 6,
+      "losses": 2,
+      "netR": 4.6,
+      "winRate": 0.75,
+      "avgDurationMinutes": 825,
+      "avgMfeR": 2,
+      "avgMaeR": -0.72,
+      "volatilityTier": "ALT",
+      "stopLossMultiplier": 1,
+      "takeProfitMultiplier": 1
+    },
+    "LINK_USDT": {
+      "symbol": "LINK_USDT",
+      "totalTrades": 9,
+      "wins": 5,
+      "losses": 4,
+      "netR": -0.4,
+      "winRate": 0.56,
+      "avgDurationMinutes": 620,
+      "avgMfeR": 1.17,
+      "avgMaeR": -0.96,
+      "volatilityTier": "ALT",
+      "stopLossMultiplier": 1.25,
+      "takeProfitMultiplier": 0.85
+    },
+    "BNB_USDT": {
+      "symbol": "BNB_USDT",
+      "totalTrades": 9,
+      "wins": 4,
+      "losses": 5,
+      "netR": -2.12,
+      "winRate": 0.44,
+      "avgDurationMinutes": 1053,
+      "avgMfeR": 1.18,
+      "avgMaeR": -0.89,
+      "volatilityTier": "ALT",
+      "stopLossMultiplier": 1.25,
+      "takeProfitMultiplier": 0.85
+    }
+  },
+  "mfeMaeStats": {
+    "totalTracked": 76,
+    "avgMfeR": 1.39,
+    "avgMaeR": 0.87,
+    "medianMfeR": 1.39,
+    "optimalTp1R": 1.2,
+    "optimalTp2R": 2.2
+  },
+  "updatedAt": 1790596514482,
+  "tradesTrained": 76
+}
