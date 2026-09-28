@@ -21,7 +21,7 @@ import {
   trimForRegimeFlip,
 } from './exits.js';
 import { atr, rsi } from './indicators.js';
-import { LIVE_EXECUTION_DISABLED_REASON, MexcExchangeAdapter, type IExchangeAdapter } from './exchange-adapter.js';
+import { MexcExchangeAdapter, type IExchangeAdapter } from './exchange-adapter.js';
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { notify } from './notifier.js';
 import { rankCandidates } from './candidate-ranking.js';
@@ -96,22 +96,15 @@ export const MEME_UNIVERSE = [
   'BRETT_USDT',
   'MEW_USDT',
   'GOAT_USDT',
-  '1000000MOG_USDT',
   'TRUMP_USDT',
-  'FLOKI_USDT',
 ];
 
 /** Gaming & Metaverse — high-beta narrative coins, ATR-based stops */
 export const GAMING_UNIVERSE = [
   'AXS_USDT',
   'SAND_USDT',
-  'MANA_USDT',
   'IMX_USDT',
   'GALA_USDT',
-  'ENJ_USDT',
-  'BEAM_USDT',
-  'RON_USDT',
-  'MAGIC_USDT',
   'YGG_USDT',
 ];
 
@@ -141,7 +134,6 @@ export const LAYER2_UNIVERSE = [
   'STRK_USDT',
   'POL_USDT',
   'MANTA_USDT',
-  'METIS_USDT',
 ];
 
 export const CORE_UNIVERSE = [
@@ -182,7 +174,6 @@ export const CORE_UNIVERSE = [
   'STRK_USDT',
   'POL_USDT',
   'MANTA_USDT',
-  'METIS_USDT',
 
   // ── DeFi ─────────────────────────────────────────────────────────────────
   'LINK_USDT',
@@ -208,20 +199,14 @@ export const CORE_UNIVERSE = [
   'RENDER_USDT',
   'WLD_USDT',
   'VIRTUAL_USDT',
-  'ARKM_USDT',
   'AI16Z_USDT',
   'AIXBT_USDT',
 
   // ── Gaming / Metaverse ────────────────────────────────────────────────────
   'AXS_USDT',
   'SAND_USDT',
-  'MANA_USDT',
   'IMX_USDT',
   'GALA_USDT',
-  'ENJ_USDT',
-  'BEAM_USDT',
-  'RON_USDT',
-  'MAGIC_USDT',
   'YGG_USDT',
 
   // ── Meme coins ────────────────────────────────────────────────────────────
@@ -240,9 +225,7 @@ export const CORE_UNIVERSE = [
   'BRETT_USDT',
   'MEW_USDT',
   'GOAT_USDT',
-  '1000000MOG_USDT',
   'TRUMP_USDT',
-  'FLOKI_USDT',
 
   // ── Legacy Low-Leverage Alts ──────────────────────────────────────────────
   'DASH_USDT',
@@ -892,10 +875,6 @@ export class Engine {
     if (this.busy || this.resetting) return;
     this.busy = true;
     try {
-      if (!this.liveExecutionWarningLogged) {
-        this.liveExecutionWarningLogged = true;
-        await this.log('warn', LIVE_EXECUTION_DISABLED_REASON);
-      }
       await this.refreshMarks();
       await this.reconcileLivePositions();
       await this.manageOpenPositions();
@@ -3300,7 +3279,9 @@ export class Engine {
         msg.includes('empty') ||
         msg.includes('zero') ||
         msg.includes('not exist') ||
-        msg.includes('position is zero')
+        msg.includes('position is zero') ||
+        msg.includes('would increase position') ||
+        msg.includes('reduce only')
       ) {
         await this.log('warn', `Live positie ${position.symbol} bestaat niet meer op exchange — lokaal sluiten wordt voltooid.`);
         return true;
@@ -3753,7 +3734,8 @@ export class Engine {
   private async reportLiveExecutionBlocked(): Promise<void> {
     if (this.liveExecutionWarningLogged) return;
     this.liveExecutionWarningLogged = true;
-    await this.log('warn', LIVE_EXECUTION_DISABLED_REASON);
+    const reason = this.exchange.status?.()?.executionDisabledReason || 'Live trading staat momenteel uitgeschakeld';
+    await this.log('warn', reason);
   }
 
   private async log(level: EngineEvent['level'], message: string): Promise<void> {

@@ -152,12 +152,19 @@ export class Store {
         scaleInCount: position.scaleInCount ?? 1,
       }));
     }
-    if (Array.isArray(raw.events)) this.memory.events = raw.events as EngineEvent[];
-    if (raw.account && typeof raw.account === 'object') {
-      this.memory.account = { ...this.memory.account, ...raw.account } as AccountState;
+    if (Array.isArray(raw.events)) {
+      this.memory.events = (raw.events as EngineEvent[]).filter(
+        (e) => !e.message?.includes('adapter exposes order acknowledgements')
+      );
     }
     if (raw.scout && typeof raw.scout === 'object') {
-      this.memory.scout = { ...this.memory.scout, ...raw.scout } as ScoutState;
+      const scoutData = { ...raw.scout } as ScoutState;
+      if (Array.isArray(scoutData.universeExtras)) {
+        scoutData.universeExtras = scoutData.universeExtras.filter(
+          (sym) => !['METIS_USDT', 'ARKM_USDT', 'MANA_USDT', 'ENJ_USDT', 'BEAM_USDT', 'RON_USDT', 'MAGIC_USDT', '1000000MOG_USDT', 'FLOKI_USDT', 'PHA_USDT', 'PONS_USDT'].includes(sym)
+        );
+      }
+      this.memory.scout = { ...this.memory.scout, ...scoutData } as ScoutState;
     }
     if (raw.learning && typeof raw.learning === 'object') {
       const learning = raw.learning as Partial<LearningState>;

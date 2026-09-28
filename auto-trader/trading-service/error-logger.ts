@@ -39,7 +39,9 @@ export class ErrorLogger {
       const raw = fs.readFileSync(p, 'utf8');
       const data = JSON.parse(raw);
       if (Array.isArray(data.errors)) {
-        this.errors = data.errors.slice(-this.maxErrors);
+        this.errors = data.errors
+          .filter((e: any) => !e.message?.includes('the adapter exposes order acknowledgements'))
+          .slice(-this.maxErrors);
         this.totalCount = typeof data.totalCount === 'number' ? data.totalCount : this.errors.length;
       }
     } catch {
