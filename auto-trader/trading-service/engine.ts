@@ -493,6 +493,9 @@ export class Engine {
           reason: val.reason,
           remainingSec: Math.ceil((val.until - now) / 1000),
         };
+      } else {
+        // Sweep expired entries so the Map cannot grow without bound.
+        this.cooldowns.delete(key);
       }
     }
     return result;
@@ -706,7 +709,7 @@ export class Engine {
         : (this.risk.ignoreDailyLimit ?? false),
       rsFilterEnabled: merged.rsFilterEnabled !== undefined
         ? Boolean(merged.rsFilterEnabled)
-        : (this.risk.rsFilterEnabled ?? false),
+        : (this.risk.rsFilterEnabled ?? true),
       reversal15mRequired: merged.reversal15mRequired !== undefined
         ? Boolean(merged.reversal15mRequired)
         : (this.risk.reversal15mRequired ?? true),
@@ -2311,7 +2314,7 @@ export class Engine {
     const dayPnlPct = dayStart ? (account.equity - dayStart) / dayStart : 0;
 
     // Calculate realised loss today from closed positions to prevent false halts from open floating positions
-    const closed = await this.store.positions('CLOSED', 50);
+    const closed = await this.store.positions('CLOSED', 500);
     const startOfDayTs = new Date(new Date().setUTCHours(0, 0, 0, 0)).getTime();
     const closedToday = closed.filter((p) => (p.closedAt ?? 0) >= startOfDayTs);
     const realisedLossToday = closedToday.reduce((sum, p) => sum + Math.min(0, p.pnl || 0), 0);
@@ -2688,13 +2691,24 @@ export class Engine {
         continue;
       }
 
-      // Spread & Slippage Shield: reject tokens with excessive bid-ask spread
-      if (this.risk.spreadShieldEnabled !== false && ticker?.spreadPct !== undefined) {
+      // Spread & Slippage Shield: reject tokens with excessive bid-ask spread.
+      // In live mode missing spread data fails closed so a real order is never
+      // routed blind; the paper path stays permissive when the ticker is absent.
+      if (this.risk.spreadShieldEnabled !== false) {
         const maxSpread = this.risk.maxSpreadPct ?? 0.0015;
-        if (ticker.spreadPct > maxSpread) {
+        const liveEntry = this.exchange.status().enabled;
+        if (ticker?.spreadPct !== undefined) {
+          if (ticker.spreadPct > maxSpread) {
+            await this.logSkip(
+              signal.symbol,
+              `Spread te wijd (${(ticker.spreadPct * 100).toFixed(2)}% > max ${(maxSpread * 100).toFixed(2)}%) — liquiditeit onvoldoende, risico op slippage`
+            );
+            continue;
+          }
+        } else if (liveEntry) {
           await this.logSkip(
             signal.symbol,
-            `Spread te wijd (${(ticker.spreadPct * 100).toFixed(2)}% > max ${(maxSpread * 100).toFixed(2)}%) — liquiditeit onvoldoende, risico op slippage`
+            `Spread onbekend (ticker/spreadPct ontbreekt) — live entry gefaald-gesloten, risico op slippage`
           );
           continue;
         }

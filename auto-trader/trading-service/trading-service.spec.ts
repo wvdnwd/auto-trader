@@ -25,6 +25,7 @@ class FakeMarket {
       quoteVolume24h: 100_000_000,
       changeRate24h: 0.2,
       fundingRate: 0,
+      spreadPct: 0.0005,
     }));
   }
 

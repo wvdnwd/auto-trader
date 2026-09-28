@@ -21,6 +21,8 @@ export type ContractDetail = {
 const RETRYABLE_CODES = new Set([429, 500, 502, 503, 510]);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const HISTORY_CACHE_LIMIT = 200;
+const CANDLE_CACHE_LIMIT = 400;
+const CONTRACT_CACHE_LIMIT = 400;
 
 const MAX_CONCURRENT_REQUESTS = 2;
 const DISPATCH_GAP_MS = 250;
@@ -274,6 +276,28 @@ export class MarketData {
     return this.candleTtlMs;
   }
 
+  /** Store candles under a bounded cache, evicting the least recently written key. */
+  private setCandleCache(key: string, entry: { at: number; data: Candle[] }): void {
+    if (this.candleCache.has(key)) {
+      this.candleCache.delete(key);
+    } else if (this.candleCache.size >= CANDLE_CACHE_LIMIT) {
+      const oldestKey = this.candleCache.keys().next().value;
+      if (oldestKey !== undefined) this.candleCache.delete(oldestKey);
+    }
+    this.candleCache.set(key, entry);
+  }
+
+  /** Store a contract spec under a bounded cache, evicting the least recently written key. */
+  private setContractCache(symbol: string, detail: ContractDetail): void {
+    if (this.contractCache.has(symbol)) {
+      this.contractCache.delete(symbol);
+    } else if (this.contractCache.size >= CONTRACT_CACHE_LIMIT) {
+      const oldestKey = this.contractCache.keys().next().value;
+      if (oldestKey !== undefined) this.contractCache.delete(oldestKey);
+    }
+    this.contractCache.set(symbol, detail);
+  }
+
   /**
    * Fetch perpetual tickers, cached for a short TTL.
    * Source is Hyperliquid decentralized perpetuals.
@@ -408,7 +432,7 @@ export class MarketData {
       priceScale: Math.min(8, Math.max(2, szDecimals + 2)),
       maxLeverage,
     };
-    this.contractCache.set(symbol, detail);
+    this.setContractCache(symbol, detail);
     return detail;
   }
 
@@ -430,13 +454,13 @@ export class MarketData {
         // 1. High-capacity public providers (Binance Futures -> Bybit) to eliminate Hyperliquid rate limits
         const binanceData = await fetchBinanceCandles(symbol, interval);
         if (binanceData && binanceData.length >= 20) {
-          this.candleCache.set(key, { at: Date.now(), data: binanceData });
+          this.setCandleCache(key, { at: Date.now(), data: binanceData });
           return binanceData;
         }
 
         const bybitData = await fetchBybitCandles(symbol, interval);
         if (bybitData && bybitData.length >= 20) {
-          this.candleCache.set(key, { at: Date.now(), data: bybitData });
+          this.setCandleCache(key, { at: Date.now(), data: bybitData });
           return bybitData;
         }
 
@@ -476,7 +500,7 @@ export class MarketData {
           .sort((a, b) => a.time - b.time);
 
         if (data.length) {
-          this.candleCache.set(key, { at: Date.now(), data });
+          this.setCandleCache(key, { at: Date.now(), data });
           return data;
         }
 

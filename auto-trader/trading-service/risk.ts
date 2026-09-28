@@ -55,7 +55,7 @@ export const DEFAULT_RISK: RiskConfig = {
   highConvictionConfidence: 0.70,
   maxOverflowPositions: 0,
   minTradeMarginUsdt: 50,
-  rsFilterEnabled: false,
+  rsFilterEnabled: true,
   maxFundingRateLong: 0.0008,
   minFundingRateShort: -0.0008,
   reversal15mRequired: true,

@@ -7,6 +7,9 @@ import { loadPretrainedBrain } from './ai-learning.js';
 
 const STARTING_BALANCE = Number(process.env.PAPER_START_BALANCE || 10_000);
 
+/** Closed positions retained in the in-memory mirror; OPEN positions are always kept. */
+const MAX_MEMORY_CLOSED_POSITIONS = 1000;
+
 export function getStoreStateFilePath(): string {
   const dir = path.resolve(process.cwd(), 'data');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -225,6 +228,24 @@ export class Store {
       this.failureHandler?.();
       throw new Error('Trading storage write failed');
     }
+  }
+
+  /**
+   * Keep the in-memory mirror bounded: retain every OPEN position plus only the
+   * most recent {@link MAX_MEMORY_CLOSED_POSITIONS} closed trades.
+   */
+  private trimMemoryPositions(): void {
+    let closedCount = 0;
+    for (const position of this.memory.positions) {
+      if (position.status === 'CLOSED') closedCount += 1;
+    }
+    if (closedCount <= MAX_MEMORY_CLOSED_POSITIONS) return;
+    const open = this.memory.positions.filter((p) => p.status !== 'CLOSED');
+    const closed = this.memory.positions
+      .filter((p) => p.status === 'CLOSED')
+      .sort((a, b) => (b.closedAt || b.openedAt) - (a.closedAt || a.openedAt))
+      .slice(0, MAX_MEMORY_CLOSED_POSITIONS);
+    this.memory.positions = [...closed, ...open];
   }
 
   /**
@@ -458,6 +479,7 @@ export class Store {
     this.assertHealthy();
     if (!this.connected) {
       this.memory.positions.push(position);
+      this.trimMemoryPositions();
       this.persistMemoryState();
       return;
     }
@@ -499,6 +521,7 @@ export class Store {
       const idx = this.memory.positions.findIndex((p) => p.id === id && p.status === 'OPEN');
       if (idx < 0) return false;
       this.memory.positions[idx] = { ...this.memory.positions[idx], ...patch, status: 'CLOSED' };
+      this.trimMemoryPositions();
       this.persistMemoryState();
       return true;
     }
