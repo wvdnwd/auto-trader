@@ -870,7 +870,8 @@ export function planTrade(
   config: RiskConfig,
   feeRate = FEE,
   exchangeMaxLeverage?: number,
-  winStreak = 0
+  winStreak = 0,
+  lossStreak = 0
 ): TradePlan | null {
   if (!Number.isFinite(signal.confidence) || signal.confidence < 0 || signal.confidence > 1) return null;
   if (!Number.isFinite(signal.price) || signal.price <= 0) return null;
@@ -1008,6 +1009,10 @@ export function planTrade(
     if (config.antiMartingaleEnabled !== false && winStreak >= 2) {
       const streakBonus = Math.min(0.25, (winStreak - 1) * 0.10);
       stakePct = Math.min(config.maxTotalMarginPct / Math.min(2, config.maxOpenPositions), stakePct * (1 + streakBonus));
+    } else if (lossStreak === 2) {
+      stakePct *= 0.65; // Defensive throttle after 2 consecutive losses
+    } else if (lossStreak >= 3) {
+      stakePct *= 0.45; // Capital preservation mode after 3+ consecutive losses
     }
 
     const leverageAdjustedStakePct = stakePct * Math.min(1, baselineLeverage / leverage);

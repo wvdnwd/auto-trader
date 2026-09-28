@@ -963,17 +963,23 @@ export class Engine {
           const balance = usdt.available;
           const equity = usdt.equity;
           const usedMargin = usdt.frozen;
-          if (!this.liveStartingBalance) this.liveStartingBalance = equity;
+          if (!this.liveStartingBalance || this.liveStartingBalance < equity * 0.4) {
+            this.liveStartingBalance = equity;
+          }
           if (equity > this.livePeakEquity) this.livePeakEquity = equity;
           const peakEquity = this.livePeakEquity || equity;
           const drawdownPct = peakEquity > 0 ? Math.max(0, (peakEquity - equity) / peakEquity) : 0;
           const today = new Date().toISOString().slice(0, 10);
+          if (this.liveDayKey !== today || !this.liveDayStartEquity || this.liveDayStartEquity < equity * 0.5) {
+            this.liveDayKey = today;
+            this.liveDayStartEquity = equity;
+          }
           void this.store.saveAccount({
             balance,
             startingBalance: this.liveStartingBalance,
             realisedPnl: 0,
             peakEquity,
-            dayStartEquity: this.liveDayStartEquity || equity,
+            dayStartEquity: this.liveDayStartEquity,
             dayKey: today,
           }).catch(() => {});
           return {
@@ -1897,12 +1903,12 @@ export class Engine {
         }
       }
 
+      let rsiVal: number | undefined;
       // Parabolic Blow-Off Top / Climax Exit:
       // When extreme RSI (>82 for Long, <18 for Short) combines with volume surge (>= 2.2x avg),
       // trim 25% of the position immediately at market to harvest the blow-off peak before the dump.
       if (this.risk.climaxExitEnabled !== false && !current.climaxTrimmed) {
         let candlesForClimax: Candle[] = [];
-        let rsiVal: number | undefined;
         try {
           candlesForClimax = await this.market.candles(current.symbol, ENTRY_INTERVAL);
           if (candlesForClimax.length >= 15) {
@@ -1986,7 +1992,18 @@ export class Engine {
           ? latest.atrPct * price
           : (current.initialRisk ? current.initialRisk / (this.risk.atrStopMultiple || 2) : 0);
         if (currentAtr > 0) {
-          const atrMult = isMemeOrAi ? 1.8 : 1.5;
+          if (rsiVal === undefined) {
+            try {
+              const candles = await this.market.candles(current.symbol, ENTRY_INTERVAL);
+              if (candles.length >= 15) {
+                rsiVal = rsi(candles.map((c) => c.close), 14);
+              }
+            } catch {
+              // non-fatal
+            }
+          }
+          const isParabolicClimax = Boolean(rsiVal && (rsiVal > 80 || (isMemeOrAi && rsiVal > 78)));
+          const atrMult = isParabolicClimax ? 0.8 : (isMemeOrAi ? 1.8 : 1.5);
           const chStop = chandelierStop(current, peak, currentAtr, atrMult);
           const dir = direction(current);
           const existingStop = patch.stopLoss ?? current.stopLoss;
@@ -1994,6 +2011,12 @@ export class Engine {
           if (isChandelierBetter) {
             patch.stopLoss = chStop;
             patch.trailingArmed = true;
+            if (isParabolicClimax) {
+              void this.log(
+                'info',
+                `🚀 Parabolische climax voor ${current.symbol} (RSI ${rsiVal?.toFixed(0)}) — Chandelier trailing stop strakker aangetrokken (0.8x ATR) om piek af te romen.`
+              );
+            }
           }
         }
       }
@@ -2276,7 +2299,7 @@ export class Engine {
     const today = new Date().toISOString().slice(0, 10);
     let dayStart: number;
     if (this.exchange.status().enabled) {
-      if (this.liveDayKey !== today || !this.liveDayStartEquity) {
+      if (this.liveDayKey !== today || !this.liveDayStartEquity || this.liveDayStartEquity < account.equity * 0.5) {
         this.liveDayKey = today;
         this.liveDayStartEquity = account.equity;
       }
@@ -2429,20 +2452,29 @@ export class Engine {
       },
     }).catch(() => {});
 
-    // Compute win streak from recent closed trades for Anti-Martingale compounding
+    // Compute win streak and loss streak from recent closed trades for Anti-Martingale compounding & loss throttle
     const closedRecent = await this.store.positions('CLOSED', 10);
     let winStreak = 0;
+    let lossStreak = 0;
     for (const p of closedRecent) {
-      if ((p.pnl ?? 0) > 0 || p.postMortem?.verdict === 'WIN') {
-        winStreak++;
+      const isWin = (p.pnl ?? 0) > 0 || p.postMortem?.verdict === 'WIN';
+      if (isWin) {
+        if (lossStreak === 0) winStreak++;
+        else break;
       } else {
-        break;
+        if (winStreak === 0) lossStreak++;
+        else break;
       }
     }
     if (winStreak >= 2) {
       await this.log(
         'info',
         `🔥 Win Streak actief: ${winStreak} opeenvolgende winsten! Anti-Martingale schaling (+${Math.min(25, (winStreak - 1) * 10)}% inleg) geactiveerd.`
+      );
+    } else if (lossStreak >= 2) {
+      await this.log(
+        'info',
+        `🛡️ Loss Streak bescherming actief: ${lossStreak} opeenvolgende verliezen. Inleg tijdelijk verlaagd (${lossStreak === 2 ? '-35%' : '-55%'}) om kapitaal te beschermen.`
       );
     }
 
@@ -2821,9 +2853,9 @@ export class Engine {
         continue;
       }
       const detail = await this.market.contractDetail(signal.symbol).catch(() => null);
-      const plan = planTrade(signal, account, this.risk, FEE, detail?.maxLeverage, winStreak);
+      const plan = planTrade(signal, account, this.risk, FEE, detail?.maxLeverage, winStreak, lossStreak);
       if (!plan) {
-        const rawPlan = planTrade(signal, account, { ...this.risk, minReturnOnMargin: 0 }, FEE, detail?.maxLeverage, winStreak);
+        const rawPlan = planTrade(signal, account, { ...this.risk, minReturnOnMargin: 0 }, FEE, detail?.maxLeverage, winStreak, lossStreak);
         if (rawPlan && rawPlan.margin > 0) {
           const dir = signal.side === 'LONG' ? 1 : -1;
           const potProfit = rawPlan.takeProfits.reduce((acc, tp) => {
@@ -3161,14 +3193,30 @@ export class Engine {
     }
 
     const currentSession = getMarketSession(new Date()).session;
+    const btcTicker = tickerMap.get('BTC_USDT');
+    const btcChange = btcTicker?.changeRate24h ?? 0;
+
     return rankCandidates(
       results
         .filter((s): s is Signal => s !== null)
+        .filter((s) => {
+          // Relative strength gate: reject LONGs if coin is lagging BTC, reject SHORTs if coin is beating BTC
+          if (s.symbol === 'BTC_USDT') return true;
+          const ticker = tickerMap.get(s.symbol);
+          const rs = (ticker?.changeRate24h ?? 0) - btcChange;
+          if (s.side === 'LONG' && rs < -0.015) return false;
+          if (s.side === 'SHORT' && rs > 0.015) return false;
+          return true;
+        })
         .map((s) => {
           const profile = getCoinProfile(s.symbol);
           const moverRole = moverRoleMap.get(s.symbol) || 'NORMAL';
+          const ticker = tickerMap.get(s.symbol);
+          const rs = (ticker?.changeRate24h ?? 0) - btcChange;
+          const rsBonus = Math.abs(rs) >= 0.03 ? (s.side === 'LONG' && rs > 0 ? 0.06 : s.side === 'SHORT' && rs < 0 ? 0.06 : 0) : 0;
           return {
             ...s,
+            confidence: Math.min(1.0, s.confidence + rsBonus),
             category: profile.category,
             moverRole,
             plannedLeverage: previewLeverage(s, this.risk),
