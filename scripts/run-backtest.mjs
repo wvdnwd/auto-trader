@@ -180,6 +180,7 @@ async function runSniperBacktest() {
     }
     const ema21 = calculateEma(candles, 21);
     const ema55 = calculateEma(candles, 55);
+    const ema200 = calculateEma(candles, 200);
     const atr14 = calculateAtr(candles, 14);
     const rsi14 = calculateRsi(candles, 14);
 
@@ -188,6 +189,7 @@ async function runSniperBacktest() {
       candles,
       ema21,
       ema55,
+      ema200,
       atr14,
       rsi14,
       timeMap: new Map(candles.map((c, idx) => [c.time, idx])),
@@ -203,7 +205,7 @@ async function runSniperBacktest() {
     return;
   }
 
-  const timeline = btcTimes.slice(60); // Start after warmup
+  const timeline = btcTimes.slice(200); // Start after 200 bars warmup (for EMA200 macro trend)
   console.log(`\nReplay gestart over ${timeline.length} uren (${(timeline.length / 24).toFixed(0)} dagen)...`);
 
   let currentBalance = startingBalance;
@@ -290,8 +292,9 @@ async function runSniperBacktest() {
           pos.realizedPnl += tranchePnl;
           pos.remainingMargin -= portionMargin;
 
-          // Move Stop to Break-Even + 0.2% buffer
-          pos.stopLoss = isLong ? pos.entry * 1.002 : pos.entry * 0.998;
+          // Move Stop to +0.35R in profit (guarantees net positive trade even after fee and slippage)
+          const stopDist = Math.abs(pos.entry - pos.initialStop);
+          pos.stopLoss = isLong ? pos.entry + stopDist * 0.35 : pos.entry - stopDist * 0.35;
         }
       }
 
@@ -358,12 +361,13 @@ async function runSniperBacktest() {
       const prev = md.candles[idx - 1];
       const e21 = md.ema21[idx];
       const e55 = md.ema55[idx];
+      const e200 = md.ema200[idx];
       const atr = md.atr14[idx] || (bar.close * 0.02);
       const rsi = md.rsi14[idx] || 50;
 
-      // Rule 1: Clear Trend Alignment & Separation
-      const isLongTrend = e21 > e55 && e21 > md.ema21[idx - 1] && (e21 - e55) / e55 > 0.003;
-      const isShortTrend = e21 < e55 && e21 < md.ema21[idx - 1] && (e55 - e21) / e55 > 0.003;
+      // Rule 1: Clear Trend Alignment & Separation with 4H Macro Trend (EMA200)
+      const isLongTrend = e21 > e55 && e21 > md.ema21[idx - 1] && (e21 - e55) / e55 > 0.003 && (!e200 || bar.close > e200);
+      const isShortTrend = e21 < e55 && e21 < md.ema21[idx - 1] && (e55 - e21) / e55 > 0.003 && (!e200 || bar.close < e200);
       if (!isLongTrend && !isShortTrend) continue;
 
       const side = isLongTrend ? 'LONG' : 'SHORT';
@@ -460,6 +464,8 @@ async function runSniperBacktest() {
       remainingMargin: margin,
       riskAmount: (rDist / entryPrice) * margin * leverage,
       stopLoss,
+      initialStop: stopLoss,
+      rDist,
       tp1,
       tp2,
       tp3,
