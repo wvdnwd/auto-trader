@@ -315,9 +315,11 @@ async function runSniperBacktest() {
         }
       }
 
-      // Trailing Runner (Chandelier ATR Stop)
+      // Trailing Runner (Chandelier ATR Stop with Parabolic Climax tightening)
       if (pos.trailingActive) {
-        const atrMult = /PEPE|DOGE|BONK/i.test(pos.symbol) ? 1.8 : 1.5;
+        const currRsi = md.rsi14[candleIdx] || 50;
+        const isClimax = currRsi > 80 || (/PEPE|DOGE|BONK/i.test(pos.symbol) && currRsi > 78);
+        const atrMult = isClimax ? 0.75 : (/PEPE|DOGE|BONK/i.test(pos.symbol) ? 1.8 : 1.4);
         if (isLong) {
           if (bar.high > pos.peakPrice) pos.peakPrice = bar.high;
           const trailStop = pos.peakPrice - (atr * atrMult);
@@ -337,6 +339,13 @@ async function runSniperBacktest() {
 
     // 2. Scan for new high-conviction sniper setups (max 2 positions concurrent)
     if (openPositions.length >= 2 || currentBalance < 15) continue;
+
+    // Calculate BTC 24h benchmark return for Relative Strength filtering
+    const btcMd = marketData['BTC_USDT'];
+    const btcIdx = btcMd?.timeMap.get(time);
+    const btc24h = btcIdx && btcIdx >= 24
+      ? (btcMd.candles[btcIdx].close - btcMd.candles[btcIdx - 24].close) / btcMd.candles[btcIdx - 24].close
+      : 0;
 
     const candidates = [];
 
@@ -358,6 +367,16 @@ async function runSniperBacktest() {
       if (!isLongTrend && !isShortTrend) continue;
 
       const side = isLongTrend ? 'LONG' : 'SHORT';
+
+      // Rule 1b: Relative Strength (RS vs BTC) Filter
+      const coin24h = idx >= 24 ? (bar.close - md.candles[idx - 24].close) / md.candles[idx - 24].close : 0;
+      const relativeStrength = coin24h - btc24h;
+
+      // Reject LONG if coin is strongly lagging Bitcoin; Reject SHORT if coin is strongly beating Bitcoin
+      if (sym !== 'BTC_USDT') {
+        if (side === 'LONG' && relativeStrength < -0.015) continue;
+        if (side === 'SHORT' && relativeStrength > 0.015) continue;
+      }
 
       // Rule 2: Volume Confirmation (relative volume >= 1.3x)
       const prevVolSlice = md.candles.slice(Math.max(0, idx - 20), idx);
@@ -384,6 +403,7 @@ async function runSniperBacktest() {
       // Confluence score calculation (68 to 100)
       let score = 70;
       if (volRatio >= 2.0) score += 10;
+      if (Math.abs(relativeStrength) >= 0.03) score += 10; // RS Leader bonus!
       if (side === 'LONG' && rsi < 55) score += 5;
       if (side === 'SHORT' && rsi > 45) score += 5;
 
@@ -394,6 +414,7 @@ async function runSniperBacktest() {
         atr,
         score,
         volRatio,
+        relativeStrength,
       });
     }
 
@@ -403,12 +424,21 @@ async function runSniperBacktest() {
     candidates.sort((a, b) => b.score - a.score);
     const best = candidates[0];
 
-    // Position Sizing: 35% margin stake on small account
+    // Position Sizing: Anti-Martingale win streak boost & Loss-streak throttle
     const stakePct = currentBalance <= 250 ? 0.38 : 0.28;
-    const streakMult = winStreak >= 2 ? Math.min(1.25, 1.0 + (winStreak - 1) * 0.10) : 1.0;
-    const margin = Math.min(currentBalance * 0.45, currentBalance * stakePct * streakMult);
+    let streakMult = 1.0;
+    if (winStreak >= 2) {
+      streakMult = Math.min(1.25, 1.0 + (winStreak - 1) * 0.10); // scale up on wins
+    } else if (lossStreak === 2) {
+      streakMult = 0.65; // throttle down on 2 losses
+    } else if (lossStreak >= 3) {
+      streakMult = 0.45; // defensive mode on 3+ losses
+    }
 
-    if (margin < 12) continue;
+    const calculatedMargin = currentBalance * stakePct * streakMult;
+    const margin = Math.min(currentBalance * 0.45, Math.max(10, calculatedMargin));
+
+    if (margin > currentBalance || margin < 10) continue;
 
     const entryPrice = best.bar.close;
     const isMeme = /PEPE|DOGE|BONK/i.test(best.symbol);
