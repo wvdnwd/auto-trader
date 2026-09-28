@@ -377,6 +377,8 @@ export type Position = {
   exit?: number;
   pnl?: number;
   pnlPct?: number;
+  /** True once this position has been evaluated and protected against adverse news catalysts. */
+  newsProtected?: boolean;
   /** Why the position was closed. */
   exitReason?:
     | 'STOP_LOSS'
@@ -393,7 +395,8 @@ export type Position = {
     | 'UNCERTAINTY'
     | 'CLIMAX_TRIM'
     | 'PROFIT_LOCK'
-    | 'MSS_FLIP';
+    | 'MSS_FLIP'
+    | 'ADVERSE_NEWS';
   status: 'OPEN' | 'CLOSED';
   confidence: number;
   regime: Regime;
@@ -802,6 +805,14 @@ export type RiskConfig = {
   cooldownSlMinutes?: number;
   /** Cooldown minutes after failed breakout fakeout (default 120). */
   cooldownFakeoutMinutes?: number;
+  /** Enable news trading intelligence and event catalysts (default true). */
+  newsTradingEnabled?: boolean;
+  /** Allow high-conviction bullish news catalysts to bypass the pullback requirement (momentum entry) (default true). */
+  newsCatalystBypassPullback?: boolean;
+  /** Proactively protect or trim open positions when critical adverse breaking news hits (default true). */
+  newsAdversePositionProtect?: boolean;
+  /** Pause new entries around high-impact macro-economic events (CPI, FOMC, NFP) (default true). */
+  macroShieldEnabled?: boolean;
 };
 
 /**
@@ -1179,11 +1190,13 @@ export type NewsItem = {
   id: string;
   title: string;
   link: string;
-  source: 'Cointelegraph' | 'CoinDesk' | 'CryptoPanic';
+  source: 'Cointelegraph' | 'CoinDesk' | 'CryptoPanic' | 'Decrypt' | 'TheBlock';
   publishedAt: number;
   sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   coins: string[];
   summary?: string;
+  isHighImpact?: boolean;
+  isCritical?: boolean;
 };
 
 /**

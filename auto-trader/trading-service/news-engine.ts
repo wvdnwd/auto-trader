@@ -1,47 +1,97 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { FearAndGreed, MacroEvent, MarketIntelligence, NewsItem } from './types.js';
+import type { FearAndGreed, MacroEvent, MarketIntelligence, NewsItem, Side } from './types.js';
 
 const FNG_URL = 'https://api.alternative.me/fng/?limit=1';
 const CALENDAR_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 const RSS_COINTELEGRAPH = 'https://cointelegraph.com/rss';
 const RSS_COINDESK = 'https://www.coindesk.com/arc/outboundfeeds/rss/';
+const RSS_DECRYPT = 'https://decrypt.co/feed';
+const RSS_THEBLOCK = 'https://www.theblock.co/rss.xml';
 
 const TIMEOUT_MS = 4000;
 
+export function normalizeCoin(raw: string): string {
+  return raw.toUpperCase().replace(/[-_](USDT|USDC|USD|PERP)$/i, '').replace(/^[0-9]+/, '').trim();
+}
+
 const KNOWN_COINS: Array<{ symbol: string; patterns: RegExp }> = [
-  { symbol: 'BTC_USDT', patterns: /\b(BTC|BITCOIN)\b/i },
-  { symbol: 'ETH_USDT', patterns: /\b(ETH|ETHEREUM|ETHER)\b/i },
-  { symbol: 'SOL_USDT', patterns: /\b(SOL|SOLANA)\b/i },
-  { symbol: 'XRP_USDT', patterns: /\b(XRP|RIPPLE)\b/i },
-  { symbol: 'DOGE_USDT', patterns: /\b(DOGE|DOGECOIN)\b/i },
-  { symbol: 'PEPE_USDT', patterns: /\b(PEPE)\b/i },
-  { symbol: 'SHIB_USDT', patterns: /\b(SHIB|SHIBA)\b/i },
-  { symbol: 'BONK_USDT', patterns: /\b(BONK|1000BONK)\b/i },
-  { symbol: 'SUI_USDT', patterns: /\b(SUI)\b/i },
-  { symbol: 'AVAX_USDT', patterns: /\b(AVAX|AVALANCHE)\b/i },
-  { symbol: 'NEAR_USDT', patterns: /\b(NEAR)\b/i },
-  { symbol: 'APT_USDT', patterns: /\b(APT|APTOS)\b/i },
-  { symbol: 'SEI_USDT', patterns: /\b(SEI)\b/i },
-  { symbol: 'LINK_USDT', patterns: /\b(LINK|CHAINLINK)\b/i },
-  { symbol: 'AAVE_USDT', patterns: /\b(AAVE)\b/i },
-  { symbol: 'UNI_USDT', patterns: /\b(UNI|UNISWAP)\b/i },
-  { symbol: 'TAO_USDT', patterns: /\b(TAO|BITTENSOR)\b/i },
-  { symbol: 'FET_USDT', patterns: /\b(FET|FETCH|ASI)\b/i },
-  { symbol: 'RENDER_USDT', patterns: /\b(RENDER|RNDR)\b/i },
-  { symbol: 'WLD_USDT', patterns: /\b(WLD|WORLDCOIN)\b/i },
-  { symbol: 'ARB_USDT', patterns: /\b(ARB|ARBITRUM)\b/i },
-  { symbol: 'OP_USDT', patterns: /\b(OP|OPTIMISM)\b/i },
-  { symbol: 'DASH_USDT', patterns: /\b(DASH)\b/i },
-  { symbol: 'ZEC_USDT', patterns: /\b(ZEC|ZCASH)\b/i },
-  { symbol: 'HYPE_USDT', patterns: /\b(HYPE|HYPERLIQUID)\b/i },
-  { symbol: 'TRUMP_USDT', patterns: /\b(TRUMP)\b/i },
-  { symbol: 'FARTCOIN_USDT', patterns: /\b(FARTCOIN)\b/i },
-  { symbol: 'PENGU_USDT', patterns: /\b(PENGU)\b/i },
+  { symbol: 'BTC', patterns: /\b(BTC|BITCOIN)\b/i },
+  { symbol: 'ETH', patterns: /\b(ETH|ETHEREUM|ETHER)\b/i },
+  { symbol: 'SOL', patterns: /\b(SOL|SOLANA)\b/i },
+  { symbol: 'XRP', patterns: /\b(XRP|RIPPLE)\b/i },
+  { symbol: 'DOGE', patterns: /\b(DOGE|DOGECOIN)\b/i },
+  { symbol: 'PEPE', patterns: /\b(PEPE)\b/i },
+  { symbol: 'SHIB', patterns: /\b(SHIB|SHIBA)\b/i },
+  { symbol: 'BONK', patterns: /\b(BONK|1000BONK)\b/i },
+  { symbol: 'SUI', patterns: /\b(SUI)\b/i },
+  { symbol: 'AVAX', patterns: /\b(AVAX|AVALANCHE)\b/i },
+  { symbol: 'NEAR', patterns: /\b(NEAR|NEAR PROTOCOL)\b/i },
+  { symbol: 'APT', patterns: /\b(APT|APTOS)\b/i },
+  { symbol: 'SEI', patterns: /\b(SEI|SEI NETWORK)\b/i },
+  { symbol: 'LINK', patterns: /\b(LINK|CHAINLINK)\b/i },
+  { symbol: 'AAVE', patterns: /\b(AAVE)\b/i },
+  { symbol: 'UNI', patterns: /\b(UNI|UNISWAP)\b/i },
+  { symbol: 'TAO', patterns: /\b(TAO|BITTENSOR)\b/i },
+  { symbol: 'FET', patterns: /\b(FET|FETCH|ASI|ARTIFICIAL SUPERINTELLIGENCE)\b/i },
+  { symbol: 'RENDER', patterns: /\b(RENDER|RNDR)\b/i },
+  { symbol: 'WLD', patterns: /\b(WLD|WORLDCOIN)\b/i },
+  { symbol: 'ARB', patterns: /\b(ARB|ARBITRUM)\b/i },
+  { symbol: 'OP', patterns: /\b(OP|OPTIMISM)\b/i },
+  { symbol: 'DASH', patterns: /\b(DASH)\b/i },
+  { symbol: 'ZEC', patterns: /\b(ZEC|ZCASH)\b/i },
+  { symbol: 'HYPE', patterns: /\b(HYPE|HYPERLIQUID)\b/i },
+  { symbol: 'TRUMP', patterns: /\b(TRUMP)\b/i },
+  { symbol: 'FARTCOIN', patterns: /\b(FARTCOIN)\b/i },
+  { symbol: 'PENGU', patterns: /\b(PENGU|PUDGY PENGUINS)\b/i },
+  { symbol: 'BCH', patterns: /\b(BCH|BITCOIN CASH)\b/i },
+  { symbol: 'ICP', patterns: /\b(ICP|INTERNET COMPUTER)\b/i },
+  { symbol: 'ADA', patterns: /\b(ADA|CARDANO)\b/i },
+  { symbol: 'DOT', patterns: /\b(DOT|POLKADOT)\b/i },
+  { symbol: 'BNB', patterns: /\b(BNB|BINANCE COIN)\b/i },
+  { symbol: 'LTC', patterns: /\b(LTC|LITECOIN)\b/i },
+  { symbol: 'TIA', patterns: /\b(TIA|CELESTIA)\b/i },
+  { symbol: 'INJ', patterns: /\b(INJ|INJECTIVE)\b/i },
+  { symbol: 'CRV', patterns: /\b(CRV|CURVE)\b/i },
+  { symbol: 'DYDX', patterns: /\b(DYDX)\b/i },
+  { symbol: 'KAS', patterns: /\b(KAS|KASPA)\b/i },
+  { symbol: 'MOODENG', patterns: /\b(MOODENG)\b/i },
+  { symbol: 'WIF', patterns: /\b(WIF|DOGWIFHAT)\b/i },
+  { symbol: 'POPCAT', patterns: /\b(POPCAT)\b/i },
+  { symbol: 'PNUT', patterns: /\b(PNUT)\b/i },
+  { symbol: 'GOAT', patterns: /\b(GOAT)\b/i },
+  { symbol: 'SPX', patterns: /\b(SPX|SPX6900)\b/i },
+  { symbol: 'TURBO', patterns: /\b(TURBO)\b/i },
+  { symbol: 'MEW', patterns: /\b(MEW)\b/i },
+  { symbol: 'BOME', patterns: /\b(BOME)\b/i },
+  { symbol: 'ENA', patterns: /\b(ENA|ETHENA)\b/i },
+  { symbol: 'ONDO', patterns: /\b(ONDO)\b/i },
+  { symbol: 'ETHFI', patterns: /\b(ETHFI|ETHERFI)\b/i },
+  { symbol: 'GMX', patterns: /\b(GMX)\b/i },
+  { symbol: 'JUP', patterns: /\b(JUP|JUPITER)\b/i },
+  { symbol: 'RAY', patterns: /\b(RAY|RAYDIUM)\b/i },
+  { symbol: 'AERO', patterns: /\b(AERO|AERODROME)\b/i },
+  { symbol: 'STRK', patterns: /\b(STRK|STARKNET)\b/i },
+  { symbol: 'BLAST', patterns: /\b(BLAST)\b/i },
+  { symbol: 'ZK', patterns: /\b(ZK|ZKSYNC)\b/i },
+  { symbol: 'KAITO', patterns: /\b(KAITO)\b/i },
+  { symbol: 'BERA', patterns: /\b(BERA|BERACHAIN)\b/i },
+  { symbol: 'MON', patterns: /\b(MON|MONAD)\b/i },
+  { symbol: 'VIRTUAL', patterns: /\b(VIRTUAL)\b/i },
+  { symbol: 'AI16Z', patterns: /\b(AI16Z)\b/i },
+  { symbol: 'AIXBT', patterns: /\b(AIXBT)\b/i },
+];
+
+const HIGH_IMPACT_BULLISH = [
+  /\b(etf approval|etf approved|mainnet launch|listed on binance|listed on coinbase|listing on binance|listing on coinbase|sec dismisses|sec drops lawsuit|sec drops charges|strategic reserve|treasury buy|major partnership|upgrade live)\b/i,
 ];
 
 const BULLISH_KEYWORDS = [
-  /\b(soar|surge|rally|gain|gains|bull|bullish|record|high|highs|approve|approval|approved|partnership|partner|launch|upgrade|etf|breakout|inflow|inflows|accumulate|accumulation|rebound|boom|adoption|win|positive|green)\b/i,
+  /\b(soar|surge|rally|gain|gains|bull|bullish|record|high|highs|approve|approval|approved|partnership|partner|launch|upgrade|etf|breakout|inflow|inflows|accumulate|accumulation|rebound|boom|adoption|win|positive|green|milestone)\b/i,
+];
+
+const CRITICAL_BEARISH_KEYWORDS = [
+  /\b(hack|hacked|exploit|exploited|drain|drained|rug|rugpull|insolvent|insolvency|halted|freeze|frozen|delist|delisting|sec charges|indicted|arrested|bankruptcy|bankrupt|stolen)\b/i,
 ];
 
 const BEARISH_KEYWORDS = [
@@ -291,6 +341,8 @@ export class NewsEngine {
     const feeds: Array<{ url: string; source: NewsItem['source'] }> = [
       { url: RSS_COINTELEGRAPH, source: 'Cointelegraph' },
       { url: RSS_COINDESK, source: 'CoinDesk' },
+      { url: RSS_DECRYPT, source: 'Decrypt' },
+      { url: RSS_THEBLOCK, source: 'TheBlock' },
     ];
 
     const allItems: NewsItem[] = [];
@@ -324,16 +376,19 @@ export class NewsEngine {
             // Sentiment classification
             const fullText = `${title} ${summary}`;
             let sentiment: NewsItem['sentiment'] = 'NEUTRAL';
-            const isBullish = BULLISH_KEYWORDS.some((kw) => kw.test(fullText));
-            const isBearish = BEARISH_KEYWORDS.some((kw) => kw.test(fullText));
+            const isCritical = CRITICAL_BEARISH_KEYWORDS.some((kw) => kw.test(fullText));
+            const isHighImpact = HIGH_IMPACT_BULLISH.some((kw) => kw.test(fullText));
+            const isBullish = isHighImpact || BULLISH_KEYWORDS.some((kw) => kw.test(fullText));
+            const isBearish = isCritical || BEARISH_KEYWORDS.some((kw) => kw.test(fullText));
+
             if (isBullish && !isBearish) sentiment = 'BULLISH';
             else if (isBearish && !isBullish) sentiment = 'BEARISH';
 
-            // Coin symbol extraction
+            // Coin symbol extraction (stores base ticker, _USDT, and _USDC variants for instant matching)
             const detectedCoins: string[] = [];
             for (const { symbol, patterns } of KNOWN_COINS) {
               if (patterns.test(fullText)) {
-                detectedCoins.push(symbol);
+                detectedCoins.push(symbol, `${symbol}_USDT`, `${symbol}_USDC`);
               }
             }
 
@@ -346,17 +401,19 @@ export class NewsEngine {
               sentiment,
               coins: detectedCoins,
               summary: summary ? `${summary}...` : undefined,
+              isHighImpact,
+              isCritical,
             });
           }
         } catch {
-          // ignore feed failure
+          // ignore individual feed failure
         }
       })
     );
 
     if (allItems.length > 0) {
       allItems.sort((a, b) => b.publishedAt - a.publishedAt);
-      this.cachedNews = allItems.slice(0, 30);
+      this.cachedNews = allItems.slice(0, 40);
       this.lastNewsFetch = now;
     }
 
@@ -372,12 +429,18 @@ export class NewsEngine {
     news?: NewsItem;
     scoreBoost: number;
     warning?: string;
+    isHighImpact?: boolean;
+    isCritical?: boolean;
   }> {
     const news = await this.getBreakingNews();
     const threeHoursAgo = Date.now() - 3 * 3600_000;
+    const norm = normalizeCoin(symbol);
 
     const matching = news.find(
-      (n) => n.publishedAt >= threeHoursAgo && n.coins.includes(symbol)
+      (n) =>
+        n.publishedAt >= threeHoursAgo &&
+        (n.coins.some((c) => normalizeCoin(c) === norm) ||
+          new RegExp(`\\b${norm}\\b`, 'i').test(n.title))
     );
 
     if (!matching) {
@@ -385,21 +448,25 @@ export class NewsEngine {
     }
 
     if (matching.sentiment === 'BULLISH') {
+      const boost = matching.isHighImpact ? 14 : 8;
       return {
         hasCatalyst: true,
         sentiment: 'BULLISH',
         news: matching,
-        scoreBoost: 8, // +8 point setup score boost on breaking positive catalyst
+        scoreBoost: boost,
+        isHighImpact: matching.isHighImpact,
       };
     }
 
     if (matching.sentiment === 'BEARISH') {
+      const penalty = matching.isCritical ? -30 : -15;
       return {
         hasCatalyst: true,
         sentiment: 'BEARISH',
         news: matching,
-        scoreBoost: -15, // Penalty on bearish news
-        warning: `Negatief nieuws gedetecteerd: "${matching.title}"`,
+        scoreBoost: penalty,
+        warning: `${matching.isCritical ? '🚨 CRITISCH' : '⚠️'} Negatief nieuws gedetecteerd: "${matching.title}"`,
+        isCritical: matching.isCritical,
       };
     }
 
@@ -409,6 +476,44 @@ export class NewsEngine {
       news: matching,
       scoreBoost: 0,
     };
+  }
+
+  /**
+   * Proactively check if critical adverse breaking news broke for an open position.
+   */
+  async checkAdverseNewsForPosition(
+    symbol: string,
+    side: Side,
+    openedAt: number
+  ): Promise<{
+    adverse: boolean;
+    isCritical: boolean;
+    news?: NewsItem;
+  }> {
+    const news = await this.getBreakingNews();
+    const windowStart = Math.min(openedAt - 30 * 60_000, Date.now() - 2 * 3600_000);
+    const norm = normalizeCoin(symbol);
+
+    const matching = news.find(
+      (n) =>
+        n.publishedAt >= windowStart &&
+        (n.coins.some((c) => normalizeCoin(c) === norm) ||
+          new RegExp(`\\b${norm}\\b`, 'i').test(n.title))
+    );
+
+    if (!matching) {
+      return { adverse: false, isCritical: false };
+    }
+
+    if (side === 'LONG' && matching.sentiment === 'BEARISH') {
+      return { adverse: true, isCritical: Boolean(matching.isCritical), news: matching };
+    }
+
+    if (side === 'SHORT' && matching.sentiment === 'BULLISH') {
+      return { adverse: true, isCritical: Boolean(matching.isHighImpact), news: matching };
+    }
+
+    return { adverse: false, isCritical: false };
   }
 
   /**
@@ -426,7 +531,7 @@ export class NewsEngine {
       fearAndGreed,
       macroShield,
       upcomingMacroEvents: upcomingMacroEvents.slice(0, 10),
-      breakingNews: breakingNews.slice(0, 15),
+      breakingNews: breakingNews.slice(0, 20),
       fetchedAt: Date.now(),
     };
   }

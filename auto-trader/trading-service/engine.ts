@@ -49,6 +49,7 @@ import type {
   Candle,
   EngineEvent,
   MarketSession,
+  NewsItem,
   Position,
   RiskConfig,
   Signal,
@@ -724,6 +725,18 @@ export class Engine {
       cooldownBeMinutes: num(merged.cooldownBeMinutes, 0, 1440, this.risk.cooldownBeMinutes ?? 30),
       cooldownSlMinutes: num(merged.cooldownSlMinutes, 0, 1440, this.risk.cooldownSlMinutes ?? 60),
       cooldownFakeoutMinutes: num(merged.cooldownFakeoutMinutes, 0, 1440, this.risk.cooldownFakeoutMinutes ?? 120),
+      newsTradingEnabled: merged.newsTradingEnabled !== undefined
+        ? Boolean(merged.newsTradingEnabled)
+        : (this.risk.newsTradingEnabled ?? true),
+      newsCatalystBypassPullback: merged.newsCatalystBypassPullback !== undefined
+        ? Boolean(merged.newsCatalystBypassPullback)
+        : (this.risk.newsCatalystBypassPullback ?? true),
+      newsAdversePositionProtect: merged.newsAdversePositionProtect !== undefined
+        ? Boolean(merged.newsAdversePositionProtect)
+        : (this.risk.newsAdversePositionProtect ?? true),
+      macroShieldEnabled: merged.macroShieldEnabled !== undefined
+        ? Boolean(merged.macroShieldEnabled)
+        : (this.risk.macroShieldEnabled ?? true),
     };
     // Keep the pairs coherent regardless of the order the user edits them in.
     this.risk.maxRiskPct = Math.max(this.risk.maxRiskPct, this.risk.baseRiskPct);
@@ -1634,6 +1647,48 @@ export class Engine {
         }
       }
 
+      // Proactive Adverse News Protection: de-risk or tighten stop if breaking negative news / exploit hits
+      if (this.risk.newsAdversePositionProtect !== false && !current.newsProtected) {
+        try {
+          const adv = await NewsEngine.getInstance().checkAdverseNewsForPosition(
+            current.symbol,
+            current.side,
+            current.openedAt
+          );
+          if (adv.adverse && adv.news) {
+            current.newsProtected = true;
+            await this.store.updatePosition(current.id, { newsProtected: true });
+            if (adv.isCritical) {
+              await this.log(
+                'warn',
+                `🚨 CRITISCH ADVERS NIEUWS voor ${current.symbol} (${current.side}): "${adv.news.title}" — nood-derisking geactiveerd!`
+              );
+              void notify({
+                kind: 'risk-halt',
+                message: `🚨 CRITISCH NIEUWS ${current.symbol}: "${adv.news.title}" — 50% noodsluiting uitgevoerd!`,
+              });
+              await this.reducePosition(current.id, 0.5);
+              continue;
+            } else {
+              const markPx = this.marks.get(current.symbol) || current.entry;
+              const inProfit = current.side === 'LONG' ? markPx > current.entry : markPx < current.entry;
+              if (inProfit && !current.breakEven) {
+                current.breakEven = true;
+                current.stopLoss = current.entry;
+                await this.store.updatePosition(current.id, { breakEven: true, stopLoss: current.entry });
+                if (current.live && current.remainingQuantity > 0) {
+                  await this.moveLiveStop(current, current.entry, current.remainingQuantity).catch(() => {});
+                }
+                await this.log(
+                  'info',
+                  `🛡️ Adverse nieuws bescherming voor ${current.symbol}: stop preventief naar break-even (${current.entry}) getrokken.`
+                );
+              }
+            }
+          }
+        } catch {}
+      }
+
       // Early protection: the regime itself has turned against the position
       // (e.g. held LONG while the market now reads TREND_DOWN), even before a
       // full opposite-side signal fires. Trim part of the size immediately so a
@@ -2210,17 +2265,19 @@ export class Engine {
     }
 
     // Macro Shield Gatekeeper: block new entries around High-Impact economic news (FOMC, CPI, NFP, etc.)
-    const macroShield = await NewsEngine.getInstance().getMacroShield().catch(() => ({ active: false, reason: undefined }));
-    if (macroShield.active) {
-      const shieldBlock: BlockedState = {
-        kind: 'regime',
-        message: macroShield.reason || 'Macro Shield actief — wachten op afronding van hoog-impact economisch nieuws.',
-      };
-      if (this.blockedReason?.kind !== 'regime' || this.blockedReason?.message !== shieldBlock.message) {
-        await this.log('warn', `🛡️ ${shieldBlock.message}`);
+    if (this.risk.macroShieldEnabled !== false) {
+      const macroShield = await NewsEngine.getInstance().getMacroShield().catch(() => ({ active: false, reason: undefined }));
+      if (macroShield.active) {
+        const shieldBlock: BlockedState = {
+          kind: 'regime',
+          message: macroShield.reason || 'Macro Shield actief — wachten op afronding van hoog-impact economisch nieuws.',
+        };
+        if (this.blockedReason?.kind !== 'regime' || this.blockedReason?.message !== shieldBlock.message) {
+          await this.log('warn', `🛡️ ${shieldBlock.message}`);
+        }
+        this.blockedReason = shieldBlock;
+        return;
       }
-      this.blockedReason = shieldBlock;
-      return;
     }
 
     const held = new Set(open.map((p) => p.symbol));
@@ -2309,7 +2366,24 @@ export class Engine {
       }
 
       // Breaking News Catalyst Check: boosts score on positive news, blocks on adverse news
-      const catalyst = await NewsEngine.getInstance().getCatalystForSymbol(signal.symbol).catch(() => ({ hasCatalyst: false, sentiment: 'NEUTRAL' as const, scoreBoost: 0 }));
+      let catalyst: {
+        hasCatalyst: boolean;
+        sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+        news?: NewsItem;
+        scoreBoost: number;
+        warning?: string;
+        isHighImpact?: boolean;
+        isCritical?: boolean;
+      } = { hasCatalyst: false, sentiment: 'NEUTRAL', scoreBoost: 0 };
+
+      if (this.risk.newsTradingEnabled !== false) {
+        catalyst = await NewsEngine.getInstance().getCatalystForSymbol(signal.symbol).catch(() => ({
+          hasCatalyst: false,
+          sentiment: 'NEUTRAL' as const,
+          scoreBoost: 0,
+        }));
+      }
+
       if (catalyst.hasCatalyst) {
         if (catalyst.sentiment === 'BEARISH' && signal.side === 'LONG') {
           signal.blockReasonCode = 'BLOCKED_LOW_SCORE';
@@ -2537,19 +2611,27 @@ export class Engine {
         }
       }
 
-      // Breakout check helper for high-momentum outliers
+      // Breakout check helper for high-momentum outliers and breaking news catalysts
       const hasVolumeSpurt = signal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
+      const hasNewsMomentum = Boolean(
+        catalyst.hasCatalyst &&
+          this.risk.newsCatalystBypassPullback !== false &&
+          ((catalyst.sentiment === 'BULLISH' && signal.side === 'LONG') ||
+            (catalyst.sentiment === 'BEARISH' && signal.side === 'SHORT'))
+      );
       const isBreakoutBypassActive =
         this.risk.breakoutBypassEnabled !== false &&
-        hasVolumeSpurt &&
-        signal.confidence >= Math.max(0.70, (this.risk.minConfidence ?? 0.54));
+        (hasVolumeSpurt || hasNewsMomentum) &&
+        signal.confidence >= Math.max(0.65, (this.risk.minConfidence ?? 0.54));
+
+      const bypassReason = hasNewsMomentum ? 'Nieuws Katalysator' : 'Volume Spurt';
 
       // 15-Minute Micro-Timing & Reversal Gatekeeper: avoid buying into an intra-hour top or falling knife
       if (this.risk.microTiming15mEnabled !== false && signal.timingReady === false) {
         if (isBreakoutBypassActive) {
           await this.log(
             'info',
-            `⚡ Micro-timing bypass voor ${signal.symbol}: Volume Spurt breakout momentum overstemt 15m afkoeling.`
+            `⚡ Micro-timing bypass voor ${signal.symbol}: ${bypassReason} breakout momentum overstemt 15m afkoeling.`
           );
         } else {
           await this.logSkip(signal.symbol, '15m micro-timing overbought/oversold of dip nog niet gekeerd (wachten op ommekeer)');
@@ -2573,7 +2655,7 @@ export class Engine {
           if (isBreakoutBypassActive) {
             await this.log(
               'info',
-              `⚡ LTF ommekeer bypass voor ${signal.symbol}: Volume Spurt breakout momentum geactiveerd.`
+              `⚡ LTF ommekeer bypass voor ${signal.symbol}: ${bypassReason} breakout momentum geactiveerd.`
             );
           } else {
             await this.logSkip(signal.symbol, '15m/5m ommekeer nog niet bevestigd (wachten op groene candle / hammer wick)');
@@ -2589,9 +2671,9 @@ export class Engine {
           if (isBreakoutBypassActive) {
             await this.log(
               'info',
-              `🚀 Breakout Momentum Bypass geactiveerd voor ${signal.symbol} (Volume Spurt, Conviction: ${Math.round(
+              `🚀 Breakout Momentum Bypass geactiveerd voor ${signal.symbol} (${bypassReason}, Conviction: ${Math.round(
                 signal.confidence * 100
-              )}%) — directe instap op volume-uitbraak!`
+              )}%) — directe instap op momentum!`
             );
           } else {
             await this.logSkip(signal.symbol, pullbackCheck.detail);

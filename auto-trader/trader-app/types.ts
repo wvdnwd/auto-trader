@@ -556,6 +556,14 @@ export type RiskConfig = {
   cooldownSlMinutes?: number;
   /** Cooldown minutes after failed breakout fakeout (default 120). */
   cooldownFakeoutMinutes?: number;
+  /** Enable news trading intelligence and event catalysts (default true). */
+  newsTradingEnabled?: boolean;
+  /** Allow high-conviction bullish news catalysts to bypass the pullback requirement (momentum entry) (default true). */
+  newsCatalystBypassPullback?: boolean;
+  /** Proactively protect or trim open positions when critical adverse breaking news hits (default true). */
+  newsAdversePositionProtect?: boolean;
+  /** Pause new entries around high-impact macro-economic events (CPI, FOMC, NFP) (default true). */
+  macroShieldEnabled?: boolean;
 };
 
 /** Parameters of a backtest run. */
@@ -946,11 +954,13 @@ export type NewsItem = {
   id: string;
   title: string;
   link: string;
-  source: 'Cointelegraph' | 'CoinDesk' | 'CryptoPanic';
+  source: 'Cointelegraph' | 'CoinDesk' | 'CryptoPanic' | 'Decrypt' | 'TheBlock';
   publishedAt: number;
   sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   coins: string[];
   summary?: string;
+  isHighImpact?: boolean;
+  isCritical?: boolean;
 };
 
 /** Market & Macro Intelligence payload. */

@@ -140,6 +140,10 @@ export const DEFAULT_RISK: RiskConfig = {
   cooldownBeMinutes: 30,
   cooldownSlMinutes: 60,
   cooldownFakeoutMinutes: 120,
+  newsTradingEnabled: true,
+  newsCatalystBypassPullback: true,
+  newsAdversePositionProtect: true,
+  macroShieldEnabled: true,
 };
 
 /**
