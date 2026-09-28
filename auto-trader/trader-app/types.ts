@@ -143,6 +143,10 @@ export type Signal = {
   blockReasonCode?: BlockReasonCode;
   /** Trigger candle on 15m/5m that confirmed the entry. */
   triggerCandle?: { high: number; low: number; time: number };
+  /** True when 15m micro-timing confirms entry (not overbought/oversold on 15m). */
+  timingReady?: boolean;
+  /** True when 15m candle reversal is confirmed (green candle / hammer for long, red / inverted hammer for short). */
+  reversalConfirmed?: boolean;
 };
 
 export type PivotType = 'HH' | 'HL' | 'LH' | 'LL';

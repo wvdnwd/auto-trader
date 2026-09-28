@@ -106,6 +106,223 @@ export function waitingOn(signal: Signal | null): string[] {
   return failed;
 }
 
+export type TimeframeFocus = {
+  key: TimeframeKey;
+  label: string;
+  badge: string;
+  title: string;
+  status: 'READY' | 'WAITING' | 'BLOCKED';
+  statusText: string;
+  summary: string;
+  targetRequirement: string;
+  currentValue: string;
+  nextAction: string;
+};
+
+export function getTimeframeFocusList(
+  signal: Signal | null,
+  position: Position | LiveExchangePosition | null,
+  chart: {
+    side: 'LONG' | 'SHORT';
+    lastClose: number;
+    entryPrice: number;
+    isWaitingPullback: boolean;
+    isPriceInZone: boolean;
+    isBounceOut: boolean;
+    goldenLow?: number;
+    goldenHigh?: number;
+    tpLines: Array<{ label: string; price: number; pct: number }>;
+    slLine?: { price: number; pct: number };
+  }
+): Record<TimeframeKey, TimeframeFocus> {
+  const isLong = chart.side === 'LONG';
+  const hasPos = Boolean(position);
+
+  // 1. 4H Macro Focus
+  const higherRegime = signal?.higherRegime || signal?.trend4H || 'RANGE';
+  const is4hAligned = signal?.alignedWithHigher || higherRegime === (isLong ? 'TREND_UP' : 'TREND_DOWN');
+  const is4hNeutral = higherRegime === 'RANGE';
+  const is4hBlocked = !is4hAligned && !is4hNeutral;
+
+  const h4Status: 'READY' | 'WAITING' | 'BLOCKED' = hasPos
+    ? 'READY'
+    : is4hAligned
+    ? 'READY'
+    : is4hNeutral
+    ? 'READY'
+    : 'BLOCKED';
+
+  const h4StatusText = hasPos
+    ? 'Positie Actief'
+    : is4hAligned
+    ? `Macro Bevestigd (${higherRegime})`
+    : is4hNeutral
+    ? 'Macro Neutraal (RANGE)'
+    : `Macro Tegenwind (${higherRegime})`;
+
+  const h4Summary = hasPos
+    ? 'Positie is reeds actief. 4H Macro trend wordt continu bewaakt om te beschermen tegen trendflips.'
+    : is4hAligned
+    ? `De 4-Uur macro trend (${higherRegime}) is volledig in lijn met deze ${chart.side}. Geen tegenwind!`
+    : is4hNeutral
+    ? 'De 4-Uur markt beweegt in een zijwaartse RANGE. Trades zijn toegestaan mits 1u en 15m krachtig bevestigen.'
+    : `De 4-Uur trend (${higherRegime}) beweegt tegen deze ${chart.side} in. Traden tegen 4H is strikt geblokkeerd ter kapitaalbescherming.`;
+
+  const h4Req = `4H Trend moet in lijn zijn (${isLong ? 'TREND_UP' : 'TREND_DOWN'}) of neutraal (RANGE). Tegen 4H in traden is geblokkeerd.`;
+  const h4Val = `4H Trend: ${higherRegime}${signal?.zone4H ? ` · 4H Zone: ${signal.zone4H.type} (${signal.zone4H.low.toFixed(2)} - ${signal.zone4H.high.toFixed(2)})` : ''}`;
+  const h4Act = is4hBlocked
+    ? `⏳ Bot wacht tot de 4H macro trend omslaat naar ${isLong ? 'TREND_UP' : 'TREND_DOWN'} of een 4H zone test.`
+    : '✅ 4H Macro geeft groen licht! Focus verschuift naar de 1H setup dip.';
+
+  // 2. 1H Setup Focus
+  const is1hReady = hasPos || chart.isPriceInZone || chart.isBounceOut;
+  const is1hWaiting = !hasPos && chart.isWaitingPullback;
+  const h1Status: 'READY' | 'WAITING' | 'BLOCKED' = hasPos
+    ? 'READY'
+    : is1hReady
+    ? 'READY'
+    : is1hWaiting
+    ? 'WAITING'
+    : 'READY';
+
+  const h1StatusText = hasPos
+    ? 'Dip Voltooid'
+    : chart.isPriceInZone
+    ? 'In Golden Zone (0.382–0.618)'
+    : chart.isBounceOut
+    ? 'Golden Zone Bounce Bevestigd'
+    : is1hWaiting
+    ? 'Wacht op Pullback (Dip)'
+    : 'Setup Gereed';
+
+  const h1Summary = hasPos
+    ? `Instap voltooid op ${fmtPrice(chart.entryPrice)}. Trade koerst richting TP1 (${chart.tpLines[0] ? fmtPrice(chart.tpLines[0].price) : '—'}).`
+    : chart.isPriceInZone
+    ? `Koers bevindt zich nu in de Fibonacci Golden Zone (${chart.goldenLow !== undefined ? fmtPrice(chart.goldenLow) : ''} – ${chart.goldenHigh !== undefined ? fmtPrice(chart.goldenHigh) : ''})! Setup is compleet.`
+    : chart.isBounceOut
+    ? 'Koers heeft de Golden Zone getest en veert krachtig op. Pullback is succesvol voltooid.'
+    : is1hWaiting
+    ? `Koers staat te ver uitgelopen van de waardezone. De bot koopt nooit op de top (FOMO) en wacht geduldig op een dip naar de Golden Zone of EMA21.`
+    : '1H Trend en Fibonacci confluenties zijn geanalyseerd en gereed.';
+
+  const h1Req = 'Koers moet terugvallen naar de Fibonacci Golden Zone (0.382–0.618) of binnen 1.8 ATR van EMA21.';
+  const h1Val = chart.goldenLow !== undefined && chart.goldenHigh !== undefined
+    ? `Golden Zone: ${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)} · Prijs: ${fmtPrice(chart.lastClose)}`
+    : `1H Regime: ${signal?.regime || 'Actief'} · Prijs: ${fmtPrice(chart.lastClose)}`;
+  const h1Act = chart.isPriceInZone
+    ? '🎯 Setup is compleet! Bot wacht nu op 15m/5m micro-trigger.'
+    : is1hWaiting && chart.goldenLow !== undefined && chart.goldenHigh !== undefined
+    ? `⏳ Wacht op dip van ${Math.abs(((chart.lastClose - (isLong ? chart.goldenHigh : chart.goldenLow)) / chart.lastClose) * 100).toFixed(1)}% naar de Golden Zone.`
+    : '1H Setup gereed voor evaluatie.';
+
+  // 3. 15m Structure Focus
+  const timingReady = signal?.timingReady !== false;
+  const reversalConfirmed = Boolean(signal?.reversalConfirmed);
+  const m15Status: 'READY' | 'WAITING' | 'BLOCKED' = hasPos
+    ? 'READY'
+    : reversalConfirmed && timingReady
+    ? 'READY'
+    : 'WAITING';
+
+  const m15StatusText = hasPos
+    ? 'Bodem Bevestigd'
+    : reversalConfirmed
+    ? 'Higher Low Bevestigd'
+    : 'Wacht op Bodem (Higher Low)';
+
+  const m15Summary = hasPos
+    ? '15m bodem is gezet en positie loopt met beschermende stop.'
+    : reversalConfirmed
+    ? 'De dip op 15m is gestopt met dalen! Er is een duidelijke ommekeer (Higher Low / reversal candle) gevormd. Geen risico op een vallend mes.'
+    : 'De dip is op 15m nog in beweging of de markt is kortstondig oververkocht. De bot wacht tot de verkoopdruk opdroogt en de koers een eerste hogere bodem vormt.';
+
+  const m15Req = '15m moet een Higher Low (HL), Change of Character (ChoCH) of reversal candle sluiten om te bevestigen dat de pullback klaar is.';
+  const m15Val = `15m Timing: ${timingReady ? '✅ Gereed' : '⏳ Wachten op dip-einde'} · Reversal: ${reversalConfirmed ? '✅ Bevestigd' : '⏳ Wacht op patroon'}`;
+  const m15Act = reversalConfirmed
+    ? '✅ 15m Structuur is groen! Bot kijkt naar de 5m trigger candle.'
+    : '⏳ Wacht tot 15m candles stabiliseren en een groene reversal candle sluiten.';
+
+  // 4. 5m Sniper Trigger Focus
+  const confidence = signal?.confidence ?? 0;
+  const setupScore = signal?.setupScore?.total ?? Math.round(confidence * 100);
+  const is5mReady = hasPos || setupScore >= 70 || confidence >= 0.70;
+
+  const m5Status: 'READY' | 'WAITING' | 'BLOCKED' = hasPos
+    ? 'READY'
+    : is5mReady
+    ? 'READY'
+    : 'WAITING';
+
+  const m5StatusText = hasPos
+    ? 'Order Afgevuurd'
+    : is5mReady
+    ? `Trigger Klaar (${setupScore}/100)`
+    : `Wacht op Trigger (${setupScore}/100)`;
+
+  const m5Summary = hasPos
+    ? 'Market order is reeds geplaatst en bevestigd op Hyperliquid L1.'
+    : is5mReady
+    ? `De 5m trigger-candle sloot met extra volume boven het trigger-niveau! MTF Score (${setupScore}/100) voldoet. De bot kan de order direct inschieten.`
+    : 'Wacht op de exacte 5m candle sluiting met momentum en volume > SMA20 om de market order direct op de huidige marktprijs af te vuren.';
+
+  const m5Req = '5m candle moet sluiten met volume > SMA20 en de MTF Setup Score moet minimaal 70/100 bedragen.';
+  const m5Val = `MTF Setup Score: ${setupScore}/100 (min 70 vereist)${signal?.triggerCandle ? ` · Trigger Level: ${fmtPrice(signal.triggerCandle.high)}` : ''}`;
+  const m5Act = is5mReady
+    ? '🔥 5m Trigger is AFGEGAAN! Order wordt bij de eerstvolgende cyclus verzonden.'
+    : '⏱️ Wacht op volumepiek en 5m candle-close om de order in te schieten.';
+
+  return {
+    Hour4: {
+      key: 'Hour4',
+      label: '4u',
+      badge: '🧭 4-Uur Macro Kompas',
+      title: 'Macro Trend & Grote Zones',
+      status: h4Status,
+      statusText: h4StatusText,
+      summary: h4Summary,
+      targetRequirement: h4Req,
+      currentValue: h4Val,
+      nextAction: h4Act,
+    },
+    Min60: {
+      key: 'Min60',
+      label: '1u',
+      badge: '📐 1-Uur Master Setup',
+      title: 'Setup & Fibonacci Dip',
+      status: h1Status,
+      statusText: h1StatusText,
+      summary: h1Summary,
+      targetRequirement: h1Req,
+      currentValue: h1Val,
+      nextAction: h1Act,
+    },
+    Min15: {
+      key: 'Min15',
+      label: '15m',
+      badge: '🧱 15-Minuten Structuur',
+      title: 'Bodem & Reversal Check',
+      status: m15Status,
+      statusText: m15StatusText,
+      summary: m15Summary,
+      targetRequirement: m15Req,
+      currentValue: m15Val,
+      nextAction: m15Act,
+    },
+    Min5: {
+      key: 'Min5',
+      label: '5m',
+      badge: '⚡ 5-Minuten Sniper Trigger',
+      title: 'Trigger Candle & Volume',
+      status: m5Status,
+      statusText: m5StatusText,
+      summary: m5Summary,
+      targetRequirement: m5Req,
+      currentValue: m5Val,
+      nextAction: m5Act,
+    },
+  };
+}
+
 /**
  * Candlestick chart of the exact data the strategy is scoring, with the swing
  * high/low, Fibonacci golden zone, current price, TP1/TP2/TP3 targets, Stop Loss,
@@ -554,32 +771,76 @@ export function SignalChart({
     let waitTriggerText = '';
     let waitTriggerColor = '#38bdf8';
 
-    if (!effectivePosition && effectiveSignal) {
-      const room = effectiveSignal.roomToStructure;
-      const isChop = effectiveSignal.regime === 'CHOP';
-      const spurt = effectiveSignal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
-
-      if (spurt) {
-        waitTriggerText = `🚀 Volume-uitbraak actief: Wacht op 5m trigger (@ ~${fmtPrice(entryPrice)})`;
-        waitTriggerColor = '#4ade80';
-      } else if (isChop) {
-        waitTriggerText = `🛑 Markt in CHOP: Wacht op duidelijke trenduitbraak`;
-        waitTriggerColor = '#a1a1aa';
-      } else if (Number.isFinite(room) && (room as number) < 1.5) {
-        waitTriggerText = `⚠️ Weerstand nabij (${(room as number).toFixed(1)}R ruimte): Wacht op uitbraak`;
-        waitTriggerColor = '#fbbf24';
-      } else if (isPriceInZone) {
-        waitTriggerText = `🎯 In Golden Zone: Wacht op 5m ${side === 'LONG' ? 'groene bounce kaars' : 'rode rejectie kaars'} (@ ~${fmtPrice(entryPrice)})`;
-        waitTriggerColor = '#38bdf8';
-      } else if (isBounceOut) {
-        waitTriggerText = `🔥 Bounce bevestigd: Wacht op 5m trigger-kaars (@ ~${fmtPrice(entryPrice)})`;
-        waitTriggerColor = '#4ade80';
-      } else if (isWaitingPullback && goldenLow !== undefined && goldenHigh !== undefined) {
-        waitTriggerText = `⏳ Wacht op dip naar Golden Zone (${fmtPrice(goldenLow)} – ${fmtPrice(goldenHigh)})`;
-        waitTriggerColor = '#fbbf24';
+    if (effectivePosition) {
+      waitTriggerText = `🚀 Positie Actief (${side}) @ ${fmtPrice(entryPrice)} — In beheer richting TP doelen`;
+      waitTriggerColor = '#4ade80';
+    } else if (effectiveSignal) {
+      if (interval === 'Hour4') {
+        const higherRegime = effectiveSignal.higherRegime || effectiveSignal.trend4H || 'RANGE';
+        const isAligned = effectiveSignal.alignedWithHigher || higherRegime === (side === 'LONG' ? 'TREND_UP' : 'TREND_DOWN');
+        const isNeutral = higherRegime === 'RANGE';
+        if (isAligned) {
+          waitTriggerText = `🧭 4u Macro Trend: ${higherRegime} (In lijn met richting ✅)`;
+          waitTriggerColor = '#4ade80';
+        } else if (isNeutral) {
+          waitTriggerText = `🧭 4u Macro Trend: RANGE (Neutraal — instap toegestaan ⚪)`;
+          waitTriggerColor = '#a1a1aa';
+        } else {
+          waitTriggerText = `🛑 4u Macro Trend: ${higherRegime} (Tegenwind — traden geblokkeerd)`;
+          waitTriggerColor = '#ef4444';
+        }
+      } else if (interval === 'Min15') {
+        const timingReady = effectiveSignal.timingReady !== false;
+        const reversalConfirmed = Boolean(effectiveSignal.reversalConfirmed);
+        if (reversalConfirmed && timingReady) {
+          waitTriggerText = `🧱 15m Structuur: Bodem bevestigd (Higher Low ✅ — dip gestopt)`;
+          waitTriggerColor = '#4ade80';
+        } else if (!reversalConfirmed) {
+          waitTriggerText = `⏳ 15m Structuur: Wacht tot dip stopt en Higher Low gevormd wordt`;
+          waitTriggerColor = '#fbbf24';
+        } else {
+          waitTriggerText = `⏳ 15m Structuur: Wacht op timing (markt oververkocht/overbought)`;
+          waitTriggerColor = '#fbbf24';
+        }
+      } else if (interval === 'Min5') {
+        const confidence = effectiveSignal.confidence ?? 0;
+        const setupScore = effectiveSignal.setupScore?.total ?? Math.round(confidence * 100);
+        const isTriggerReady = setupScore >= 70 || confidence >= 0.70;
+        if (isTriggerReady) {
+          waitTriggerText = `⚡ 5m Sniper Trigger: Vuur-klaar! Score ${setupScore}/100 (@ ~${fmtPrice(entryPrice)}) 🔥`;
+          waitTriggerColor = '#4ade80';
+        } else {
+          waitTriggerText = `⏱️ 5m Sniper Trigger: Wacht op candle close met volume > SMA20 (Score: ${setupScore}/100)`;
+          waitTriggerColor = '#38bdf8';
+        }
       } else {
-        waitTriggerText = `🎯 Wacht op 5m instaptrigger (@ ~${fmtPrice(entryPrice)})`;
-        waitTriggerColor = '#38bdf8';
+        // 1H (Min60)
+        const room = effectiveSignal.roomToStructure;
+        const isChop = effectiveSignal.regime === 'CHOP';
+        const spurt = effectiveSignal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
+
+        if (spurt) {
+          waitTriggerText = `🚀 1u Volume-uitbraak actief: Wacht op 15m/5m trigger (@ ~${fmtPrice(entryPrice)})`;
+          waitTriggerColor = '#4ade80';
+        } else if (isChop) {
+          waitTriggerText = `🛑 1u Markt in CHOP: Wacht op duidelijke trenduitbraak`;
+          waitTriggerColor = '#a1a1aa';
+        } else if (Number.isFinite(room) && (room as number) < 1.5) {
+          waitTriggerText = `⚠️ 1u Weerstand nabij (${(room as number).toFixed(1)}R ruimte): Wacht op uitbraak`;
+          waitTriggerColor = '#fbbf24';
+        } else if (isPriceInZone) {
+          waitTriggerText = `🎯 1u Setup: In Golden Zone (${goldenLow !== undefined ? fmtPrice(goldenLow) : ''} – ${goldenHigh !== undefined ? fmtPrice(goldenHigh) : ''}) ✅`;
+          waitTriggerColor = '#4ade80';
+        } else if (isBounceOut) {
+          waitTriggerText = `🔥 1u Setup: Golden Zone bounce voltooid (@ ~${fmtPrice(entryPrice)})`;
+          waitTriggerColor = '#4ade80';
+        } else if (isWaitingPullback && goldenLow !== undefined && goldenHigh !== undefined) {
+          waitTriggerText = `⏳ 1u Setup: Wacht op dip naar Golden Zone (${fmtPrice(goldenLow)} – ${fmtPrice(goldenHigh)})`;
+          waitTriggerColor = '#fbbf24';
+        } else {
+          waitTriggerText = `📐 1u Setup: Wacht op dip naar waarde / EMA21 (@ ~${fmtPrice(entryPrice)})`;
+          waitTriggerColor = '#38bdf8';
+        }
       }
     }
 
@@ -624,7 +885,7 @@ export function SignalChart({
       trajectoryPath,
       trajectoryPoints,
     };
-  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade, candleCount, showRoute]);
+  }, [effectiveCandles, effectiveSignal, effectivePosition, effectivePlannedTrade, candleCount, showRoute, interval]);
 
   const notes = waitingOn(effectiveSignal);
 
@@ -633,6 +894,13 @@ export function SignalChart({
   }
 
   const isLong = chart.side === 'LONG';
+
+  const focusMap = useMemo(() => {
+    if (!chart) return null;
+    return getTimeframeFocusList(effectiveSignal, effectivePosition, chart);
+  }, [effectiveSignal, effectivePosition, chart]);
+
+  const activeFocus = focusMap ? focusMap[interval] : null;
 
   // Left-side label collision resolution: structure lines vs fib anchors
   const topAnchor = chart.fibAnchorLines.find((a) => a.label.includes('Top'));
@@ -797,6 +1065,88 @@ export function SignalChart({
           </button>
         </div>
       </div>
+
+      {/* Multi-Timeframe Instap-Pipeline */}
+      {focusMap && (
+        <div className={styles.mtfPipeline}>
+          <div className={styles.mtfPipelineHeader}>
+            <span className={styles.mtfPipelineTitle}>
+              🎯 <b>Multi-Timeframe Instap-Pipeline:</b> Waar wacht de bot op?
+            </span>
+            <span className={styles.mtfPipelineSub}>
+              Klik op een tijdsframe om de specifieke voorwaarde en grafiek te bekijken:
+            </span>
+          </div>
+          <div className={styles.mtfPipelineSteps}>
+            {TIMEFRAMES.map((tf) => {
+              const step = focusMap[tf.key];
+              const isActive = interval === tf.key;
+              const statusClass =
+                step.status === 'READY'
+                  ? styles.mtfStepReady
+                  : step.status === 'BLOCKED'
+                  ? styles.mtfStepBlocked
+                  : styles.mtfStepWaiting;
+              const icon = step.status === 'READY' ? '✅' : step.status === 'BLOCKED' ? '🛑' : '⏳';
+              return (
+                <button
+                  key={tf.key}
+                  type="button"
+                  className={`${styles.mtfStepBtn} ${isActive ? styles.mtfStepBtnActive : ''}`}
+                  onClick={() => handleTimeframeChange(tf.key)}
+                  title={`Bekijk ${tf.name}`}
+                >
+                  <div className={styles.mtfStepHead}>
+                    <span className={styles.mtfStepBadge}>{tf.label}</span>
+                    <span className={statusClass}>{icon}</span>
+                  </div>
+                  <span className={styles.mtfStepTitle}>{step.title}</span>
+                  <span className={`${styles.mtfStepStatus} ${statusClass}`}>{step.statusText}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Dedicated Active Timeframe Waiting Card */}
+      {activeFocus && (
+        <div className={styles.tfFocusCard}>
+          <div className={styles.tfFocusHead}>
+            <div className={styles.tfFocusTitleRow}>
+              <span className={styles.tfFocusBadge}>{activeFocus.badge}</span>
+              <span className={styles.tfFocusTitle}>{activeFocus.title}</span>
+            </div>
+            <span
+              className={`${styles.tfFocusStatusBadge} ${
+                activeFocus.status === 'READY'
+                  ? styles.statusReady
+                  : activeFocus.status === 'BLOCKED'
+                  ? styles.statusBlocked
+                  : styles.statusWaiting
+              }`}
+            >
+              {activeFocus.status === 'READY' ? '✅' : activeFocus.status === 'BLOCKED' ? '🛑' : '⏳'}{' '}
+              {activeFocus.statusText}
+            </span>
+          </div>
+
+          <p className={styles.tfFocusRequirement}>
+            <b>Waar de bot op wacht:</b> {activeFocus.summary}
+          </p>
+
+          <div className={styles.tfFocusGrid}>
+            <div className={styles.tfFocusBox}>
+              <span className={styles.tfFocusBoxLabel}>📋 Strategie Voorwaarde voor {activeFocus.label}:</span>
+              <span className={styles.tfFocusBoxValue}>{activeFocus.targetRequirement}</span>
+            </div>
+            <div className={styles.tfFocusBox}>
+              <span className={styles.tfFocusBoxLabel}>📍 Huidige Status / Meetwaarde:</span>
+              <span className={styles.tfFocusBoxValue}>{activeFocus.currentValue}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Visual Prediction Banner */}
       <div className={`${styles.projectionCard} ${isLong ? '' : styles.projectionCardShort}`}>
@@ -1449,13 +1799,13 @@ export function SignalChart({
 
           <div className={styles.howAndWhatItem}>
             <span className={styles.howAndWhatItemHead}>
-              ⏱️ <b>2. Multi-Timeframe Instapmethode (4H · 1H · 15m · 5m)</b>
+              ⏱️ <b>2. Multi-Timeframe Instapmethode ({interval === 'Hour4' ? '👉 4H' : '4H'} · {interval === 'Min60' ? '👉 1H' : '1H'} · {interval === 'Min15' ? '👉 15m' : '15m'} · {interval === 'Min5' ? '👉 5m' : '5m'})</b>
             </span>
             <p className={styles.howAndWhatItemDesc}>
-              <b>4u:</b> Bepaalt de overkoepelende richting ({effectiveSignal?.higherRegime || 'Macro Trend'}).<br />
-              <b>1u:</b> Master Setup & Structuur (EMA-trend, POC & Confluenties).<br />
-              <b>15m:</b> Wacht op een gezonde pullback naar de Golden Zone (geen FOMO op de top).<br />
-              <b>5m:</b> <u>Exacte instaptiming!</u> Zodra een 5m candle groen sluit met momentum, vuurt de bot de marktorder af op de huidige marktprijs ({fmtPrice(chart.lastClose)}).
+              <span style={{ color: interval === 'Hour4' ? 'var(--accent)' : 'inherit' }}><b>4u:</b> Bepaalt de overkoepelende richting ({effectiveSignal?.higherRegime || 'Macro Trend'}).</span><br />
+              <span style={{ color: interval === 'Min60' ? 'var(--accent)' : 'inherit' }}><b>1u:</b> Master Setup & Structuur (EMA-trend, POC & Confluenties).</span><br />
+              <span style={{ color: interval === 'Min15' ? 'var(--accent)' : 'inherit' }}><b>15m:</b> Wacht op een gezonde pullback naar de Golden Zone (geen FOMO op de top).</span><br />
+              <span style={{ color: interval === 'Min5' ? 'var(--accent)' : 'inherit' }}><b>5m:</b> <u>Exacte instaptiming!</u> Zodra een 5m candle groen sluit met momentum, vuurt de bot de marktorder af op de huidige marktprijs ({fmtPrice(chart.lastClose)}).</span>
             </p>
           </div>
 
