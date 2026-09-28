@@ -136,6 +136,7 @@ export const DEFAULT_RISK: RiskConfig = {
   minimumRrSwing: 2.0,
   minimumRrPullback: 1.5,
   minimumRrBreakout: 2.0,
+  minReturnOnMargin: 0.35,
   cooldownTpMinutes: 5,
   cooldownBeMinutes: 15,
   cooldownSlMinutes: 30,
@@ -1052,6 +1053,17 @@ export function planTrade(
     )
   ) return null;
   const takeProfit = takeProfits[takeProfits.length - 1].price;
+
+  // Capital Efficiency Gate: reject setups where potential profit is too small relative to margin invested
+  // (e.g. tying up €50 for only €15 reward on low-leverage 3x coins like AERO).
+  const totalPotentialProfit = takeProfits.reduce((acc, tp) => {
+    const pnlAtTarget = dir * (tp.price - entry) * (quantity * tp.portion);
+    return acc + pnlAtTarget;
+  }, 0);
+  const minReturnOnMargin = config.minReturnOnMargin ?? 0.35;
+  if (margin > 0 && minReturnOnMargin > 0 && totalPotentialProfit / margin < minReturnOnMargin) {
+    return null;
+  }
 
   const reasons = [...signal.reasons];
   reasons.push(`Stop op ${stopBasis} (${(stopDistancePct * 100).toFixed(2)}%)`);

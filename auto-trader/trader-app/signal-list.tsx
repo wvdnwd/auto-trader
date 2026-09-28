@@ -434,7 +434,13 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
                     className={`${styles.tag} ${styles.short}`}
                     title={`Geblokkeerd: ${s.blockReasonCode}`}
                   >
-                    ⛔ {s.blockReasonCode}
+                    ⛔ {s.blockReasonCode === 'BLOCKED_LOW_REWARD_MARGIN'
+                      ? 'Lage Winst/Inzet (<50%)'
+                      : s.blockReasonCode === 'BLOCKED_LOW_SCORE'
+                      ? 'Lage MTF Score'
+                      : s.blockReasonCode === 'BLOCKED_CORRELATED_RISK'
+                      ? 'Correlatielimiet Groep'
+                      : s.blockReasonCode}
                   </span>
                 )}
                 {s.leverageBreakdown ? (

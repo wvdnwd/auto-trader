@@ -247,6 +247,7 @@ const DICTIONARY = {
   riskMaxMargin: { nl: 'Max margin in gebruik (%)', en: 'Max margin in use (%)' },
   riskStopDrawdown: { nl: 'Stop bij drawdown (%)', en: 'Stop at drawdown (%)' },
   riskDailyLossLimit: { nl: 'Daglimiet verlies (%)', en: 'Daily loss limit (%)' },
+  riskMinReturnOnMargin: { nl: 'Min. winst t.o.v. inleg (%)', en: 'Min. return on margin (%)' },
   riskTrailArm: { nl: 'Trailing stop wapenen bij (R)', en: 'Arm trailing stop at (R)' },
   riskTrailGiveback: { nl: 'Trailing terugval-marge (%)', en: 'Trailing giveback margin (%)' },
   riskChopPause: { nl: 'Pauzeer na X scans zonder kans', en: 'Pause after X scans without edge' },

@@ -117,7 +117,8 @@ export type BlockReasonCode =
   | 'BLOCKED_DRAWDOWN'
   | 'BLOCKED_DAILY_LOSS'
   | 'BLOCKED_STANDBY'
-  | 'BLOCKED_LOW_RR';
+  | 'BLOCKED_LOW_RR'
+  | 'BLOCKED_LOW_REWARD_MARGIN';
 
 /**
  * The market regime detected by the strategy engine.
@@ -805,6 +806,8 @@ export type RiskConfig = {
   minimumRrPullback?: number;
   /** Minimum risk:reward ratio for breakout setups (default 2.0). */
   minimumRrBreakout?: number;
+  /** Minimum return on margin required (e.g. 0.50 = 50% profit potential relative to margin). Rejects low-reward trades. */
+  minReturnOnMargin?: number;
   /** Cooldown minutes after take profit (default 15). */
   cooldownTpMinutes?: number;
   /** Cooldown minutes after break-even stop (default 30). */

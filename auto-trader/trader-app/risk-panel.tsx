@@ -85,6 +85,11 @@ const HELP_TEXTS: Record<string, HelpInfo> = {
     desc: 'Het maximale verlies dat binnen 24 uur gemaakt mag worden (gerealiseerd + ongerealiseerd).',
     example: 'Bij 8% worden alle nieuwe entries voor de rest van de dag geblokkeerd zodra er op die dag 8% verlies is geleden.',
   },
+  minReturnOnMargin: {
+    title: 'Min. winst t.o.v. inleg (%)',
+    desc: 'Minimaal winstpotentieel opgeteld over alle take-profit doelen t.o.v. de eigen margin inleg. Voorkomt dat er €50 margin wordt vastgezet voor een miezerige €15 potentiële winst (bij lage hefboom munten zoals AERO 3x).',
+    example: 'Bij 50% moet een trade met €50 inleg minstens €25 winstpotentieel bieden om goedgekeurd te worden. Trades met te lage hefboom of te krappe targets worden overgeslagen.',
+  },
   trailArmR: {
     title: 'Trailing stop wapenen bij (R)',
     desc: 'De winst (uitgedrukt in R = aantal keren je initiële stop-loss afstand) die bereikt moet worden voordat de dynamische trailing stop actief wordt.',
@@ -227,6 +232,7 @@ const FIELD_DEFS: Record<string, FieldDef> = {
   maxTotalMarginPct: { key: 'maxTotalMarginPct', labelKey: 'riskMaxMargin', step: 5, percent: true },
   maxDrawdownPct: { key: 'maxDrawdownPct', labelKey: 'riskStopDrawdown', step: 1, percent: true },
   dailyLossLimitPct: { key: 'dailyLossLimitPct', labelKey: 'riskDailyLossLimit', step: 1, percent: true },
+  minReturnOnMargin: { key: 'minReturnOnMargin', labelKey: 'riskMinReturnOnMargin', step: 5, percent: true },
   trailArmR: { key: 'trailArmR', labelKey: 'riskTrailArm', step: 0.1 },
   trailGiveback: { key: 'trailGiveback', labelKey: 'riskTrailGiveback', step: 5, percent: true },
   chopPauseStreak: { key: 'chopPauseStreak', labelKey: 'riskChopPause', step: 1 },

@@ -767,6 +767,7 @@ export class Engine {
       minimumRrSwing: num(merged.minimumRrSwing, 0.5, 10, this.risk.minimumRrSwing ?? 2.0),
       minimumRrPullback: num(merged.minimumRrPullback, 0.5, 10, this.risk.minimumRrPullback ?? 1.5),
       minimumRrBreakout: num(merged.minimumRrBreakout, 0.5, 10, this.risk.minimumRrBreakout ?? 2.0),
+      minReturnOnMargin: num(merged.minReturnOnMargin, 0, 5, this.risk.minReturnOnMargin ?? 0.50),
       cooldownTpMinutes: num(merged.cooldownTpMinutes, 0, 1440, this.risk.cooldownTpMinutes ?? 15),
       cooldownBeMinutes: num(merged.cooldownBeMinutes, 0, 1440, this.risk.cooldownBeMinutes ?? 30),
       cooldownSlMinutes: num(merged.cooldownSlMinutes, 0, 1440, this.risk.cooldownSlMinutes ?? 60),
@@ -966,6 +967,15 @@ export class Engine {
           if (equity > this.livePeakEquity) this.livePeakEquity = equity;
           const peakEquity = this.livePeakEquity || equity;
           const drawdownPct = peakEquity > 0 ? Math.max(0, (peakEquity - equity) / peakEquity) : 0;
+          const today = new Date().toISOString().slice(0, 10);
+          void this.store.saveAccount({
+            balance,
+            startingBalance: this.liveStartingBalance,
+            realisedPnl: 0,
+            peakEquity,
+            dayStartEquity: this.liveDayStartEquity || equity,
+            dayKey: today,
+          }).catch(() => {});
           return {
             balance,
             equity,
@@ -2254,8 +2264,23 @@ export class Engine {
     }
     const dayPnlPct = dayStart ? (account.equity - dayStart) / dayStart : 0;
 
+    // Calculate realised loss today from closed positions to prevent false halts from open floating positions
+    const closed = await this.store.positions('CLOSED', 50);
+    const startOfDayTs = new Date(new Date().setUTCHours(0, 0, 0, 0)).getTime();
+    const closedToday = closed.filter((p) => (p.closedAt ?? 0) >= startOfDayTs);
+    const realisedLossToday = closedToday.reduce((sum, p) => sum + Math.min(0, p.pnl || 0), 0);
+    const realisedLossTodayPct = dayStart > 0 ? realisedLossToday / dayStart : 0;
+
+    // Daily loss limit should protect against realised losses from closed losing trades.
+    // Floating intraday oscillations in open positions are managed by each position's stop-loss order.
+    // However, if total account equity experiences a catastrophic daily collapse (>2.5x limit), halt for safety.
+    const effectiveDayLossPct = Math.min(
+      realisedLossTodayPct,
+      dayPnlPct <= -(this.risk.dailyLossLimitPct * 2.5) ? dayPnlPct : 0
+    );
+
     const atRisk = open.filter((p) => !isPositionDerisked(p));
-    const blocked = tradingBlockedReason(account, open.length, dayPnlPct, this.risk, atRisk.length);
+    const blocked = tradingBlockedReason(account, open.length, effectiveDayLossPct, this.risk, atRisk.length);
     if (blocked?.kind === 'halt' && !this.risk.pauseNewEntries && this.blockedReason?.kind !== 'halt') {
       void notify({ kind: 'risk-halt', message: blocked.message });
     }
@@ -2758,6 +2783,25 @@ export class Engine {
       const detail = await this.market.contractDetail(signal.symbol).catch(() => null);
       const plan = planTrade(signal, account, this.risk, FEE, detail?.maxLeverage);
       if (!plan) {
+        const rawPlan = planTrade(signal, account, { ...this.risk, minReturnOnMargin: 0 }, FEE, detail?.maxLeverage);
+        if (rawPlan && rawPlan.margin > 0) {
+          const dir = signal.side === 'LONG' ? 1 : -1;
+          const potProfit = rawPlan.takeProfits.reduce((acc, tp) => {
+            const pnl = dir * (tp.price - rawPlan.entry) * (rawPlan.quantity * tp.portion);
+            return acc + pnl;
+          }, 0);
+          const ratio = potProfit / rawPlan.margin;
+          const minRatio = this.risk.minReturnOnMargin ?? 0.35;
+          if (ratio < minRatio) {
+            signal.blockReasonCode = 'BLOCKED_LOW_REWARD_MARGIN';
+            await this.logSkip(
+              signal.symbol,
+              `Winstpotentieel ($${potProfit.toFixed(2)}) is maar ${Math.round(ratio * 100)}% van inzet ($${rawPlan.margin.toFixed(2)}) — minimaal ${Math.round(minRatio * 100)}% rendement vereist`,
+              'BLOCKED_LOW_REWARD_MARGIN'
+            );
+            continue;
+          }
+        }
         const minReq = Math.max(5, this.risk.minTradeMarginUsdt ?? 5);
         if (account.balance < minReq) {
           await this.logSkip(
