@@ -756,8 +756,11 @@ export class Engine {
         : (this.risk.volumeProfileEnabled ?? true),
       maxPortfolioHeat: num(merged.maxPortfolioHeat, 0.005, 0.5, this.risk.maxPortfolioHeat ?? 0.050),
       maxCorrelatedRisk: num(merged.maxCorrelatedRisk, 0.005, 0.3, this.risk.maxCorrelatedRisk ?? 0.030),
-      maxPositionsPerSymbol: Math.round(num(merged.maxPositionsPerSymbol, 1, 5, this.risk.maxPositionsPerSymbol ?? 1)),
-      minScore: num(merged.minScore, 10, 100, this.risk.minScore ?? 70),
+      minScore: patch.minScore !== undefined
+        ? num(patch.minScore, 10, 100, this.risk.minScore ?? 65)
+        : (patch.minConfidence !== undefined
+            ? Math.max(10, Math.min(100, Math.round(patch.minConfidence * 100)))
+            : (this.risk.minScore ?? 65)),
       minReversalScore: num(merged.minReversalScore, 10, 100, this.risk.minReversalScore ?? 80),
       goldenZoneLow: num(merged.goldenZoneLow, 0.1, 0.9, this.risk.goldenZoneLow ?? 0.618),
       goldenZoneHigh: num(merged.goldenZoneHigh, 0.1, 0.95, this.risk.goldenZoneHigh ?? 0.650),
@@ -2456,10 +2459,19 @@ export class Engine {
         }
       }
 
-      // MTF Setup Score Check: Score < 65 = NO TRADE. Reversal requires >= 72.
-      const minScore = this.risk.minScore ?? 65;
+      // Smart Pyramiding / Scale-In: allow adding a 2nd tranche to an existing winning position
+      const existingPos = open.find((p) => p.symbol === signal.symbol);
+      const isScaleIn = Boolean(existingPos);
+
+      // MTF Setup Score Check: Blends structural MTF score with deep model conviction (0..1)
+      const minScore = isScaleIn && existingPos?.side === signal.side
+        ? Math.min(this.risk.minScore ?? 65, Math.round((this.risk.pyramidMinConfidence ?? 0.85) * 100))
+        : (this.risk.minScore ?? 65);
       const minReversalScore = this.risk.minReversalScore ?? 72;
-      const score = signal.setupScore?.total ?? Math.round(signal.confidence * 100);
+      const confidenceScore = Math.round(signal.confidence * 100);
+      const mtfScore = signal.setupScore?.total ?? confidenceScore;
+      // High-conviction setups (90%+ confidence with SMT, volume, golden zone) are properly credited
+      const score = Math.round(0.50 * mtfScore + 0.50 * confidenceScore);
 
       if (score < minScore) {
         signal.blockReasonCode = 'BLOCKED_LOW_SCORE';
@@ -2480,10 +2492,6 @@ export class Engine {
         );
         continue;
       }
-
-      // Smart Pyramiding / Scale-In: allow adding a 2nd tranche to an existing winning position
-      const existingPos = open.find((p) => p.symbol === signal.symbol);
-      const isScaleIn = Boolean(existingPos);
 
       if (isScaleIn && existingPos) {
         if (this.risk.pyramidingEnabled === false) continue;

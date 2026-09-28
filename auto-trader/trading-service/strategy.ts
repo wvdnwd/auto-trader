@@ -297,6 +297,14 @@ export function computeMtfScore(params: {
     if (struct15m.higherLowOrLowerHigh) {
       structure15m += 10;
       details.push(`15m ${params.side === 'LONG' ? 'Higher Low' : 'Lower High'} (+10)`);
+    } else if (structure15m === 0 && params.candles15m.length >= 10) {
+      const closes15m = params.candles15m.map((c) => c.close);
+      const ema20_15m = ema(closes15m, 20);
+      const ema50_15m = ema(closes15m, 50);
+      if (params.side === 'LONG' ? ema20_15m > ema50_15m : ema20_15m < ema50_15m) {
+        structure15m += 8;
+        details.push('15m trend alignment EMA20/50 (+8)');
+      }
     }
   } else if (params.candles1H.length >= 10) {
     // Graceful fallback to 1H structure when 15m is not supplied
@@ -370,19 +378,19 @@ export function computeMtfScore(params: {
   // 8. Confluence (max 10pt)
   if (params.fib) {
     const inGz =
-      params.fib.nearest.ratio >= 0.618 &&
+      params.fib.nearest.ratio >= 0.382 &&
       params.fib.nearest.ratio <= 0.650 &&
-      params.fib.distanceToNearest <= 0.08;
+      params.fib.distanceToNearest <= 0.12;
     if (inGz) {
       confluence += 5;
-      details.push('Fibonacci Golden Zone (0.618 - 0.650) retest (+5)');
+      details.push('Fibonacci Retracement Zone (0.382 - 0.650) confluentie (+5)');
     }
   }
   if (params.zone4H) {
     confluence += 5;
     details.push('4H S/R zone confluentie (+5)');
   }
-  if (confirm1H >= 20 && quality4H >= 15) {
+  if (confirm1H >= 15 && quality4H >= 10) {
     confluence = Math.min(10, confluence + 5);
     details.push('Multi-timeframe trend alignment (+5)');
   }
@@ -393,9 +401,9 @@ export function computeMtfScore(params: {
   );
 
   let multiplier = 0;
-  if (total >= 90) multiplier = 1.0;
-  else if (total >= 80) multiplier = 0.75;
-  else if (total >= 70) multiplier = 0.5;
+  if (total >= 75) multiplier = 1.0;
+  else if (total >= 65) multiplier = 0.75;
+  else if (total >= 55) multiplier = 0.5;
   else multiplier = 0;
 
   return {
