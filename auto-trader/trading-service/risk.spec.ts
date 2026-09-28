@@ -202,7 +202,10 @@ describe('trade sizing', () => {
 
   it('halves the risk budget while in drawdown', () => {
     const healthy = planTrade(signal, account, DEFAULT_RISK);
-    const drawn = planTrade(signal, { ...account, drawdownPct: 0.15 }, DEFAULT_RISK);
+    const drawnAccount: Account = { ...account, equity: 20_000, balance: 20_000, peakEquity: 20_000, drawdownPct: 0.1 };
+    const drawn = planTrade(signal, drawnAccount, DEFAULT_RISK);
+    expect(drawn).not.toBeNull();
+    expect(healthy).not.toBeNull();
     expect(drawn!.riskPct).toBeLessThan(healthy!.riskPct);
   });
 });
@@ -348,7 +351,8 @@ describe('concentration limits', () => {
     expect(correlationGroup('UNI_USDT')).toBe('defi');
     expect(correlationGroup('AAVE_USDT')).toBe('defi');
     expect(correlationGroup('BTC_USDT')).not.toBe(correlationGroup('DOGE_USDT'));
-    expect(correlationGroup('ARB_USDT')).toBe('alts');
+    expect(correlationGroup('ARB_USDT')).toBe('layer2');
+    expect(correlationGroup('DASH_USDT')).toBe('alts');
   });
 
   it('refuses a book that is entirely one-way once maxSameSidePositions is reached', () => {
@@ -368,12 +372,12 @@ describe('concentration limits', () => {
 
   it('does not treat the alts catch-all as a single cluster', () => {
     const open = [
-      { symbol: 'ARB_USDT', side: 'LONG' as const },
-      { symbol: 'OP_USDT', side: 'LONG' as const },
+      { symbol: 'DASH_USDT', side: 'LONG' as const },
+      { symbol: 'ZEC_USDT', side: 'LONG' as const },
     ];
     // Capping `alts` like a real cluster would block most of the book, since
     // nearly every altcoin lands in it.
-    expect(concentrationBlock({ symbol: 'AVAX_USDT', side: 'SHORT' }, open, DEFAULT_RISK)).toBeNull();
+    expect(concentrationBlock({ symbol: 'SAGA_USDT', side: 'SHORT' }, open, DEFAULT_RISK)).toBeNull();
   });
 
   it('caps how many correlated markets can be held at once', () => {

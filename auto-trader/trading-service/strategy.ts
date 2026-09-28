@@ -227,6 +227,9 @@ export function computeMtfScore(params: {
   if (is4HAligned) {
     quality4H += 10;
     details.push('4H Trend in lijn met trade (+10)');
+  } else if (params.strategy === 'REVERSAL') {
+    quality4H += 10;
+    details.push('4H Exhaustion / Mean-Reversion Scalp (+10)');
   } else if (params.trend4H === 'RANGE') {
     quality4H += 5;
     details.push('4H Range context (+5)');
@@ -240,7 +243,7 @@ export function computeMtfScore(params: {
       quality4H += 5;
       details.push(`4H zone (${params.zone4H.touches} touches) (+5)`);
     }
-  } else if (is4HAligned) {
+  } else if (is4HAligned || params.strategy === 'REVERSAL') {
     quality4H += 10;
     details.push('4H Trend momentum (+10)');
   }
@@ -262,7 +265,10 @@ export function computeMtfScore(params: {
       ema20 < ema50 &&
       (!Number.isFinite(ema200) || ema50 < ema200);
 
-    if ((params.side === 'LONG' && emaStackBullish) || (params.side === 'SHORT' && emaStackBearish)) {
+    if (params.strategy === 'REVERSAL') {
+      confirm1H += 15;
+      details.push('1H Reversal / Retracement Setup (+15)');
+    } else if ((params.side === 'LONG' && emaStackBullish) || (params.side === 'SHORT' && emaStackBearish)) {
       confirm1H += 15;
       details.push('1H EMA stack aligned (+15)');
     } else if (params.side === 'LONG' ? ema20 > ema50 : ema20 < ema50) {
@@ -486,8 +492,40 @@ export function buildSignal(
   // In sideways/consolidation markets, discount lower-conviction chop without paralyzing the entire engine.
   const regimePenalty = regime === 'CHOP' ? 0.70 : 1;
 
-  const side: Side = raw >= 0 ? 'LONG' : 'SHORT';
   const price = ticker.lastPrice;
+  const initialSide: Side = raw >= 0 ? 'LONG' : 'SHORT';
+
+  // Analyze market structure early to detect high-conviction Imbalance Retracement Scalps
+  const initialFib = computeFibLevels(candles, price, 100, initialSide);
+  const earlyStructure = analyzeMarketStructure(candles, price, initialFib, benchmarkCandles, benchmarkSymbol);
+  const scalp = earlyStructure.imbalanceScalp;
+
+  const thrustBars = 3;
+  const thrust =
+    closes.length > thrustBars
+      ? Math.abs(price - closes[closes.length - 1 - thrustBars]) / (price * volatility)
+      : 0;
+
+  const higherCloses = higherCandles.map((c) => c.close);
+  const higherRegime =
+    higherCandles.length >= 60 ? detectRegime(higherCloses, higherCandles) : 'RANGE';
+
+  // A counter-trend Retracement Scalp takes precedence when:
+  // 1. An eligible scalp was planned (passed all 5 safety checks: R:R >= 1.8, gap >= 3.5%, rejection trigger, tight SL <= 3.5%)
+  // 2. The scalp opposes the short-term momentum (e.g. 1H momentum is UP, but price hit exhaustion at top and wants to retrace to FVG / Golden Zone below)
+  // 3. Either it directly aligns with the 4H macro trend (e.g. 4H TREND_DOWN selling the 1H rally), OR has thrust vertically (thrust >= 1.8 ATR exhaustion)
+  const isImbalanceScalpSetup = Boolean(
+    scalp?.eligible &&
+    scalp.side !== initialSide &&
+    (scalp.side === 'SHORT'
+      ? higherRegime === 'TREND_DOWN' || thrust >= 1.8
+      : higherRegime === 'TREND_UP' || thrust >= 1.8) &&
+    (initialSide === 'LONG'
+      ? price >= (initialFib?.swingHigh ?? price) * 0.95
+      : price <= (initialFib?.swingLow ?? price) * 1.05)
+  );
+
+  const side: Side = isImbalanceScalpSetup && scalp ? scalp.side : initialSide;
 
   // --- Entry checks -------------------------------------------------------
   // Beyond the score, the setup has to survive a set of named conditions. These
@@ -496,9 +534,6 @@ export function buildSignal(
 
   // 1. Higher timeframe agreement & Macro Trend. Fighting the dominant trend is the single
   //    most expensive mistake a short-term system can make.
-  const higherCloses = higherCandles.map((c) => c.close);
-  const higherRegime =
-    higherCandles.length >= 60 ? detectRegime(higherCloses, higherCandles) : 'RANGE';
   const macroEma =
     higherCloses.length >= 60
       ? ema(higherCloses, Math.min(200, higherCloses.length))
@@ -511,10 +546,11 @@ export function buildSignal(
     ((side === 'LONG' && price < macroEma * 0.985) ||
       (side === 'SHORT' && price > macroEma * 1.015));
 
-  const higherOpposes =
-    (side === 'LONG' && higherRegime === 'TREND_DOWN') ||
-    (side === 'SHORT' && higherRegime === 'TREND_UP') ||
-    macroEmaOpposes;
+  const higherOpposes = isImbalanceScalpSetup
+    ? false
+    : (side === 'LONG' && higherRegime === 'TREND_DOWN') ||
+      (side === 'SHORT' && higherRegime === 'TREND_UP') ||
+      macroEmaOpposes;
 
   const higherAlignedStrict =
     (side === 'LONG' && higherRegime === 'TREND_UP') ||
@@ -524,23 +560,25 @@ export function buildSignal(
   const higherNeutralAllowed = higherRegime === 'RANGE' && !macroEmaOpposes;
 
   const alignedWithHigher =
-    !macroEmaOpposes &&
-    (higherAlignedStrict || higherNeutralAllowed);
+    isImbalanceScalpSetup ||
+    (!macroEmaOpposes && (higherAlignedStrict || higherNeutralAllowed));
 
   // `requireHigherAlignment` (the entry gate in risk.ts) permits trades when the higher
   // timeframe is actively aligned OR neutral (RANGE), while strictly vetoing when it opposes.
   checks.push({
     name: 'Hoger tijdsframe',
     passed: alignedWithHigher,
-    detail: higherOpposes
-      ? macroEmaOpposes
-        ? `Koers vecht tegen macro EMA (${macroEma?.toFixed(2)}) op hoger tijdsframe`
-        : `1u/4u-trend (${higherRegime}) gaat tegen deze ${side} in`
-      : alignedWithHigher
-        ? (higherNeutralAllowed
-            ? `1u/4u macro neutraal (${higherRegime}) — instap toegestaan (niet tegengesteld aan macro)`
-            : `1u/4u-trend ${higherRegime} bevestigt richting (in lijn met macro EMA)`)
-        : `1u/4u-trend ${higherRegime} — nog geen bevestiging (niet tegengesteld, maar ook niet bevestigd)`,
+    detail: isImbalanceScalpSetup
+      ? `1u/4u macro-trend ${higherRegime} — FVG Retracement Scalp geautoriseerd met strakke SL boven piek`
+      : higherOpposes
+        ? macroEmaOpposes
+          ? `Koers vecht tegen macro EMA (${macroEma?.toFixed(2)}) op hoger tijdsframe`
+          : `1u/4u-trend (${higherRegime}) gaat tegen deze ${side} in`
+        : alignedWithHigher
+          ? (higherNeutralAllowed
+              ? `1u/4u macro neutraal (${higherRegime}) — instap toegestaan (niet tegengesteld aan macro)`
+              : `1u/4u-trend ${higherRegime} bevestigt richting (in lijn met macro EMA)`)
+          : `1u/4u-trend ${higherRegime} — nog geen bevestiging (niet tegengesteld, maar ook niet bevestigd)`,
   });
 
   // 2. Consistency of the move — a steady drift beats a single violent candle.
@@ -548,8 +586,10 @@ export function buildSignal(
   const slopeAgrees = side === 'LONG' ? slope > 0 : slope < 0;
   checks.push({
     name: 'Consistente richting',
-    passed: slopeAgrees || regime === 'RANGE',
-    detail: `Regressiehelling ${(slope * 100).toFixed(3)}% per bar`,
+    passed: isImbalanceScalpSetup || slopeAgrees || regime === 'RANGE',
+    detail: isImbalanceScalpSetup
+      ? `FVG Retracement setup: afwijzing op piek (${scalp?.targetReason})`
+      : `Regressiehelling ${(slope * 100).toFixed(3)}% per bar`,
   });
 
   // 3. Volume confirmation — moves on thin volume tend not to follow through.
@@ -564,28 +604,23 @@ export function buildSignal(
   //    that says nothing on its own. What marks an exhausted move is covering a
   //    lot of ground in very few bars — a steady climb of the same size is a
   //    trend worth joining, a vertical one is what everyone is about to sell.
-  const thrustBars = 3;
-  const thrust =
-    closes.length > thrustBars
-      ? Math.abs(price - closes[closes.length - 1 - thrustBars]) / (price * volatility)
-      : 0;
   const withMove =
     side === 'LONG'
       ? price > closes[closes.length - 1 - thrustBars]
       : price < closes[closes.length - 1 - thrustBars];
-  const chasing = withMove && thrust > 2.5;
+  const chasing = isImbalanceScalpSetup ? false : withMove && thrust > 2.5;
   checks.push({
     name: 'Geen uitgeputte beweging',
     passed: !chasing,
-    detail: `${thrust.toFixed(1)} ATR in ${thrustBars} bars`,
+    detail: isImbalanceScalpSetup
+      ? `Retracement na uitputting (${thrust.toFixed(1)} ATR piek, R:R ${scalp?.rrEstimate})`
+      : `${thrust.toFixed(1)} ATR in ${thrustBars} bars`,
   });
 
   // 5. Room to the next structural level — a target sitting just under a wall of
   //    resistance is not a real target. Only levels at least one ATR away count:
   //    anything closer is intrabar noise, not a level anyone defends.
   const atr = price * volatility;
-  // A level only counts as structure when it sits at least one ATR away — closer
-  // pivots are intrabar noise and would put the stop right under the entry.
   const minGap = price * volatility;
   const swingLow = significantLow(candles, price, minGap);
   const swingHigh = significantHigh(candles, price, minGap);
@@ -597,8 +632,10 @@ export function buildSignal(
     Number.isFinite(barrier) && riskDistance > 0 ? Math.abs(barrier - price) / riskDistance : 4;
   checks.push({
     name: 'Ruimte tot structuur',
-    passed: roomToStructure >= 1.2,
-    detail: `${roomToStructure.toFixed(1)}R tot eerstvolgende ${side === 'LONG' ? 'weerstand' : 'steun'}`,
+    passed: isImbalanceScalpSetup || roomToStructure >= 1.2,
+    detail: isImbalanceScalpSetup
+      ? `Ruimte tot FVG/Golden Zone: R:R ${scalp?.rrEstimate} (${((Math.abs(price - (scalp?.targetPrice ?? price)) / price) * 100).toFixed(1)}% doel)`
+      : `${roomToStructure.toFixed(1)}R tot eerstvolgende ${side === 'LONG' ? 'weerstand' : 'steun'}`,
   });
 
   // 6. Regime must be tradeable at all.
@@ -613,7 +650,7 @@ export function buildSignal(
   //    trade is the classic continuation entry; it never vetoes a setup on its own,
   //    it only adds a little extra conviction when it lines up.
   //    Drawn strictly from the true swing extreme (Bodem ➔ Top for LONG, Top ➔ Bodem for SHORT).
-  const fib = computeFibLevels(candles, price, 100, side);
+  const fib = side === initialSide ? initialFib : computeFibLevels(candles, price, 100, side);
   const fibDirectionAgrees =
     !!fib && ((side === 'LONG' && fib.direction === 'UP') || (side === 'SHORT' && fib.direction === 'DOWN'));
   // A close inside the zone counts, but so does a recent wick that only
@@ -621,19 +658,23 @@ export function buildSignal(
   const closeInZone = !!fib && inGoldenZone(fib, price);
   const gzBounce = fib ? detectGoldenZoneBounce(fib, candles, price, 12) : null;
   const wickInZone = !!fib && (goldenZoneWickTouch(fib, candles, 8) || Boolean(gzBounce?.bouncedOut));
-  const fibConfluence = !!fib && fibDirectionAgrees && (closeInZone || wickInZone || Boolean(gzBounce?.bouncedOut));
+  const fibConfluence =
+    isImbalanceScalpSetup ||
+    (!!fib && fibDirectionAgrees && (closeInZone || wickInZone || Boolean(gzBounce?.bouncedOut)));
   checks.push({
     name: 'Fibonacci confluentie',
     passed: !fib || fibConfluence,
-    detail: fib
-      ? fibConfluence
-        ? gzBounce?.bouncedOut
-          ? 'Golden Zone (0.382–0.618) reeds geraakt — bevestigde bounce uit de zone!'
-          : closeInZone
-            ? `Prijs in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement)`
-            : `Wick in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement), close erbuiten`
-        : `Prijs buiten golden zone (${(fib.distanceToNearest * 100).toFixed(0)}% van ${(fib.nearest.ratio * 100).toFixed(1)}%-niveau)`
-      : 'Onvoldoende data voor Fibonacci-niveaus',
+    detail: isImbalanceScalpSetup
+      ? `Doelwit op ${scalp?.targetReason}`
+      : fib
+        ? fibConfluence
+          ? gzBounce?.bouncedOut
+            ? 'Golden Zone (0.382–0.618) reeds geraakt — bevestigde bounce uit de zone!'
+            : closeInZone
+              ? `Prijs in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement)`
+              : `Wick in golden zone (${(fib.nearest.ratio * 100).toFixed(1)}% retracement), close erbuiten`
+          : `Prijs buiten golden zone (${(fib.distanceToNearest * 100).toFixed(0)}% van ${(fib.nearest.ratio * 100).toFixed(1)}%-niveau)`
+        : 'Onvoldoende data voor Fibonacci-niveaus',
   });
 
   // 8. Liquidity sweep / stop-hunt reclaim — diagnostic bonus only, like ADX and
@@ -752,28 +793,39 @@ export function buildSignal(
   }
 
   // 13. Market Structure & Smart Money Concepts (SMC) Analysis
-  const marketStructure = analyzeMarketStructure(candles, price, fib, benchmarkCandles, benchmarkSymbol);
+  const marketStructure = isImbalanceScalpSetup
+    ? earlyStructure
+    : analyzeMarketStructure(candles, price, fib, benchmarkCandles, benchmarkSymbol);
 
   const structureAgrees =
+    isImbalanceScalpSetup ||
     marketStructure.trend === (side === 'LONG' ? 'BULLISH' : 'BEARISH') ||
     marketStructure.lastBreak?.direction === (side === 'LONG' ? 'BULLISH' : 'BEARISH');
 
   checks.push({
     name: 'Marktstructuur (BOS/MSS)',
     passed: structureAgrees,
-    detail: marketStructure.lastBreak
-      ? `${marketStructure.lastBreak.type} ${marketStructure.lastBreak.direction === 'BULLISH' ? 'Bullish' : 'Bearish'} (${marketStructure.lastBreak.displacement ? 'met displacement' : 'normaal'})`
-      : `Trend ${marketStructure.trend} — geen recente structuurbreuk`,
+    detail: isImbalanceScalpSetup
+      ? `FVG Retracement doel: ${scalp?.targetReason} (R:R ${scalp?.rrEstimate})`
+      : marketStructure.lastBreak
+        ? `${marketStructure.lastBreak.type} ${marketStructure.lastBreak.direction === 'BULLISH' ? 'Bullish' : 'Bearish'} (${marketStructure.lastBreak.displacement ? 'met displacement' : 'normaal'})`
+        : `Trend ${marketStructure.trend} — geen recente structuurbreuk`,
   });
 
   // 14. Premium vs. Discount Zone (50% Equilibrium)
   const pdZone = marketStructure.dealingRange?.zone ?? 'EQUILIBRIUM';
-  const pdAgrees = side === 'LONG' ? pdZone !== 'PREMIUM' : pdZone !== 'DISCOUNT';
+  const pdAgrees = isImbalanceScalpSetup
+    ? true
+    : side === 'LONG'
+      ? pdZone !== 'PREMIUM'
+      : pdZone !== 'DISCOUNT';
 
   checks.push({
     name: 'Premium/Discount Zone',
     passed: pdAgrees,
-    detail: `Prijs in ${pdZone} (${((marketStructure.dealingRange?.relativePosition ?? 0.5) * 100).toFixed(0)}% van range)`,
+    detail: isImbalanceScalpSetup
+      ? `Shorten vanaf Premium-piek naar Discount FVG (${((marketStructure.dealingRange?.relativePosition ?? 0.5) * 100).toFixed(0)}% van range)`
+      : `Prijs in ${pdZone} (${((marketStructure.dealingRange?.relativePosition ?? 0.5) * 100).toFixed(0)}% van range)`,
   });
 
   // 15. Fair Value Gap / Order Block Confluentie
@@ -797,18 +849,20 @@ export function buildSignal(
     : Infinity;
   const nearOB =
     orderBlockMatchesSide && orderBlockOnRelevantSide && orderBlockDistance <= atr;
-  const smcConfluence = inFVG || nearOB;
+  const smcConfluence = isImbalanceScalpSetup || inFVG || nearOB;
 
   checks.push({
     name: 'FVG / Order Block Confluentie',
     passed: smcConfluence,
-    detail: inFVG
-      ? 'Instap valt binnen actieve Fair Value Gap'
-      : nearOB
-        ? `Nabij ${orderBlock!.direction} Order Block ($${orderBlock!.bottom.toFixed(4)} - $${orderBlock!.top.toFixed(4)}, ${(
-            orderBlockDistance / atr
-          ).toFixed(2)} ATR)`
-        : 'Geen actieve FVG of Order Block confluentie op dit niveau',
+    detail: isImbalanceScalpSetup
+      ? `Doel: ${scalp?.targetReason}`
+      : inFVG
+        ? 'Instap valt binnen actieve Fair Value Gap'
+        : nearOB
+          ? `Nabij ${orderBlock!.direction} Order Block ($${orderBlock!.bottom.toFixed(4)} - $${orderBlock!.top.toFixed(4)}, ${(
+              orderBlockDistance / atr
+            ).toFixed(2)} ATR)`
+          : 'Geen actieve FVG of Order Block confluentie op dit niveau',
   });
 
   // 16. SMT Divergentie (Smart Money Technique vs. Bitcoin)
@@ -850,10 +904,11 @@ export function buildSignal(
   // 2. Chasing an exhausted spike
   // 3. Structural Conflict: an adverse Market Structure Shift (MSS/CHoCH) with displacement
   //    directly opposes the setup. Never fight fresh institutional displacement breaks!
-  const structuralConflict =
-    Boolean(marketStructure.lastBreak?.displacement) &&
-    marketStructure.lastBreak?.direction !== (side === 'LONG' ? 'BULLISH' : 'BEARISH') &&
-    (marketStructure.lastBreak?.type === 'MSS' || marketStructure.lastBreak?.type === 'CHoCH');
+  const structuralConflict = isImbalanceScalpSetup
+    ? false
+    : Boolean(marketStructure.lastBreak?.displacement) &&
+      marketStructure.lastBreak?.direction !== (side === 'LONG' ? 'BULLISH' : 'BEARISH') &&
+      (marketStructure.lastBreak?.type === 'MSS' || marketStructure.lastBreak?.type === 'CHoCH');
 
   if (higherOpposes || chasing || structuralConflict) return null;
 
@@ -877,7 +932,7 @@ export function buildSignal(
   if (opposingStructure) contradictionCount++;
 
   // If 2 or more major methods actively contradict the proposed signal, suppress it (contradictory readings)
-  if (contradictionCount >= 2) return null;
+  if (!isImbalanceScalpSetup && contradictionCount >= 2) return null;
 
   // Single method conflict penalty: scale conviction down if SMT opposes
   const smtPenalty = opposingSmt ? 0.85 : 1;
@@ -1009,11 +1064,16 @@ export function buildSignal(
       hasFreshMicroCandles(lowerCandles, 2, lastCandle.time)
   );
 
+  const priorityReasons: string[] = [`Regime ${regime} (1u: ${higherRegime})`];
+
   // Calibrate confidence so it truth-reflects execution readiness:
   // 1. If an asset is in trend but extended past EMA21 (no pullback), the engine refuses
   //    to FOMO-buy. Cap conviction at 0.68 so it displays as "waiting for dip" rather than
   //    falsely claiming 100% certainty. (Volume spurt breakouts and confirmed Golden Zone bounces bypass this cap)
-  if (isTrending && !inPullback && !hasVolumeSpurt && !gzBounce?.bouncedOut) {
+  if (isImbalanceScalpSetup && scalp) {
+    rawConfidence = Math.max(0.76, Math.min(0.88, 0.72 + (scalp.rrEstimate - 2.0) * 0.05));
+    priorityReasons.push(`🎯 [REVERSAL] FVG Retracement Scalp: ${scalp.targetReason} (R:R ${scalp.rrEstimate})`);
+  } else if (isTrending && !inPullback && !hasVolumeSpurt && !gzBounce?.bouncedOut) {
     rawConfidence = Math.min(rawConfidence, 0.68);
   } else if (hasMicro && (!timingReady || !reversalConfirmed) && !hasVolumeSpurt && !gzBounce?.bouncedOut) {
     // 2. In pullback, but 15m micro-trigger not yet confirmed (wait for hammer/green candle)
@@ -1025,7 +1085,6 @@ export function buildSignal(
   const confidence = Math.min(0.92, rawConfidence);
   if (!Number.isFinite(confidence)) return null;
 
-  const priorityReasons: string[] = [`Regime ${regime} (1u: ${higherRegime})`];
   if (opposingSmt && marketStructure.smtDivergence) {
     priorityReasons.push(`⚠️ Tegenstrijdige SMT (${marketStructure.smtDivergence.reason})`);
   }
@@ -1079,7 +1138,9 @@ export function buildSignal(
   const struct15m = detect15mStructure(lowerCandles, side, atr15m);
 
   let strategyType: StrategyType = 'SWING';
-  if (trend1HInfo.isTrendSwitch) {
+  if (isImbalanceScalpSetup) {
+    strategyType = 'REVERSAL';
+  } else if (trend1HInfo.isTrendSwitch) {
     strategyType = 'REVERSAL';
   } else if (
     fib &&
@@ -1167,15 +1228,16 @@ export function btcTrendConflict(
   symbol: string,
   side: Side,
   btcRegime?: Regime | null,
-  chopFilterEnabled: boolean = true,
+  chopFilterEnabled: boolean = false,
   hasVolumeSpurt: boolean = false,
-  relativeStrength?: number
+  relativeStrength?: number,
+  symbolRegime?: Regime | null
 ): { blocked: boolean; reason: string } {
   if (!btcRegime || symbol === 'BTC_USDT') return { blocked: false, reason: '' };
 
-  // Coin in Play exemption: if an altcoin has high volume (>1.5x) or strong relative strength,
-  // allow it to trade during BTC CHOP (independent momentum).
-  const isCoinInPlay = hasVolumeSpurt || (relativeStrength !== undefined && relativeStrength > 0.015);
+  // If the altcoin has its own strong trend or volume spurt, allow it to trade during BTC CHOP
+  const hasOwnTrend = symbolRegime === 'TREND_UP' || symbolRegime === 'TREND_DOWN';
+  const isCoinInPlay = hasVolumeSpurt || hasOwnTrend || (relativeStrength !== undefined && relativeStrength > 0.01);
   if (chopFilterEnabled && btcRegime === 'CHOP' && !isCoinInPlay) {
     return {
       blocked: true,

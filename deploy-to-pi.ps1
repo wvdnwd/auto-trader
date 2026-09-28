@@ -52,7 +52,8 @@ $AllowList = @(
     "auto-trader",
     "setup-pi.sh",
     "start-traderr.sh",
-    "ecosystem.config.cjs"
+    "ecosystem.config.cjs",
+    "scripts"
 )
 
 $RequiredFiles = @(

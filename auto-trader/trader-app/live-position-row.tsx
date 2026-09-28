@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import styles from './trader-app.module.css';
-import { coinInfo, splitSymbol } from './coin-info.js';
+import { coinInfo, formatSymbol, splitSymbol } from './coin-info.js';
 import { dateTime, price as fmtPrice, pct, qty, signed, since, usd } from './format.js';
 import type { LiveExchangePosition, Position } from './types.js';
 
 export type LivePositionRowProps = {
-  /** The position as reported directly by MEXC or Hyperliquid. */
+  /** The position as reported directly by Hyperliquid. */
   position: LiveExchangePosition;
   /** The matching strategy plan with SL, TP targets, and sizing. */
   plan?: Position;
@@ -20,7 +20,7 @@ export type LivePositionRowProps = {
 };
 
 /**
- * An open position on MEXC/Hyperliquid with full visibility into the strategy's planned
+ * An open position on Hyperliquid with full visibility into the strategy's planned
  * Take-Profit targets (with expected dollar profit per rung) and Stop-Loss point
  * (with maximum risk in dollars), as well as liquidation distance and live PnL.
  *
@@ -42,6 +42,8 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
 
   // Margin collateral committed to this position
   const margin =
+    position.margin ??
+    plan?.initialMargin ??
     plan?.margin ??
     (position.entryPrice > 0 && position.vol > 0
       ? (position.entryPrice * position.vol) / Math.max(1, position.leverage)
@@ -57,9 +59,10 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
       : 0;
 
   // Stop-Loss price & maximum risk calculation
+  // Risk in USDC = stop-afstand × hoeveelheid coins
   const slPrice = plan?.stopLoss;
   const slDistance = slPrice !== undefined ? Math.abs(position.entryPrice - slPrice) : 0;
-  const slRiskAmount = -slDistance * position.vol;
+  const slRiskAmount = -(slDistance * position.vol);
   const distToStopPct =
     position.markPrice > 0 && slPrice !== undefined && slPrice > 0
       ? Math.abs(position.markPrice - slPrice) / position.markPrice
@@ -101,15 +104,15 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
             {coin.slice(0, 1)}
           </span>
           <span className={styles.symbolText}>
-            <span className={styles.symbol}>{position.symbol.replace('_', '/')}</span>
+            <span className={styles.symbol}>{formatSymbol(position.symbol)}</span>
             <span className={styles.coinName}>{info.name}</span>
           </span>
           <span className={`${styles.tag} ${position.side === 'LONG' ? styles.long : styles.short}`}>
             {position.side}
           </span>
           <span className={`${styles.tag} ${styles.lev}`}>{position.leverage}x</span>
-          <span className={`${styles.tag} ${styles.short}`} title="Rechtstreeks van MEXC opgehaald">
-            🔴 MEXC
+          <span className={`${styles.tag} ${styles.short}`} title="Rechtstreeks van Hyperliquid opgehaald">
+            🔴 HL
           </span>
           {plan?.trailingArmed && <span className={`${styles.tag} ${styles.neutral}`}>TRAIL</span>}
           {plan?.breakEven && !plan?.trailingArmed && (
@@ -266,11 +269,8 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
                 position.entryPrice > 0
                   ? ((level.price - position.entryPrice) / position.entryPrice) * dir
                   : 0;
-              const allocatedMargin = margin * level.portion;
-              const amountPct =
-                allocatedMargin > 0
-                  ? projected / allocatedMargin
-                  : priceGainPct * position.leverage;
+              const portionRoe = margin > 0 ? projected / margin : 0;
+              const trancheRoe = priceGainPct * position.leverage;
               const movedStop = i === 0 && level.hit && plan?.breakEven;
               return (
                 <div
@@ -291,19 +291,22 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
                   <span className={`${styles.tpValue} ${styles.up}`}>
                     +{usd(projected)}
                   </span>
-                  <span className={`${styles.tpValue} ${styles.up}`}>
-                    +{pct(amountPct, 1)}
+                  <span className={`${styles.tpValue} ${styles.up}`} title={`+${pct(portionRoe, 1)} winst op je totale $${margin.toFixed(2)} inzet (+${pct(trancheRoe, 1)} op dit deel met ${position.leverage}x hefboom)`}>
+                    +{pct(portionRoe, 1)}
+                    <span className={styles.tpPrice} style={{ display: 'block', fontSize: '0.78em', opacity: 0.7 }}>
+                      ({pct(trancheRoe, 1)} lev)
+                    </span>
                   </span>
                 </div>
               );
             })}
             <div className={styles.tpFoot}>
               <span className={styles.tpFootItem}>
-                Winstpotentieel: <b className={styles.up}>+{usd(totalProjectedProfit)}</b>
+                Winstpotentieel: <b className={styles.up}>+{usd(totalProjectedProfit)} ({pct(margin > 0 ? totalProjectedProfit / margin : 0, 1)})</b>
               </span>
               {slPrice !== undefined && (
                 <span className={styles.tpFootItem}>
-                  Max. risico (SL): <b className={styles.down}>-{usd(Math.abs(slRiskAmount))}</b>
+                  Max. risico (SL): <b className={styles.down}>-{usd(Math.abs(slRiskAmount))} (-{pct(margin > 0 ? Math.abs(slRiskAmount) / margin : 0, 1)})</b>
                 </span>
               )}
               {rrRatio !== '—' && (
@@ -349,10 +352,10 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
                 setShowTpSlModal(!showTpSlModal);
                 setRealignSuccess(null);
               }}
-              title="Take Profit en Stop Loss herberekenen of handmatig aanpassen op de exchange"
+              title="Take Profit en Stop Loss handmatig aanpassen of automatisch herberekenen op de exchange"
               style={{ background: 'rgba(251, 191, 36, 0.12)', borderColor: '#fbbf24', color: '#fbbf24' }}
             >
-              🎯 Reset TP/SL
+              ✏️ Wijzig TP/SL
             </button>
           )}
           {onReduce && plan && (
@@ -535,6 +538,26 @@ export function LivePositionRow({ position, plan, onClose, onReduce, onRealignTp
                   alert('Vul minimaal een geldige Stop Loss en TP1 prijs in.');
                   return;
                 }
+
+                // Guard against inverted SL/TP relative to current mark price
+                const refPrice = position.markPrice || position.entryPrice;
+                if (position.side === 'LONG' && sl >= refPrice) {
+                  alert(`Ongeldige Stop Loss: voor een LONG moet de Stop Loss (${sl}) lager zijn dan de huidige marktprijs (${refPrice}).`);
+                  return;
+                }
+                if (position.side === 'SHORT' && sl <= refPrice) {
+                  alert(`Ongeldige Stop Loss: voor een SHORT moet de Stop Loss (${sl}) hoger zijn dan de huidige marktprijs (${refPrice}).`);
+                  return;
+                }
+                if (position.side === 'LONG' && tp1 <= refPrice) {
+                  alert(`Ongeldige Take Profit: voor een LONG moet TP1 (${tp1}) hoger zijn dan de huidige marktprijs (${refPrice}).`);
+                  return;
+                }
+                if (position.side === 'SHORT' && tp1 >= refPrice) {
+                  alert(`Ongeldige Take Profit: voor een SHORT moet TP1 (${tp1}) lager zijn dan de huidige marktprijs (${refPrice}).`);
+                  return;
+                }
+
                 const tps: Array<{ price: number; portion: number }> = [{ price: tp1, portion: 0.33 }];
                 if (Number.isFinite(tp2) && tp2 > 0) tps.push({ price: tp2, portion: 0.33 });
                 if (Number.isFinite(tp3) && tp3 > 0) tps.push({ price: tp3, portion: 0.34 });

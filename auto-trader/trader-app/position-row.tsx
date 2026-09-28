@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import styles from './trader-app.module.css';
-import { coinInfo, splitSymbol } from './coin-info.js';
+import { coinInfo, formatSymbol, splitSymbol } from './coin-info.js';
 import { dateTime, duration, price as fmtPrice, pct, qty, signed, since, usd } from './format.js';
 import type { Position } from './types.js';
 
@@ -75,7 +75,13 @@ export function PositionRow({ position, mark, onClose, onReduce, onRealignTpSl, 
   const live = Math.max(dir * (current - position.entry) * remaining, -position.margin);
   const pnl = open ? live + booked : position.pnl ?? 0;
   // Percentage is measured against the collateral originally committed.
-  const baseMargin = position.quantity ? (position.margin * position.quantity) / (remaining || position.quantity) : position.margin;
+  const baseMargin =
+    position.initialMargin ??
+    (position.quantity && position.entry && position.leverage
+      ? (position.quantity * position.entry) / position.leverage
+      : position.quantity
+      ? (position.margin * position.quantity) / (remaining || position.quantity)
+      : position.margin);
   const pnlPct = baseMargin ? pnl / baseMargin : 0;
   const stale = open && mark === undefined;
 
@@ -109,7 +115,7 @@ export function PositionRow({ position, mark, onClose, onReduce, onRealignTpSl, 
             {splitSymbol(position.symbol).base.slice(0, 1)}
           </span>
           <span className={styles.symbolText}>
-            <span className={styles.symbol}>{position.symbol.replace('_', '/')}</span>
+            <span className={styles.symbol}>{formatSymbol(position.symbol)}</span>
             <span className={styles.coinName}>
               {coinInfo(position.symbol).name}
             </span>
@@ -121,7 +127,7 @@ export function PositionRow({ position, mark, onClose, onReduce, onRealignTpSl, 
           {position.live && (
             <span
               className={`${styles.tag} ${styles.short}`}
-              title="Deze positie staat ook echt open op MEXC"
+              title="Deze positie staat ook echt open op Hyperliquid"
             >
               🔴 LIVE
             </span>
@@ -359,10 +365,10 @@ export function PositionRow({ position, mark, onClose, onReduce, onRealignTpSl, 
                 setShowTpSlModal(!showTpSlModal);
                 setRealignSuccess(null);
               }}
-              title="Take Profit en Stop Loss herberekenen of handmatig aanpassen"
+              title="Take Profit en Stop Loss handmatig aanpassen of automatisch herberekenen"
               style={{ background: 'rgba(251, 191, 36, 0.12)', borderColor: '#fbbf24', color: '#fbbf24' }}
             >
-              🎯 Reset TP/SL
+              ✏️ Wijzig TP/SL
             </button>
           )}
           {onReduce && (
@@ -545,6 +551,26 @@ export function PositionRow({ position, mark, onClose, onReduce, onRealignTpSl, 
                   alert('Vul minimaal een geldige Stop Loss en TP1 prijs in.');
                   return;
                 }
+
+                // Guard against inverted SL/TP relative to current price
+                const refPrice = current;
+                if (position.side === 'LONG' && sl >= refPrice) {
+                  alert(`Ongeldige Stop Loss: voor een LONG moet de Stop Loss (${sl}) lager zijn dan de huidige koers (${refPrice}).`);
+                  return;
+                }
+                if (position.side === 'SHORT' && sl <= refPrice) {
+                  alert(`Ongeldige Stop Loss: voor een SHORT moet de Stop Loss (${sl}) hoger zijn dan de huidige koers (${refPrice}).`);
+                  return;
+                }
+                if (position.side === 'LONG' && tp1 <= refPrice) {
+                  alert(`Ongeldige Take Profit: voor een LONG moet TP1 (${tp1}) hoger zijn dan de huidige koers (${refPrice}).`);
+                  return;
+                }
+                if (position.side === 'SHORT' && tp1 >= refPrice) {
+                  alert(`Ongeldige Take Profit: voor een SHORT moet TP1 (${tp1}) lager zijn dan de huidige koers (${refPrice}).`);
+                  return;
+                }
+
                 const tps: Array<{ price: number; portion: number }> = [{ price: tp1, portion: 0.33 }];
                 if (Number.isFinite(tp2) && tp2 > 0) tps.push({ price: tp2, portion: 0.33 });
                 if (Number.isFinite(tp3) && tp3 > 0) tps.push({ price: tp3, portion: 0.34 });

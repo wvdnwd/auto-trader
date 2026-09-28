@@ -7,6 +7,7 @@ import type {
   OptimizeStatus,
   RiskConfig,
   Snapshot,
+  SystemError,
   Ticker,
   WalkForwardStatus,
 } from './types.js';
@@ -129,6 +130,13 @@ export function closePosition(id: string): Promise<{ closed: boolean }> {
 }
 
 /**
+ * Close all open positions immediately at market (panic / emergency close).
+ */
+export function closeAllPositions(): Promise<{ closed: number; total: number; errors: string[] }> {
+  return request('/positions/close-all', { method: 'POST' });
+}
+
+/**
  * Reduce an open position by a fraction (e.g. 0.5 = 50% partial take-profit).
  *
  * @param id position id.
@@ -228,7 +236,7 @@ export function fetchChart(symbol: string, interval = 'Min60'): Promise<ChartDat
 }
 
 /**
- * Arm or disarm live MEXC order execution.
+ * Arm or disarm live Hyperliquid order execution.
  *
  * Rejected by the server when arming is requested without exchange
  * credentials configured — the caller should surface that error rather than
@@ -251,21 +259,27 @@ export type ExchangeCredentialsInput = {
 };
 
 /**
- * Save (or clear, when passed empty strings) the Hyperliquid credentials
- * used for live order execution.
+ * Save credentials for MEXC or Hyperliquid live order execution.
  */
 export function saveExchangeCredentials(
-  credsOrWallet: ExchangeCredentialsInput | string,
-  privateKey?: string
+  credsOrKey: ExchangeCredentialsInput | string,
+  maybeSecret?: string
 ): Promise<LiveTradingStatus> {
-  const payload = typeof credsOrWallet === 'string'
-    ? { walletAddress: credsOrWallet, privateKey: privateKey || '', venue: 'hyperliquid' }
-    : credsOrWallet;
+  let payload: ExchangeCredentialsInput;
+  if (typeof credsOrKey === 'string') {
+    if (credsOrKey.startsWith('0x') || !maybeSecret) {
+      payload = { walletAddress: credsOrKey, privateKey: maybeSecret || '', venue: 'hyperliquid' };
+    } else {
+      payload = { apiKey: credsOrKey, apiSecret: maybeSecret, venue: 'mexc' };
+    }
+  } else {
+    payload = credsOrKey;
+  }
   return request('/exchange/credentials', { method: 'POST', body: JSON.stringify(payload) });
 }
 
 /**
- * Switch active execution venue between Hyperliquid and MEXC.
+ * Switch active execution venue (MEXC or Hyperliquid).
  */
 export function setExchangeVenue(venue: 'mexc' | 'hyperliquid'): Promise<LiveTradingStatus> {
   return request('/exchange/venue', { method: 'POST', body: JSON.stringify({ venue }) });
@@ -341,4 +355,34 @@ export function placeTestOrder(
  */
 export function closeExchangePosition(symbol: string): Promise<{ orderId: string; vol: number }> {
   return request(`/exchange/positions/${encodeURIComponent(symbol)}/close`, { method: 'POST' });
+}
+
+/**
+ * Transfer USDC between spot and perp account on Hyperliquid.
+ * @param amount USDC amount to transfer
+ * @param toPerp true = spot→perp (default), false = perp→spot
+ */
+export function spotToPerpTransfer(amount: number, toPerp = true): Promise<{ ok: boolean; message: string }> {
+  return request('/exchange/spot-to-perp', {
+    method: 'POST',
+    body: JSON.stringify({ amount, toPerp }),
+  });
+}
+
+/**
+ * Fetch persisted and recent system errors from trading service.
+ */
+export function fetchErrors(limit = 100, source?: string): Promise<{ errors: SystemError[]; total: number }> {
+  const query = new URLSearchParams();
+  if (limit) query.set('limit', String(limit));
+  if (source) query.set('source', source);
+  const qStr = query.toString() ? `?${query.toString()}` : '';
+  return request(`/errors${qStr}`);
+}
+
+/**
+ * Clear all logged system errors.
+ */
+export function clearErrors(): Promise<{ ok: boolean }> {
+  return request('/errors/clear', { method: 'POST' });
 }

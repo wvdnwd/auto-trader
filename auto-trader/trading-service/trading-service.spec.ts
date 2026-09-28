@@ -1107,4 +1107,21 @@ describe('advanced exit management', () => {
     const open = await store.positions('OPEN');
     expect(open.length).toBeGreaterThan(0);
   });
+
+  it('closes all open positions on closeAllPositions call', async () => {
+    const market = new FakeMarket();
+    const { store, engine } = engineWith(market);
+    engine.setRisk({ minConfidence: 0.50, entryCooldownMinutes: 0, ltfSniper5mEnabled: false });
+
+    await engine.cycle();
+    const openBefore = await store.positions('OPEN');
+    expect(openBefore.length).toBeGreaterThan(0);
+
+    const result = await engine.closeAllPositions();
+    expect(result.closed).toBe(openBefore.length);
+    expect(result.total).toBe(openBefore.length);
+
+    const openAfter = await store.positions('OPEN');
+    expect(openAfter.length).toBe(0);
+  });
 });

@@ -5,6 +5,7 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { MarketData } from './market-data.js';
 import type { TradingService } from './trading-service.js';
+import { ErrorLogger } from './error-logger.js';
 
 function loadEnv(): void {
   try {
@@ -152,6 +153,15 @@ export function run() {
     res.json(serviceFor(res).updateRisk(body));
   });
 
+  app.post('/positions/close-all', async (_req, res) => {
+    try {
+      const result = await serviceFor(res).closeAllPositions();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   app.post('/positions/:id/close', async (req, res) => {
     try {
       const closed = await serviceFor(res).closePosition(req.params.id);
@@ -258,6 +268,26 @@ export function run() {
     }
   });
 
+  app.post('/exchange/spot-to-perp', async (req, res) => {
+    try {
+      const { amount, toPerp = true } = req.body || {};
+      if (typeof amount !== 'number' || amount <= 0) {
+        res.status(400).json({ ok: false, message: 'Ongeldig bedrag' });
+        return;
+      }
+      const service = serviceFor(res);
+      const adapter = (service as unknown as { exchange: { spotToPerpTransfer?: (a: number, b: boolean) => Promise<{ ok: boolean; message: string }> } }).exchange;
+      if (typeof adapter.spotToPerpTransfer !== 'function') {
+        res.status(400).json({ ok: false, message: 'Spot→Perp transfer alleen beschikbaar op Hyperliquid' });
+        return;
+      }
+      const result = await adapter.spotToPerpTransfer(amount, toPerp);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ ok: false, message: (err as Error).message });
+    }
+  });
+
   app.get('/chart/:symbol', async (req, res) => {
     try {
       const interval = typeof req.query.interval === 'string' ? req.query.interval : 'Min60';
@@ -358,6 +388,35 @@ export function run() {
     } catch (err) {
       res.status(409).json({ error: (err as Error).message });
     }
+  });
+
+  app.get('/errors', (req, res) => {
+    try {
+      const limit = Number(req.query.limit) || 100;
+      const source = typeof req.query.source === 'string' ? req.query.source : undefined;
+      const logger = ErrorLogger.getInstance();
+      res.json({
+        errors: logger.getErrors(limit, source),
+        total: logger.getTotalCount(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/errors/clear', (_req, res) => {
+    try {
+      ErrorLogger.getInstance().clearErrors();
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Global Express error handler
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    ErrorLogger.getInstance().error('Express', err);
+    res.status(500).json({ error: err.message || 'Internal Server Error' });
   });
 
   const port = Number(process.env.PORT || 3000);

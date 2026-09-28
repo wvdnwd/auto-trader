@@ -75,4 +75,11 @@ export type {
   Signal,
   Ticker,
   TradePlan,
+  FearAndGreed,
+  MacroEvent,
+  NewsItem,
+  MarketIntelligence,
+  SystemError,
 } from './types.js';
+export { NewsEngine } from './news-engine.js';
+export { ErrorLogger } from './error-logger.js';

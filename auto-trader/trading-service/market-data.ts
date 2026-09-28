@@ -1,36 +1,8 @@
 import type { Candle, Ticker } from './types.js';
+import { ErrorLogger } from './error-logger.js';
 export { isCryptoPerp } from './market-filter.js';
 
-const BASE = process.env.FUTURES_API_BASE || '';
 const HYPERLIQUID_URL = process.env.HYPERLIQUID_INFO_URL || 'https://api.hyperliquid.xyz/info';
-
-type RawTicker = {
-  symbol: string;
-  lastPrice: number;
-  bid1?: number;
-  ask1?: number;
-  amount24: number;
-  riseFallRate: number;
-  fundingRate: number;
-};
-
-type RawKline = {
-  time: number[];
-  open: number[];
-  high: number[];
-  low: number[];
-  close: number[];
-  vol: number[];
-};
-
-type RawContractDetail = {
-  symbol: string;
-  contractSize: number;
-  minVol: number;
-  maxVol: number;
-  volScale: number;
-  priceScale?: number;
-};
 
 export type ContractDetail = {
   symbol: string;
@@ -42,14 +14,16 @@ export type ContractDetail = {
   maxVol: number;
   /** Decimal places allowed for order prices. */
   priceScale: number;
+  /** Maximum leverage tier allowed for this contract on the exchange. */
+  maxLeverage?: number;
 };
 
 const RETRYABLE_CODES = new Set([429, 500, 502, 503, 510]);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const HISTORY_CACHE_LIMIT = 200;
 
-const MAX_CONCURRENT_REQUESTS = 4;
-const DISPATCH_GAP_MS = 100;
+const MAX_CONCURRENT_REQUESTS = 2;
+const DISPATCH_GAP_MS = 250;
 
 let activeRequests = 0;
 let lastDispatchAt = 0;
@@ -122,11 +96,123 @@ function hlIntervalToMs(interval: string): number {
   }
 }
 
-async function postHl<T>(body: unknown, attempts = 3): Promise<T> {
+function toBinanceSymbol(symbol: string): string {
+  const coin = normalizeCoin(symbol);
+  if (coin === 'kPEPE') return '1000PEPEUSDT';
+  if (coin === 'kBONK') return '1000BONKUSDT';
+  if (coin === 'kSHIB') return '1000SHIBUSDT';
+  if (coin === 'kMOG') return '1000MOGUSDT';
+  return `${coin}USDT`;
+}
+
+function toBinanceInterval(interval: string): string {
+  const lower = interval.toLowerCase();
+  if (lower === 'min5' || lower === '5m') return '5m';
+  if (lower === 'min15' || lower === '15m') return '15m';
+  if (lower === 'min60' || lower === '60m' || lower === '1h') return '1h';
+  if (lower === '4h') return '4h';
+  if (lower === '1d' || lower === '1day') return '1d';
+  return '15m';
+}
+
+function toBybitInterval(interval: string): string {
+  const lower = interval.toLowerCase();
+  if (lower === 'min5' || lower === '5m') return '5';
+  if (lower === 'min15' || lower === '15m') return '15';
+  if (lower === 'min60' || lower === '60m' || lower === '1h') return '60';
+  if (lower === '4h') return '240';
+  if (lower === '1d' || lower === '1day') return 'D';
+  return '15';
+}
+
+async function fetchBinanceCandles(symbol: string, interval: string, limit = 150): Promise<Candle[] | null> {
+  try {
+    const binanceSymbol = toBinanceSymbol(symbol);
+    const binanceInterval = toBinanceInterval(interval);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+
+    const res = await fetch(
+      `https://fapi.binance.com/fapi/v1/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${limit}`,
+      { signal: controller.signal }
+    ).finally(() => clearTimeout(timeout));
+
+    if (!res.ok) return null;
+    const raw = (await res.json()) as Array<[number, string, string, string, string, string, ...unknown[]]>;
+    if (!Array.isArray(raw) || !raw.length) return null;
+
+    const data = raw
+      .map((c) => ({
+        time: Math.floor(Number(c[0]) / 1000),
+        open: Number(c[1]),
+        high: Number(c[2]),
+        low: Number(c[3]),
+        close: Number(c[4]),
+        volume: Number(c[5]),
+      }))
+      .filter(
+        (c) =>
+          Number.isFinite(c.open) &&
+          Number.isFinite(c.high) &&
+          Number.isFinite(c.low) &&
+          Number.isFinite(c.close) &&
+          c.close > 0
+      )
+      .sort((a, b) => a.time - b.time);
+
+    return data.length >= 20 ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchBybitCandles(symbol: string, interval: string, limit = 150): Promise<Candle[] | null> {
+  try {
+    const bybitSymbol = toBinanceSymbol(symbol);
+    const bybitInterval = toBybitInterval(interval);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+
+    const res = await fetch(
+      `https://api.bybit.com/v5/market/kline?category=linear&symbol=${bybitSymbol}&interval=${bybitInterval}&limit=${limit}`,
+      { signal: controller.signal }
+    ).finally(() => clearTimeout(timeout));
+
+    if (!res.ok) return null;
+    const json = (await res.json()) as { result?: { list?: Array<[string, string, string, string, string, string, string]> } };
+    const raw = json?.result?.list;
+    if (!Array.isArray(raw) || !raw.length) return null;
+
+    const data = raw
+      .map((c) => ({
+        time: Math.floor(Number(c[0]) / 1000),
+        open: Number(c[1]),
+        high: Number(c[2]),
+        low: Number(c[3]),
+        close: Number(c[4]),
+        volume: Number(c[5]),
+      }))
+      .filter(
+        (c) =>
+          Number.isFinite(c.open) &&
+          Number.isFinite(c.high) &&
+          Number.isFinite(c.low) &&
+          Number.isFinite(c.close) &&
+          c.close > 0
+      )
+      .sort((a, b) => a.time - b.time);
+
+    return data.length >= 20 ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function postHl<T>(body: unknown, attempts = 4): Promise<T> {
   let lastError: Error = new Error('Hyperliquid info request failed');
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) {
-      await sleep(200 * 2 ** (attempt - 1));
+      await sleep(1000 * 2 ** (attempt - 1));
     }
     await acquireSlot();
     try {
@@ -136,6 +222,12 @@ async function postHl<T>(body: unknown, attempts = 3): Promise<T> {
         body: JSON.stringify(body),
       });
       if (!res.ok) {
+        if (res.status === 429) {
+          lastError = new Error(`Hyperliquid HTTP 429 (Rate Limit)`);
+          ErrorLogger.getInstance().warn('MarketData', 'Hyperliquid HTTP 429 (Rate Limit)', { attempt, attempts });
+          await sleep(2500 * (attempt + 1));
+          continue;
+        }
         throw new Error(`Hyperliquid HTTP ${res.status}`);
       }
       return (await res.json()) as T;
@@ -145,48 +237,8 @@ async function postHl<T>(body: unknown, attempts = 3): Promise<T> {
       releaseSlot();
     }
   }
+  ErrorLogger.getInstance().error('MarketData', lastError, { attempts, endpoint: 'postHl' });
   throw lastError;
-}
-
-async function getJson<T>(url: string, attempts = 3): Promise<T> {
-  let last: Error = new Error(`market data request failed: ${url}`);
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (attempt > 0) {
-      await sleep(400 * 2 ** (attempt - 1) + Math.random() * 200);
-    }
-    await acquireSlot();
-    try {
-      const res = await fetch(url, { headers: { accept: 'application/json' } });
-      if (!res.ok) {
-        const err = new Error(`market data request failed: ${res.status} ${url}`);
-        if (RETRYABLE_CODES.has(res.status)) {
-          last = err;
-          continue;
-        }
-        throw err;
-      }
-      const body = (await res.json()) as { success?: boolean; data?: T; code?: number };
-      if (body.success === false) {
-        const err = new Error(`market data error code ${body.code} for ${url}`);
-        if (body.code !== undefined && RETRYABLE_CODES.has(body.code)) {
-          last = err;
-          continue;
-        }
-        throw err;
-      }
-      if (body.data === undefined) throw new Error(`market data returned no payload for ${url}`);
-      return body.data;
-    } catch (err) {
-      if (err instanceof TypeError) {
-        last = err;
-        continue;
-      }
-      throw err;
-    } finally {
-      releaseSlot();
-    }
-  }
-  throw last;
 }
 
 /**
@@ -197,6 +249,7 @@ export class MarketData {
   private candleCache = new Map<string, { at: number; data: Candle[] }>();
   private contractCache = new Map<string, ContractDetail>();
   private historyCache = new Map<string, Candle[]>();
+  private inFlightCandles = new Map<string, Promise<Candle[]>>();
 
   constructor(
     private readonly tickerTtlMs = 20_000,
@@ -204,19 +257,24 @@ export class MarketData {
     private readonly staleGraceMs = 30_000
   ) {}
 
+  private getTtlForInterval(interval: string): number {
+    const lower = interval.toLowerCase();
+    if (lower === '4h') return 300_000; // 5 minuten
+    if (lower === 'min60' || lower === '60m' || lower === '1h') return 120_000; // 2 minuten
+    if (lower === 'min15' || lower === '15m') return 60_000; // 1 minuut
+    if (lower === 'min5' || lower === '5m') return 30_000; // 30 seconden
+    return this.candleTtlMs;
+  }
+
   /**
    * Fetch perpetual tickers, cached for a short TTL.
-   * Primary source is Hyperliquid decentralized perpetuals.
+   * Source is Hyperliquid decentralized perpetuals.
    */
   async tickers(maxAgeMs?: number): Promise<Ticker[]> {
     const ttl = maxAgeMs ?? this.tickerTtlMs;
     const now = Date.now();
     if (now - this.tickerCache.at < ttl && this.tickerCache.data.length) {
       return this.tickerCache.data;
-    }
-
-    if (BASE && BASE.includes('contract.mexc.com')) {
-      return this.fetchMexcTickers(now);
     }
 
     try {
@@ -296,10 +354,6 @@ export class MarketData {
    * Fetch the latest price for a single symbol from Hyperliquid.
    */
   async price(symbol: string): Promise<number> {
-    if (BASE && BASE.includes('contract.mexc.com')) {
-      const data = await getJson<RawTicker>(`${BASE}/ticker?symbol=${symbol}`);
-      return Number(data.lastPrice) || 0;
-    }
     const coin = normalizeCoin(symbol);
     const mids = await postHl<Record<string, string>>({ type: 'allMids' });
     return Number(mids[coin]) || 0;
@@ -312,16 +366,16 @@ export class MarketData {
     const cached = this.contractCache.get(symbol);
     if (cached) return cached;
 
-    if (BASE && BASE.includes('contract.mexc.com')) {
-      return this.fetchMexcContractDetail(symbol);
-    }
-
     const coin = normalizeCoin(symbol);
     let szDecimals = 4;
+    let maxLeverage = 20;
     try {
       const meta = await postHl<{ universe: Array<{ name: string; szDecimals: number; maxLeverage: number }> }>({ type: 'meta' });
       const asset = meta?.universe?.find((u) => u.name === coin);
-      if (asset) szDecimals = asset.szDecimals;
+      if (asset) {
+        szDecimals = asset.szDecimals;
+        if (asset.maxLeverage) maxLeverage = asset.maxLeverage;
+      }
     } catch {
       // Fallback
     }
@@ -332,6 +386,7 @@ export class MarketData {
       minVol: Math.pow(10, -szDecimals),
       maxVol: Number.MAX_SAFE_INTEGER,
       priceScale: Math.min(8, Math.max(2, szDecimals + 2)),
+      maxLeverage,
     };
     this.contractCache.set(symbol, detail);
     return detail;
@@ -344,55 +399,79 @@ export class MarketData {
     const key = `${symbol}:${interval}`;
     const now = Date.now();
     const cached = this.candleCache.get(key);
-    if (cached && now - cached.at < this.candleTtlMs) return cached.data;
+    const ttl = this.getTtlForInterval(interval);
+    if (cached && now - cached.at < ttl) return cached.data;
 
-    if (BASE && BASE.includes('contract.mexc.com')) {
-      const data = await this.fetchMexcKlines(symbol, interval);
-      this.candleCache.set(key, { at: now, data });
-      return data;
-    }
+    const existingPromise = this.inFlightCandles.get(key);
+    if (existingPromise) return existingPromise;
 
-    try {
-      const coin = normalizeCoin(symbol);
-      const hlInterval = toHlInterval(interval);
-      const intervalMs = hlIntervalToMs(hlInterval);
-      const startTime = now - 300 * intervalMs;
+    const fetchPromise = (async () => {
+      try {
+        // 1. High-capacity public providers (Binance Futures -> Bybit) to eliminate Hyperliquid rate limits
+        const binanceData = await fetchBinanceCandles(symbol, interval);
+        if (binanceData && binanceData.length >= 20) {
+          this.candleCache.set(key, { at: Date.now(), data: binanceData });
+          return binanceData;
+        }
 
-      const raw = await postHl<Array<{ t: number; o: string; h: string; l: string; c: string; v: string }>>({
-        type: 'candleSnapshot',
-        req: {
-          coin,
-          interval: hlInterval,
-          startTime,
-          endTime: now,
-        },
-      });
+        const bybitData = await fetchBybitCandles(symbol, interval);
+        if (bybitData && bybitData.length >= 20) {
+          this.candleCache.set(key, { at: Date.now(), data: bybitData });
+          return bybitData;
+        }
 
-      const data: Candle[] = (Array.isArray(raw) ? raw : [])
-        .map((c) => ({
-          time: Math.floor(c.t / 1000),
-          open: Number(c.o),
-          high: Number(c.h),
-          low: Number(c.l),
-          close: Number(c.c),
-          volume: Number(c.v),
-        }))
-        .filter(
-          (c) =>
-            Number.isFinite(c.open) &&
-            Number.isFinite(c.high) &&
-            Number.isFinite(c.low) &&
-            Number.isFinite(c.close) &&
-            c.close > 0
-        )
-        .sort((a, b) => a.time - b.time);
+        // 2. Fallback to native Hyperliquid L1 candleSnapshot for exclusive coins
+        const coin = normalizeCoin(symbol);
+        const hlInterval = toHlInterval(interval);
+        const intervalMs = hlIntervalToMs(hlInterval);
+        const startTime = now - 300 * intervalMs;
 
-      this.candleCache.set(key, { at: now, data });
-      return data;
-    } catch (err) {
-      if (cached && cached.data.length) return cached.data;
-      throw err;
-    }
+        const raw = await postHl<Array<{ t: number; o: string; h: string; l: string; c: string; v: string }>>({
+          type: 'candleSnapshot',
+          req: {
+            coin,
+            interval: hlInterval,
+            startTime,
+            endTime: now,
+          },
+        });
+
+        const data: Candle[] = (Array.isArray(raw) ? raw : [])
+          .map((c) => ({
+            time: Math.floor(c.t / 1000),
+            open: Number(c.o),
+            high: Number(c.h),
+            low: Number(c.l),
+            close: Number(c.c),
+            volume: Number(c.v),
+          }))
+          .filter(
+            (c) =>
+              Number.isFinite(c.open) &&
+              Number.isFinite(c.high) &&
+              Number.isFinite(c.low) &&
+              Number.isFinite(c.close) &&
+              c.close > 0
+          )
+          .sort((a, b) => a.time - b.time);
+
+        if (data.length) {
+          this.candleCache.set(key, { at: Date.now(), data });
+          return data;
+        }
+
+        if (cached && cached.data.length) return cached.data;
+        return data;
+      } catch (err) {
+        if (cached && cached.data.length) return cached.data;
+        throw err;
+      } finally {
+        this.inFlightCandles.delete(key);
+      }
+    })();
+
+    this.inFlightCandles.set(key, fetchPromise);
+    return fetchPromise;
   }
 
   /**
@@ -409,10 +488,6 @@ export class MarketData {
     const key = `${symbol}:${interval}:${from}:${to}`;
     const cached = this.historyCache.get(key);
     if (cached) return cached;
-
-    if (BASE && BASE.includes('contract.mexc.com')) {
-      return this.fetchMexcHistory(symbol, interval, from, to);
-    }
 
     const coin = normalizeCoin(symbol);
     const hlInterval = toHlInterval(interval);
@@ -453,94 +528,6 @@ export class MarketData {
       if (oldestKey !== undefined) this.historyCache.delete(oldestKey);
     }
     this.historyCache.set(key, data);
-    return data;
-  }
-
-  private async fetchMexcTickers(now: number): Promise<Ticker[]> {
-    const raw = await getJson<RawTicker[]>(`${BASE}/ticker`);
-    const data = raw
-      .filter((t) => t.symbol?.endsWith('_USDT'))
-      .map<Ticker>((t) => {
-        const lastPrice = Number(t.lastPrice) || 0;
-        const bid1 = Number(t.bid1) || undefined;
-        const ask1 = Number(t.ask1) || undefined;
-        const spreadPct =
-          bid1 !== undefined && ask1 !== undefined && lastPrice > 0
-            ? Math.max(0, (ask1 - bid1) / lastPrice)
-            : undefined;
-        return {
-          symbol: t.symbol,
-          lastPrice,
-          bid1,
-          ask1,
-          spreadPct,
-          quoteVolume24h: Number(t.amount24) || 0,
-          changeRate24h: Number(t.riseFallRate) || 0,
-          fundingRate: Number(t.fundingRate) || 0,
-        };
-      })
-      .filter((t) => t.lastPrice > 0)
-      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
-    this.tickerCache = { at: now, data };
-    return data;
-  }
-
-  private async fetchMexcContractDetail(symbol: string): Promise<ContractDetail> {
-    const data = await getJson<RawContractDetail>(`${BASE}/detail?symbol=${symbol}`);
-    const detail: ContractDetail = {
-      symbol,
-      contractSize: Number(data.contractSize) || 1,
-      minVol: Number(data.minVol) || 1,
-      maxVol: Number(data.maxVol) || Number.MAX_SAFE_INTEGER,
-      priceScale: Number.isFinite(Number(data.priceScale)) ? Number(data.priceScale) : 4,
-    };
-    this.contractCache.set(symbol, detail);
-    return detail;
-  }
-
-  private async fetchMexcKlines(symbol: string, interval: string, from?: number, to?: number): Promise<Candle[]> {
-    const params = new URLSearchParams({ interval });
-    if (from !== undefined) params.set('start', String(Math.floor(from)));
-    if (to !== undefined) params.set('end', String(Math.floor(to)));
-    const raw = await getJson<RawKline>(`${BASE}/kline/${symbol}?${params.toString()}`);
-    return (raw.time || [])
-      .map((time, i) => ({
-        time,
-        open: Number(raw.open[i]),
-        high: Number(raw.high[i]),
-        low: Number(raw.low[i]),
-        close: Number(raw.close[i]),
-        volume: Number(raw.vol[i]),
-      }))
-      .filter(
-        (c) =>
-          Number.isFinite(c.open) &&
-          Number.isFinite(c.high) &&
-          Number.isFinite(c.low) &&
-          Number.isFinite(c.close) &&
-          c.close > 0
-      );
-  }
-
-  private async fetchMexcHistory(symbol: string, interval: string, from: number, to: number): Promise<Candle[]> {
-    const byTime = new Map<number, Candle>();
-    let cursor = to;
-    for (let page = 0; page < 24 && cursor > from; page += 1) {
-      const batch = await this.fetchMexcKlines(symbol, interval, from, cursor);
-      if (!batch.length) break;
-      for (const candle of batch) byTime.set(candle.time, candle);
-      const oldest = batch[0].time;
-      if (oldest <= from || oldest >= cursor) break;
-      cursor = oldest - 1;
-    }
-    const data = [...byTime.values()]
-      .filter((c) => c.time >= from && c.time <= to)
-      .sort((a, b) => a.time - b.time);
-    if (this.historyCache.size >= HISTORY_CACHE_LIMIT) {
-      const oldestKey = this.historyCache.keys().next().value;
-      if (oldestKey !== undefined) this.historyCache.delete(oldestKey);
-    }
-    this.historyCache.set(`${symbol}:${interval}:${from}:${to}`, data);
     return data;
   }
 }

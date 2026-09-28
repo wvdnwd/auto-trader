@@ -122,7 +122,7 @@ export function BacktestForm({
               onClick={() => toggle(symbol)}
               disabled={busy}
             >
-              {symbol.replace('_USDT', '')}
+              {symbol.replace(/_USDT$|_USDC$/i, '')}
             </button>
           ))}
         </div>

@@ -27,20 +27,20 @@ export function HistoryPanel({ closed, stats, onOpenChart }: HistoryPanelProps) 
 
   // Compute total realized PnL from closed positions
   const totalRealizedPnl = useMemo(() => {
-    return closed.reduce((sum, p) => sum + (p.realisedPnl || 0), 0);
+    return closed.reduce((sum, p) => sum + (p.pnl ?? p.realisedPnl ?? 0), 0);
   }, [closed]);
 
-  const wins = useMemo(() => closed.filter((p) => (p.realisedPnl || 0) > 0), [closed]);
-  const losses = useMemo(() => closed.filter((p) => (p.realisedPnl || 0) < 0), [closed]);
+  const wins = useMemo(() => closed.filter((p) => (p.pnl ?? p.realisedPnl ?? 0) > 0), [closed]);
+  const losses = useMemo(() => closed.filter((p) => (p.pnl ?? p.realisedPnl ?? 0) < 0), [closed]);
 
   const displayedPositions = useMemo(() => {
     let list = [...closed];
 
     // Filter by win/loss
     if (filter === 'wins') {
-      list = list.filter((p) => (p.realisedPnl || 0) > 0);
+      list = list.filter((p) => (p.pnl ?? p.realisedPnl ?? 0) > 0);
     } else if (filter === 'losses') {
-      list = list.filter((p) => (p.realisedPnl || 0) < 0);
+      list = list.filter((p) => (p.pnl ?? p.realisedPnl ?? 0) < 0);
     }
 
     // Filter by search query

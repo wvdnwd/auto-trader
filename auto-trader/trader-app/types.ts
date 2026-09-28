@@ -232,6 +232,7 @@ export type Position = {
   quantity: number;
   leverage: number;
   margin: number;
+  initialMargin?: number;
   notional: number;
   stopLoss: number;
   takeProfit: number;
@@ -257,7 +258,7 @@ export type Position = {
   confidence: number;
   regime: Regime;
   reasons: string[];
-  /** True when this position was mirrored onto the real MEXC account at entry. */
+  /** True when this position was mirrored onto the real Hyperliquid account at entry. */
   live?: boolean;
   scaleInCount?: number;
   scaledInAt?: number;
@@ -270,6 +271,14 @@ export type Position = {
   strategyType?: StrategyType;
   setupScore?: SetupScore;
   leverageBreakdown?: LeverageBreakdown;
+  /** Active market session during which this position was opened. */
+  session?: string;
+  /** Maximum favorable excursion (peak unrealised R reached while open). */
+  peakR?: number;
+  /** Maximum adverse excursion (worst unrealised drawdown in R experienced). */
+  troughR?: number;
+  /** Portfolio cluster risk multiplier applied at entry. */
+  clusterRiskMultiplier?: number;
 };
 
 /** Post-mortem diagnosis of a completed trade. */
@@ -282,6 +291,9 @@ export type TradePostMortem = {
   whatWentWell: string[];
   whatWentWrong: string[];
   lesson: string;
+  session?: string;
+  mfeR?: number;
+  maeR?: number;
 };
 
 /** Historical performance statistics for a technical factor/indicator. */
@@ -289,6 +301,54 @@ export type FactorStat = {
   wins: number;
   losses: number;
   netR: number;
+  winRate?: number;
+  weightMultiplier?: number;
+};
+
+/** Performance statistics per market trading session. */
+export type SessionStat = {
+  session: string;
+  dayOfWeek?: number;
+  wins: number;
+  losses: number;
+  netR: number;
+  winRate: number;
+  edgeMultiplier: number;
+};
+
+/** Asset-specific behavioural learning profile (Coin DNA). */
+export type CoinDNA = {
+  symbol: string;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  netR: number;
+  winRate: number;
+  avgDurationMinutes: number;
+  avgMfeR: number;
+  avgMaeR: number;
+  volatilityTier: 'MAJOR' | 'ALT' | 'MEME';
+  stopLossMultiplier: number;
+  takeProfitMultiplier: number;
+};
+
+/** Aggregate excursion statistics across all trades for dynamic target optimization. */
+export type MfeMaeStats = {
+  totalTracked: number;
+  avgMfeR: number;
+  avgMaeR: number;
+  medianMfeR: number;
+  optimalTp1R: number;
+  optimalTp2R: number;
+};
+
+/** Real-time cluster risk and directional exposure metrics. */
+export type ClusterRiskEvaluation = {
+  activeSameSide: number;
+  group: string;
+  inGroup: number;
+  multiplier: number;
+  reason?: string;
 };
 
 /** Temporary trading penalty (strafbankje) for underperforming symbols. */
@@ -303,6 +363,14 @@ export type SymbolPenalty = {
 export type LearningState = {
   factorStats: Record<string, FactorStat>;
   penalties: Record<string, SymbolPenalty>;
+  sessionStats?: Record<string, SessionStat>;
+  coinDNA?: Record<string, CoinDNA>;
+  mfeMaeStats?: MfeMaeStats;
+  clusterStatus?: {
+    activeLongs: number;
+    activeShorts: number;
+    lastDampener: number;
+  };
 };
 
 /** One named entry condition and its outcome. */
@@ -667,6 +735,17 @@ export type EngineEvent = {
   message: string;
 };
 
+export type SystemError = {
+  id: string;
+  at: number;
+  level: 'error' | 'fatal' | 'warn';
+  source: string;
+  message: string;
+  stack?: string;
+  details?: Record<string, unknown> | string;
+  occurrences?: number;
+};
+
 /** Aggregate performance statistics. */
 export type Stats = {
   trades: number;
@@ -716,9 +795,9 @@ export type ScoutStatus = {
 };
 
 /**
- * Readiness of the (not-yet-active) live MEXC order connection.
+ * Readiness of the (not-yet-active) live Hyperliquid order connection.
  *
- * `configured` is true once API keys are present; `enabled` additionally
+ * `configured` is true once wallet credentials are present; `enabled` additionally
  * requires the explicit go-live flag, so a configured-but-not-armed connection
  * still trades on paper.
  */
@@ -745,6 +824,7 @@ export type TradePlan = {
   confidence: number;
   regime: Regime;
   reasons: string[];
+  clusterRiskMultiplier?: number;
 };
 
 /**
@@ -765,13 +845,13 @@ export type ChartData = {
 };
 
 /**
- * One open position as reported directly by MEXC, shown instead of the paper
+ * One open position as reported directly by Hyperliquid, shown instead of the paper
  * position list once live trading is armed — see {@link ExchangeAccountSnapshot}.
  */
 export type LiveExchangePosition = {
   symbol: string;
   side: Side;
-  /** Base-asset quantity (e.g. BTC), already converted from MEXC's contract-count `vol`. */
+  /** Base-asset quantity (e.g. BTC). */
   vol: number;
   leverage: number;
   entryPrice: number;
@@ -779,10 +859,11 @@ export type LiveExchangePosition = {
   liquidationPrice: number;
   unrealisedPnl: number;
   openedAt?: number;
+  margin?: number;
 };
 
 /**
- * Real MEXC account state, present only while live trading is armed. The
+ * Real Hyperliquid account state, present only while live trading is armed. The
  * dashboard switches its main balance cards and open-position list to this
  * instead of the paper `account`/`open` fields whenever it is set.
  */
@@ -817,13 +898,13 @@ export type Snapshot = {
   marks: Record<string, number>;
   /** State of the background job that widens the trading universe over time. */
   scout: ScoutStatus;
-  /** Readiness of the (not-yet-active) live MEXC order connection. */
+  /** Readiness of the (not-yet-active) live Hyperliquid order connection. */
   exchange: LiveTradingStatus;
   /** Whether a Telegram bot or webhook is configured to receive trade alerts. */
   notificationsEnabled: boolean;
   /** Consecutive chop-regime scans and how many are allowed before entries pause. */
   chopStatus: { streak: number; limit: number };
-  /** Real MEXC account state — present only while `exchange.enabled` is true. */
+  /** Real Hyperliquid account state — present only while `exchange.enabled` is true. */
   exchangeAccount: ExchangeAccountSnapshot | null;
   /** Adaptive self-learning engine state including factor performance and symbol penalties. */
   learning?: LearningState;
@@ -831,4 +912,53 @@ export type Snapshot = {
   cooldowns?: Record<string, { until: number; reason: string; remainingSec: number }>;
   /** Most recent skip reasons per symbol. */
   skipReasons?: Record<string, { reason: string; at: number; blockCode?: BlockReasonCode }>;
+  /** Live market intelligence including Fear & Greed, Macro Shield, and breaking news. */
+  marketIntelligence?: MarketIntelligence;
+  recentErrors?: SystemError[];
+  errorsCount?: number;
 };
+
+/** Fear & Greed index reading for overall crypto market sentiment. */
+export type FearAndGreed = {
+  score: number;
+  classification: string;
+  updatedAt: number;
+};
+
+/** High-impact economic calendar event (e.g. CPI, FOMC, NFP). */
+export type MacroEvent = {
+  title: string;
+  country: string;
+  date: string;
+  impact: 'High' | 'Medium' | 'Low' | 'Holiday';
+  forecast?: string;
+  previous?: string;
+  timeUntilMinutes: number;
+  activeShield: boolean;
+};
+
+/** Breaking crypto news headline with sentiment classification and coin tags. */
+export type NewsItem = {
+  id: string;
+  title: string;
+  link: string;
+  source: 'Cointelegraph' | 'CoinDesk' | 'CryptoPanic';
+  publishedAt: number;
+  sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  coins: string[];
+  summary?: string;
+};
+
+/** Market & Macro Intelligence payload. */
+export type MarketIntelligence = {
+  fearAndGreed: FearAndGreed | null;
+  macroShield: {
+    active: boolean;
+    reason?: string;
+    nextEvent?: MacroEvent | null;
+  };
+  upcomingMacroEvents: MacroEvent[];
+  breakingNews: NewsItem[];
+  fetchedAt: number;
+};
+

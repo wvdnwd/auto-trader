@@ -105,7 +105,7 @@ describe('SignalList', () => {
       },
     ];
     const { rerender } = render(<SignalList signals={signals} threshold={0.35} />);
-    expect(screen.getByText('ETH/USDT')).toBeTruthy();
+    expect(screen.getByText('ETH/USDC')).toBeTruthy();
     expect(screen.getByText('SHORT')).toBeTruthy();
 
     rerender(<SignalList signals={[]} threshold={0.35} />);

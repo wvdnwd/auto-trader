@@ -49,16 +49,16 @@ const DICTIONARY = {
     nl: 'Koppel je Hyperliquid wallet adres en private key via ⚙️ Opties om live te handelen op de L1 DEX.',
     en: 'Connect your Hyperliquid wallet address and private key via ⚙️ Options to trade live on the L1 DEX.',
   },
-  mexcLinkLabel: { nl: 'Hyperliquid-koppeling:', en: 'Hyperliquid connection:' },
-  mexcLinkEnabled: {
+  hyperliquidLinkLabel: { nl: 'Hyperliquid-koppeling:', en: 'Hyperliquid connection:' },
+  hyperliquidLinkEnabled: {
     nl: 'live order-uitvoering ingeschakeld — de engine plaatst echte orders direct op Hyperliquid L1.',
     en: 'live order execution enabled — the engine places real orders directly on Hyperliquid L1.',
   },
-  mexcLinkConfigured: {
+  hyperliquidLinkConfigured: {
     nl: 'Hyperliquid wallet gekoppeld (klaar voor live trading).',
     en: 'Hyperliquid wallet connected (ready for live trading).',
   },
-  mexcLinkNone: {
+  hyperliquidLinkNone: {
     nl: 'nog niet gekoppeld — voeg je Hyperliquid wallet adres en private key toe zodra je klaar bent voor live uitvoering.',
     en: 'not connected yet — add your Hyperliquid wallet address and private key whenever you are ready for live execution.',
   },
@@ -159,13 +159,13 @@ const DICTIONARY = {
     nl: 'markt is nog rustig aan het zoeken naar richting.',
     en: 'market is still quietly searching for direction.',
   },
-  mexcBalanceError: {
+  hyperliquidBalanceError: {
     nl: 'Hyperliquid-saldo kon niet worden opgehaald: {{err}}. Controleer de verbinding met Hyperliquid L1.',
     en: 'Could not fetch Hyperliquid balance: {{err}}. Check the connection with Hyperliquid L1.',
   },
   equity: { nl: 'Equity', en: 'Equity' },
   sinceStart: { nl: '{{v}} sinds start', en: '{{v}} since start' },
-  fromMexc: { nl: 'rechtstreeks van Hyperliquid L1', en: 'directly from Hyperliquid L1' },
+  fromHyperliquid: { nl: 'rechtstreeks van Hyperliquid L1', en: 'directly from Hyperliquid L1' },
   freeBalance: { nl: 'Vrij saldo (USDC)', en: 'Free balance (USDC)' },
   inUse: { nl: '{{v}} in gebruik', en: '{{v}} in use' },
   openPnl: { nl: 'Open P&L (USDC)', en: 'Open P&L (USDC)' },
@@ -177,7 +177,7 @@ const DICTIONARY = {
   drawdown: { nl: 'Drawdown', en: 'Drawdown' },
   limit: { nl: 'limiet {{v}}', en: 'limit {{v}}' },
   openPositions: { nl: 'Open posities', en: 'Open positions' },
-  noOpenPositionsMexc: {
+  noOpenPositionsHyperliquid: {
     nl: 'Geen open posities op Hyperliquid — de engine wacht op een setup met genoeg conviction.',
     en: 'No open positions on Hyperliquid — the engine is waiting for a setup with enough conviction.',
   },
@@ -206,8 +206,8 @@ const DICTIONARY = {
   },
   apiTokenLabel: { nl: 'API-token', en: 'API token' },
   apiTokenSubmit: { nl: 'Verbinden', en: 'Connect' },
-  mexcUnavailable: { nl: 'Hyperliquid-gegevens niet beschikbaar', en: 'Hyperliquid data unavailable' },
-  mexcPositionsUnavailable: {
+  hyperliquidUnavailable: { nl: 'Hyperliquid-gegevens niet beschikbaar', en: 'Hyperliquid data unavailable' },
+  hyperliquidPositionsUnavailable: {
     nl: 'Open Hyperliquid-posities zijn niet beschikbaar zolang de exchange-read mislukt.',
     en: 'Open Hyperliquid positions are unavailable while the exchange read is failing.',
   },

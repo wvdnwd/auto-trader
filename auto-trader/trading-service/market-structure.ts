@@ -14,6 +14,7 @@ import type {
   Zone4H,
 } from './types.js';
 import { ema, dmi } from './indicators.js';
+import { goldenZoneBand } from './fibonacci.js';
 
 /**
  * Identify swing pivot points (fractals) in a candle series.
@@ -434,14 +435,141 @@ export function planImbalanceScalp(
   activeFVGs: FairValueGap[],
   sweep: { type: 'BSL' | 'SSL'; level: number; time: number } | null
 ): MarketStructureInfo['imbalanceScalp'] {
-  if (!sweep || candles.length < 5) return null;
+  if (candles.length < 5) return null;
 
-  const recentCandles = candles.slice(-5);
+  const recentCandles = candles.slice(-10);
   const highestRecent = Math.max(...recentCandles.map((c) => c.high));
   const lowestRecent = Math.min(...recentCandles.map((c) => c.low));
 
+  // If no formal sweep, check for an Overextended Impulse with an Unmitigated FVG / Golden Zone below (SHORT)
+  if (!sweep && candles.length >= 10) {
+    // 1. SHORT Retracement Check: price near peak with an unmitigated Bullish FVG or Golden Zone below
+    const fvgBelow = activeFVGs
+      .filter((f) => !f.mitigated && f.direction === 'BULLISH' && f.top < currentPrice)
+      .sort((a, b) => b.top - a.top)[0];
+
+    let targetPrice: number | null = null;
+    let targetReason = '';
+
+    if (fvgBelow) {
+      targetPrice = fvgBelow.top;
+      targetReason = `Fair Value Gap ($${fvgBelow.top.toFixed(4)})`;
+    } else if (fib) {
+      const [, gzHigh] = goldenZoneBand(fib);
+      if (gzHigh !== null && gzHigh < currentPrice) {
+        targetPrice = gzHigh;
+        targetReason = `Golden Zone ($${gzHigh.toFixed(4)})`;
+      }
+    }
+
+    if (targetPrice && targetPrice < currentPrice) {
+      const reward = currentPrice - targetPrice;
+      const targetDistPct = reward / currentPrice;
+
+      // Safety Check 1: Target distance must be at least 3.5% (meaningful room to move)
+      if (targetDistPct >= 0.035) {
+        // Safety Check 2: Rejection / Exhaustion Trigger
+        const lastCandle = recentCandles[recentCandles.length - 1];
+        const prevCandle = recentCandles[recentCandles.length - 2];
+        const lastRange = Math.max(0.000001, lastCandle.high - lastCandle.low);
+        const lastUpperWick = lastCandle.high - Math.max(lastCandle.open, lastCandle.close);
+        const hasUpperWickRejection = lastUpperWick / lastRange >= 0.3;
+        const isRedReversal =
+          lastCandle.close < lastCandle.open &&
+          (prevCandle ? lastCandle.close <= prevCandle.close : true);
+        const isPullingBack = (highestRecent - currentPrice) / highestRecent >= 0.005;
+        const isStillPumping =
+          lastCandle.close > lastCandle.open &&
+          (lastCandle.high - lastCandle.close) / lastRange < 0.15;
+
+        if ((hasUpperWickRejection || isRedReversal || isPullingBack) && !isStillPumping) {
+          // Safety Check 3: Tight Stop Loss above the highest wick (+0.25% buffer)
+          const stopLoss = highestRecent * 1.0025;
+          const stopDist = stopLoss - currentPrice;
+          const stopDistPct = stopDist / currentPrice;
+
+          // Safety Check 4: Stop distance must be <= 3.5% and R:R >= 2.0
+          if (stopDist > 0 && stopDistPct <= 0.035) {
+            const rrEstimate = reward / stopDist;
+            if (rrEstimate >= 1.8) {
+              return {
+                eligible: true,
+                side: 'SHORT',
+                targetPrice,
+                targetReason: `${targetReason} (Exhaustion Retracement)`,
+                stopLoss,
+                rrEstimate: Number(rrEstimate.toFixed(2)),
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // 2. LONG Retracement Check: price near low with an unmitigated Bearish FVG or Golden Zone above
+    const fvgAbove = activeFVGs
+      .filter((f) => !f.mitigated && f.direction === 'BEARISH' && f.bottom > currentPrice)
+      .sort((a, b) => a.bottom - b.bottom)[0];
+
+    let targetPriceLong: number | null = null;
+    let targetReasonLong = '';
+
+    if (fvgAbove) {
+      targetPriceLong = fvgAbove.bottom;
+      targetReasonLong = `Fair Value Gap ($${fvgAbove.bottom.toFixed(4)})`;
+    } else if (fib) {
+      const [gzLow] = goldenZoneBand(fib);
+      if (gzLow !== null && gzLow > currentPrice) {
+        targetPriceLong = gzLow;
+        targetReasonLong = `Golden Zone ($${gzLow.toFixed(4)})`;
+      }
+    }
+
+    if (targetPriceLong && targetPriceLong > currentPrice) {
+      const rewardLong = targetPriceLong - currentPrice;
+      const targetDistPctLong = rewardLong / currentPrice;
+
+      if (targetDistPctLong >= 0.035) {
+        const lastCandle = recentCandles[recentCandles.length - 1];
+        const prevCandle = recentCandles[recentCandles.length - 2];
+        const lastRange = Math.max(0.000001, lastCandle.high - lastCandle.low);
+        const lastLowerWick = Math.min(lastCandle.open, lastCandle.close) - lastCandle.low;
+        const hasLowerWickRejection = lastLowerWick / lastRange >= 0.3;
+        const isGreenReversal =
+          lastCandle.close > lastCandle.open &&
+          (prevCandle ? lastCandle.close >= prevCandle.close : true);
+        const isBouncing = (currentPrice - lowestRecent) / lowestRecent >= 0.005;
+        const isStillDumping =
+          lastCandle.close < lastCandle.open &&
+          (lastCandle.close - lastCandle.low) / lastRange < 0.15;
+
+        if ((hasLowerWickRejection || isGreenReversal || isBouncing) && !isStillDumping) {
+          const stopLoss = lowestRecent * 0.9975;
+          const stopDist = currentPrice - stopLoss;
+          const stopDistPct = stopDist / currentPrice;
+
+          if (stopDist > 0 && stopDistPct <= 0.035) {
+            const rrEstimate = rewardLong / stopDist;
+            if (rrEstimate >= 2.0) {
+              return {
+                eligible: true,
+                side: 'LONG',
+                targetPrice: targetPriceLong,
+                targetReason: `${targetReasonLong} (Exhaustion Retracement)`,
+                stopLoss,
+                rrEstimate: Number(rrEstimate.toFixed(2)),
+              };
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   // SHORT Scalp after Buy-Side Liquidity (BSL) sweep
-  if (sweep.type === 'BSL') {
+  if (sweep && sweep.type === 'BSL') {
     const stopLoss = highestRecent * 1.002; // Tight stop just above the sweep wick
     const stopDist = stopLoss - currentPrice;
     if (stopDist <= 0) return null;

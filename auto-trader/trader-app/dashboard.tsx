@@ -3,6 +3,7 @@ import styles from './trader-app.module.css';
 import {
   closeExchangePosition,
   closePosition,
+  closeAllPositions,
   reducePosition,
   realignPositionTpSl,
   fetchChart,
@@ -15,6 +16,7 @@ import {
   setApiToken,
   setEngineRunning,
   setLiveTrading,
+  spotToPerpTransfer,
   updateRisk,
 } from './api.js';
 import type { TestOrderResult } from './api.js';
@@ -27,11 +29,15 @@ import { OptimizePanel } from './optimize-panel.js';
 import { WalkForwardPanel } from './walk-forward-panel.js';
 import { pct, signed, time, usd } from './format.js';
 import { PositionRow } from './position-row.js';
+import { formatSymbol } from './coin-info.js';
 import { RiskPanel } from './risk-panel.js';
 import { ScoutPanel } from './scout-panel.js';
 import { BtcForecast } from './btc-forecast.js';
 import { SignalChart } from './signal-chart.js';
 import { SignalList } from './signal-list.js';
+import { NewsPanel } from './news-panel.js';
+import { ErrorPanel } from './error-panel.js';
+import { AiLearningPanel } from './ai-learning-panel.js';
 import type { ChartData, RiskConfig, Snapshot } from './types.js';
 
 const POLL_MS = 6000;
@@ -121,7 +127,10 @@ export function Dashboard() {
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
   const prevSnapRef = useRef<Snapshot | null>(null);
-  const [tab, setTab] = useState<'live' | 'history' | 'backtest' | 'walkforward' | 'optimize' | 'options'>('live');
+  const [tab, setTab] = useState<'live' | 'history' | 'backtest' | 'walkforward' | 'optimize' | 'options' | 'news' | 'ai' | 'errors'>('live');
+  const [connVenue, setConnVenue] = useState<'mexc' | 'hyperliquid'>('mexc');
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [apiSecretInput, setApiSecretInput] = useState('');
   const [chartSymbol, setChartSymbol] = useState<string | null>(null);
   const [chart, setChart] = useState<ChartData | null>(null);
   const [chartError, setChartError] = useState<string | null>(null);
@@ -142,6 +151,9 @@ export function Dashboard() {
   const [testedSymbol, setTestedSymbol] = useState<string | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [apiTokenInput, setApiTokenInput] = useState('');
+  const [transferAmount, setTransferAmount] = useState(200);
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferMsg, setTransferMsg] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
   const [showHowTo, setShowHowTo] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -354,13 +366,17 @@ export function Dashboard() {
               }}
               title={
                 snap.exchange.enabled
-                  ? 'Live order-uitvoering actief op Hyperliquid L1 DEX'
+                  ? (snap.exchange.venue === 'mexc' ? 'Live order-uitvoering actief op MEXC Futures (USDT)' : 'Live order-uitvoering actief op Hyperliquid L1 DEX (USDC)')
                   : snap.exchange.configured
-                  ? 'Hyperliquid wallet gekoppeld'
-                  : 'Hyperliquid koppeling vereist (zie Opties)'
+                  ? (snap.exchange.venue === 'mexc' ? 'MEXC API gekoppeld (USDT)' : 'Hyperliquid wallet gekoppeld (USDC)')
+                  : (snap.exchange.venue === 'mexc' ? 'MEXC koppeling vereist (zie Opties)' : 'Hyperliquid koppeling vereist (zie Opties)')
               }
             >
-              {snap.exchange.enabled ? '⚡ HYPERLIQUID LIVE' : snap.exchange.configured ? '🟡 HYPERLIQUID READY' : '🔌 HYPERLIQUID'}
+              {snap.exchange.enabled
+                ? (snap.exchange.venue === 'mexc' ? '⚡ MEXC LIVE (USDT)' : '⚡ HYPERLIQUID LIVE (USDC)')
+                : snap.exchange.configured
+                ? (snap.exchange.venue === 'mexc' ? '🟡 MEXC READY (USDT)' : '🟡 HYPERLIQUID READY (USDC)')
+                : (snap.exchange.venue === 'mexc' ? '🔌 MEXC (USDT)' : '🔌 HYPERLIQUID')}
             </span>
             <span className={styles.status}>
               <span className={`${styles.dot} ${snap.running ? styles.dotLive : ''}`} />
@@ -460,6 +476,14 @@ export function Dashboard() {
           </button>
           <button
             type="button"
+            className={`${styles.tab} ${tab === 'news' ? styles.tabOn : ''}`}
+            onClick={() => setTab('news')}
+          >
+            📰 {lang === 'nl' ? 'Nieuws & Macro' : 'News & Macro'}
+            {snap.marketIntelligence?.macroShield?.active ? ' 🛡️' : ''}
+          </button>
+          <button
+            type="button"
             className={`${styles.tab} ${tab === 'history' ? styles.tabOn : ''}`}
             onClick={() => setTab('history')}
           >
@@ -488,10 +512,39 @@ export function Dashboard() {
           </button>
           <button
             type="button"
+            className={`${styles.tab} ${tab === 'ai' ? styles.tabOn : ''}`}
+            onClick={() => setTab('ai')}
+          >
+            🧠 {lang === 'nl' ? 'AI Leren' : 'AI Learning'}
+          </button>
+          <button
+            type="button"
             className={`${styles.tab} ${tab === 'options' ? styles.tabOn : ''}`}
             onClick={() => setTab('options')}
           >
             {t('tabOptions')}
+          </button>
+          <button
+            type="button"
+            className={`${styles.tab} ${tab === 'errors' ? styles.tabOn : ''}`}
+            onClick={() => setTab('errors')}
+          >
+            ⚠️ {lang === 'nl' ? 'Foutenlog' : 'Error Log'}
+            {((snap?.errorsCount ?? (snap?.recentErrors?.length ?? 0)) > 0) && (
+              <span
+                style={{
+                  marginLeft: '0.4rem',
+                  backgroundColor: '#ef4444',
+                  color: '#ffffff',
+                  fontSize: '0.7rem',
+                  padding: '0.1rem 0.45rem',
+                  borderRadius: '999px',
+                  fontWeight: 'bold',
+                }}
+              >
+                {snap?.errorsCount ?? snap?.recentErrors?.length}
+              </span>
+            )}
           </button>
         </nav>
 
@@ -614,7 +667,7 @@ export function Dashboard() {
               <b>Strafbankje actief:</b>{' '}
               {Object.values(snap.learning.penalties)
                 .filter((p) => p.penalizedUntil && p.penalizedUntil > Date.now())
-                .map((p) => `${p.symbol.replace('_', '/')} (nog ${Math.ceil((p.penalizedUntil! - Date.now()) / 3600_000)}u)`)
+                .map((p) => `${formatSymbol(p.symbol)} (nog ${Math.ceil((p.penalizedUntil! - Date.now()) / 3600_000)}u)`)
                 .join(', ')} — deze munten worden tijdelijk overgeslagen na 2x verlies op rij.
             </span>
           </div>
@@ -626,8 +679,17 @@ export function Dashboard() {
             <span style={{ flex: 1 }}>
               <b>Actieve Cooldowns:</b>{' '}
               {Object.entries(snap.cooldowns)
-                .map(([key, cd]) => `${key.replace('_', '/')}: ${cd.reason} (${Math.ceil(cd.remainingSec / 60)}m)`)
+                .map(([key, cd]) => `${formatSymbol(key)}: ${cd.reason} (${Math.ceil(cd.remainingSec / 60)}m)`)
                 .join(' · ')}
+            </span>
+          </div>
+        )}
+
+        {snap.marketIntelligence?.macroShield?.active && (
+          <div className={`${styles.notice} ${styles.blocked}`} style={{ background: '#450a0a', borderColor: '#ef4444', color: '#fca5a5' }}>
+            <span>🛡️</span>
+            <span style={{ flex: 1 }}>
+              <b>Macro Shield:</b> {snap.marketIntelligence.macroShield.reason}
             </span>
           </div>
         )}
@@ -657,6 +719,16 @@ export function Dashboard() {
           </div>
         )}
 
+        {tab === 'news' && (
+          <NewsPanel
+            intelligence={snap.marketIntelligence}
+            onSelectCoin={(symbol) => {
+              setChartSymbol(symbol);
+              setTab('live');
+            }}
+          />
+        )}
+
         {tab === 'history' && (
           <HistoryPanel
             closed={snap.closed}
@@ -670,6 +742,10 @@ export function Dashboard() {
         {tab === 'walkforward' && <WalkForwardPanel />}
 
         {tab === 'optimize' && <OptimizePanel />}
+
+        {tab === 'ai' && (
+          <AiLearningPanel learning={snap.learning} openPositions={snap.open} />
+        )}
 
         {tab === 'options' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '0.5rem' }}>
@@ -692,12 +768,12 @@ export function Dashboard() {
               <span>{snap.exchange.enabled ? '🔴' : snap.exchange.configured ? '🟡' : '🔌'}</span>
               <span className={styles.exchangeRow}>
                 <span>
-                  <b>⚡ Hyperliquid DEX (L1)</b>{' '}
+                  <b>⚡ Hyperliquid DEX (L1 Perpetuals)</b>{' '}
                   {snap.exchange.enabled
                     ? '🔴 Live trading actief op Hyperliquid L1 — orders worden direct on-chain geplaatst met USDC!'
                     : snap.exchange.configured
-                      ? '🟡 Hyperliquid wallet gekoppeld (klaar voor live trading)'
-                      : t('mexcLinkNone')}
+                      ? '🟡 Hyperliquid wallet gekoppeld (klaar voor live trading met USDC)'
+                      : t('hyperliquidLinkNone')}
                 </span>
                 <span style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                   <button
@@ -965,10 +1041,10 @@ export function Dashboard() {
                 <span>🔑</span>
                 <span className={styles.exchangeRow} style={{ flexDirection: 'column', alignItems: 'stretch' }}>
                   <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.85rem', color: '#94a3b8' }}>
-                    Verbind via Hyperliquid L1 met USDC als onderpand. Orders worden direct op de on-chain orderboeken geplaatst via EIP-712 ondertekening.
+                    Verbind via Hyperliquid DEX (L1) met <b>USDC</b> als onderpand. Orders worden direct op de on-chain orderboeken geplaatst via cryptografische EIP-712 ondertekening.
                   </p>
                   <div className={styles.field}>
-                    <label htmlFor="hl-wallet-address">{t('apiKeyLabel')} (0x...)</label>
+                    <label htmlFor="hl-wallet-address">{t('apiKeyLabel')} (Wallet Adres 0x...)</label>
                     <input
                       id="hl-wallet-address"
                       type="text"
@@ -980,7 +1056,7 @@ export function Dashboard() {
                     />
                   </div>
                   <div className={styles.field}>
-                    <label htmlFor="hl-private-key">{t('apiSecretLabel')} (voor live trading via Agent Wallet of Main Wallet)</label>
+                    <label htmlFor="hl-private-key">{t('apiSecretLabel')} (Private Key voor live trading via Agent Wallet of Main Wallet)</label>
                     <input
                       id="hl-private-key"
                       type="password"
@@ -1023,9 +1099,11 @@ export function Dashboard() {
                         })
                       }
                     >
-                      ⚡ Verbind & Activeer Hyperliquid
+                      ⚡ Verbind & Activeer Hyperliquid (USDC)
                     </button>
-                    {snap.exchange.configured && (
+                  </span>
+                  {snap.exchange.configured && (
+                    <div style={{ marginTop: '0.5rem' }}>
                       <button
                         type="button"
                         className={`${styles.btn} ${styles.btnDanger}`}
@@ -1034,7 +1112,9 @@ export function Dashboard() {
                           if (window.confirm(t('removeConnectionConfirm'))) {
                             void act(async () => {
                               await saveExchangeCredentials({
-                                venue: 'hyperliquid',
+                                venue: connVenue,
+                                apiKey: '',
+                                apiSecret: '',
                                 walletAddress: '',
                                 privateKey: '',
                               });
@@ -1045,11 +1125,13 @@ export function Dashboard() {
                       >
                         {t('removeConnection')}
                       </button>
-                    )}
+                    </div>
+                  )}
+                  <div style={{ marginTop: '0.5rem' }}>
                     <button type="button" className={styles.btn} disabled={busy} onClick={() => setShowKeyForm(false)}>
                       {t('cancel')}
                     </button>
-                  </span>
+                  </div>
                 </span>
               </div>
             )}
@@ -1087,6 +1169,22 @@ export function Dashboard() {
           />
               </div>
             </section>
+
+            <ErrorPanel
+              errors={snap.recentErrors || []}
+              totalCount={snap.errorsCount ?? (snap.recentErrors?.length ?? 0)}
+              onCleared={load}
+            />
+          </div>
+        )}
+
+        {tab === 'errors' && (
+          <div className={styles.panel}>
+            <ErrorPanel
+              errors={snap.recentErrors || []}
+              totalCount={snap.errorsCount ?? (snap.recentErrors?.length ?? 0)}
+              onCleared={load}
+            />
           </div>
         )}
 
@@ -1097,7 +1195,7 @@ export function Dashboard() {
           <div className={`${styles.notice} ${styles.blocked}`}>
             <span>⚠️</span>
             <span>
-              {t('mexcBalanceError', { err: liveAccount.error })}
+              {t('hyperliquidBalanceError', { err: liveAccount.error })}
             </span>
           </div>
         )}
@@ -1109,7 +1207,7 @@ export function Dashboard() {
               {isLive ? (liveAccountOk ? usd(liveAccount.equity) : '—') : usd(account.equity)}
             </p>
             {isLive ? (
-              <p className={styles.cardSub}>{liveAccountOk ? t('fromMexc') : t('mexcUnavailable')}</p>
+              <p className={styles.cardSub}>{liveAccountOk ? t('fromHyperliquid') : t('hyperliquidUnavailable')}</p>
             ) : (
               <p className={`${styles.cardSub} ${totalPnl >= 0 ? styles.up : styles.down}`}>
                 {t('sinceStart', { v: signed(totalPnl, (v) => usd(v)) })}
@@ -1125,7 +1223,7 @@ export function Dashboard() {
               {isLive
                 ? liveAccountOk
                   ? t('inUse', { v: usd(liveAccount.frozen) })
-                  : t('mexcUnavailable')
+                  : t('hyperliquidUnavailable')
                 : t('inUse', { v: usd(account.usedMargin) })}
             </p>
           </div>
@@ -1180,12 +1278,31 @@ export function Dashboard() {
             <section className={styles.panel}>
               <div className={styles.panelHead}>
                 <h2>{t('openPositions')}{isLive ? ' (Hyperliquid L1)' : ''}</h2>
-                <span
-                  className={`${styles.count} ${openCount !== undefined && openCount > maxOpen ? styles.countOverflow : ''}`}
-                  title={openCount === undefined ? t('mexcUnavailable') : `${openCount} open / max ${maxOpen} trades`}
-                >
-                  {openCount === undefined ? '—' : `${openCount} / ${maxOpen}`}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  {openCount !== undefined && openCount > 0 && (
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnDanger}`}
+                      style={{ padding: '0.2rem 0.6rem', fontSize: '0.75rem', fontWeight: 600 }}
+                      onClick={async () => {
+                        if (window.confirm(`🚨 NOODKNOP: Weet je zeker dat je alle ${openCount} openstaande posities direct tegen marktprijs wilt sluiten?`)) {
+                          void act(async () => {
+                            await closeAllPositions();
+                          });
+                        }
+                      }}
+                      title="Sluit direct alle openstaande posities tegen marktprijs"
+                    >
+                      🚨 Sluit Alles
+                    </button>
+                  )}
+                  <span
+                    className={`${styles.count} ${openCount !== undefined && openCount > maxOpen ? styles.countOverflow : ''}`}
+                    title={openCount === undefined ? t('hyperliquidUnavailable') : `${openCount} open / max ${maxOpen} trades`}
+                  >
+                    {openCount === undefined ? '—' : `${openCount} / ${maxOpen}`}
+                  </span>
+                </div>
               </div>
               <div className={styles.panelBody}>
                 {isLive ? (
@@ -1221,9 +1338,9 @@ export function Dashboard() {
                         })}
                     </div>
                   ) : (
-                    <p className={styles.empty}>{t('noOpenPositionsMexc')}</p>
+                    <p className={styles.empty}>{t('noOpenPositionsHyperliquid')}</p>
                   )
-                  : <p className={styles.empty}>{t('mexcPositionsUnavailable')}</p>
+                  : <p className={styles.empty}>{t('hyperliquidPositionsUnavailable')}</p>
                 ) : snap.open.length ? (
                   <div className={styles.rows}>
                     {[...snap.open]
@@ -1295,7 +1412,7 @@ export function Dashboard() {
         <div className={styles.modalBackdrop} onClick={() => setChartSymbol(null)}>
           <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
             <div className={styles.modalHead}>
-              <h3>{chartSymbol.replace('_', '/')}</h3>
+              <h3>{formatSymbol(chartSymbol)}</h3>
               <button type="button" className={styles.modalClose} onClick={() => setChartSymbol(null)}>
                 ✕
               </button>

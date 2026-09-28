@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import styles from './signal-chart.module.css';
 import { fetchChart } from './api.js';
+import { formatSymbol } from './coin-info.js';
 import { pct, price as fmtPrice, shortDate } from './format.js';
 import type { Candle, ChartData, LiveExchangePosition, Position, Signal, TradePlan } from './types.js';
 
 export type TimeframeKey = 'Min5' | 'Min15' | 'Min60' | 'Hour4';
 
 export const TIMEFRAMES: Array<{ key: TimeframeKey; label: string; name: string }> = [
-  { key: 'Min5', label: '5m', name: '5m (Sniper detail)' },
-  { key: 'Min15', label: '15m', name: '15m (Timing & reversal)' },
-  { key: 'Min60', label: '1u', name: '1u (Standaard strategie)' },
-  { key: 'Hour4', label: '4u', name: '4u (Macro trend context)' },
+  { key: 'Hour4', label: '4u', name: '4u (Macro Trend & Belangrijke Zones)' },
+  { key: 'Min60', label: '1u', name: '1u (Master Setup & Richting)' },
+  { key: 'Min15', label: '15m', name: '15m (Structuur & Pullback Zone)' },
+  { key: 'Min5', label: '5m', name: '5m (Sniper Instap-Trigger)' },
 ];
 
 /** Props for {@link SignalChart}. */
@@ -436,8 +437,9 @@ export function SignalChart({
     const pocPrice = effectiveSignal?.marketStructure?.volumeProfile?.poc;
     const pocY = pocPrice !== undefined && inRange(y(pocPrice)) ? y(pocPrice) : undefined;
 
-    const entryY = inRange(y(entryPrice)) ? y(entryPrice) : undefined;
-    const entryLine = effectivePosition && entryY !== undefined ? { price: entryPrice, y: entryY } : undefined;
+    const entryY = entryPrice > 0 && inRange(y(entryPrice)) ? y(entryPrice) : undefined;
+    const isPlannedEntry = !effectivePosition && entryY !== undefined;
+    const entryLine = entryY !== undefined ? { price: entryPrice, y: entryY, isPlanned: isPlannedEntry } : undefined;
     const lastCloseY = lastClose !== undefined && inRange(y(lastClose)) ? y(lastClose) : undefined;
 
     const rightBadges: RightBadge[] = [];
@@ -473,7 +475,7 @@ export function SignalChart({
         rawY: entryLine.y,
         y: entryLine.y,
         kind: 'entry',
-        label: 'INSTAP',
+        label: entryLine.isPlanned ? 'PLAN INSTAP' : 'INSTAP',
         price: entryLine.price,
       });
     }
@@ -549,7 +551,41 @@ export function SignalChart({
       }
     }
 
+    let waitTriggerText = '';
+    let waitTriggerColor = '#38bdf8';
+
+    if (!effectivePosition && effectiveSignal) {
+      const room = effectiveSignal.roomToStructure;
+      const isChop = effectiveSignal.regime === 'CHOP';
+      const spurt = effectiveSignal.checks?.some((c) => c.name === 'Volume Spurt' && c.passed);
+
+      if (spurt) {
+        waitTriggerText = `🚀 Volume-uitbraak actief: Wacht op 5m trigger (@ ~${fmtPrice(entryPrice)})`;
+        waitTriggerColor = '#4ade80';
+      } else if (isChop) {
+        waitTriggerText = `🛑 Markt in CHOP: Wacht op duidelijke trenduitbraak`;
+        waitTriggerColor = '#a1a1aa';
+      } else if (Number.isFinite(room) && (room as number) < 1.5) {
+        waitTriggerText = `⚠️ Weerstand nabij (${(room as number).toFixed(1)}R ruimte): Wacht op uitbraak`;
+        waitTriggerColor = '#fbbf24';
+      } else if (isPriceInZone) {
+        waitTriggerText = `🎯 In Golden Zone: Wacht op 5m ${side === 'LONG' ? 'groene bounce kaars' : 'rode rejectie kaars'} (@ ~${fmtPrice(entryPrice)})`;
+        waitTriggerColor = '#38bdf8';
+      } else if (isBounceOut) {
+        waitTriggerText = `🔥 Bounce bevestigd: Wacht op 5m trigger-kaars (@ ~${fmtPrice(entryPrice)})`;
+        waitTriggerColor = '#4ade80';
+      } else if (isWaitingPullback && goldenLow !== undefined && goldenHigh !== undefined) {
+        waitTriggerText = `⏳ Wacht op dip naar Golden Zone (${fmtPrice(goldenLow)} – ${fmtPrice(goldenHigh)})`;
+        waitTriggerColor = '#fbbf24';
+      } else {
+        waitTriggerText = `🎯 Wacht op 5m instaptrigger (@ ~${fmtPrice(entryPrice)})`;
+        waitTriggerColor = '#38bdf8';
+      }
+    }
+
     return {
+      waitTriggerText,
+      waitTriggerColor,
       candlesXY,
       lastCandleX: candlesXY[candlesXY.length - 1]?.x ?? W - PAD.right,
       bodyW,
@@ -857,7 +893,7 @@ export function SignalChart({
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="none"
         role="img"
-        aria-label={`Candlestick grafiek van ${symbol.replace('_', '/')}`}
+        aria-label={`Candlestick grafiek van ${formatSymbol(symbol)}`}
         onWheel={handleWheel}
       >
         <defs>
@@ -1071,15 +1107,64 @@ export function SignalChart({
             </g>
           ))}
 
-        {/* Entry Line (when position is active) */}
+        {/* On-Chart Visual Entry Trigger Banner (Shows exactly what the bot is waiting for) */}
+        {!chart.hasActivePosition && chart.waitTriggerText && (
+          <g>
+            <rect
+              x={PAD.left + 6}
+              y={PAD.top + 4}
+              width={Math.min(W - PAD.left - PAD.right - 12, 430)}
+              height={22}
+              rx={5}
+              fill="rgba(15, 23, 42, 0.94)"
+              stroke={chart.waitTriggerColor || '#38bdf8'}
+              strokeWidth={1.2}
+            />
+            <text
+              x={PAD.left + 14}
+              y={PAD.top + 19}
+              fill={chart.waitTriggerColor || '#38bdf8'}
+              fontSize={11}
+              fontWeight={700}
+            >
+              {chart.waitTriggerText}
+            </text>
+          </g>
+        )}
+
+        {/* Entry Line (Active position OR Planned Setup) */}
         {chart.entryLine && (
-          <line
-            x1={PAD.left}
-            y1={chart.entryLine.y}
-            x2={W - PAD.right}
-            y2={chart.entryLine.y}
-            className={styles.entryLine}
-          />
+          <g>
+            <line
+              x1={PAD.left}
+              y1={chart.entryLine.y}
+              x2={W - PAD.right}
+              y2={chart.entryLine.y}
+              className={chart.entryLine.isPlanned ? styles.plannedEntryLine : styles.entryLine}
+            />
+            {chart.entryLine.isPlanned && (
+              <g>
+                <rect
+                  x={PAD.left + 6}
+                  y={chart.entryLine.y - 14}
+                  width={155}
+                  height={14}
+                  rx={3}
+                  fill="#0284c7"
+                  fillOpacity={0.9}
+                />
+                <text
+                  x={PAD.left + 10}
+                  y={chart.entryLine.y - 3}
+                  fill="#ffffff"
+                  fontSize={9.5}
+                  fontWeight={600}
+                >
+                  🎯 Geplande Instap: {fmtPrice(chart.entryLine.price)}
+                </text>
+              </g>
+            )}
+          </g>
         )}
 
         {/* Current Price Line */}
@@ -1286,7 +1371,7 @@ export function SignalChart({
       <div className={styles.howAndWhatCard}>
         <div className={styles.howAndWhatHead}>
           <span className={styles.howAndWhatTitle}>
-            💡 <b>Hoe & Wat: Strategie & Wacht-Uitleg</b> ({symbol.replace('_', '/')})
+            💡 <b>Hoe & Wat: Strategie & Wacht-Uitleg</b> ({formatSymbol(symbol)})
           </span>
           <span
             className={`${styles.howAndWhatStatusBadge} ${
@@ -1327,7 +1412,7 @@ export function SignalChart({
                 pnlVal !== undefined
                   ? ` (Ongerealiseerde winst/verlies: ${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)})`
                   : '';
-              return `De ${sideName} positie op ${symbol.replace('_', '/')} is actief geopend op ${fmtPrice(chart.entryPrice)} met ${lev} hefboom${pnlStr}. De instap-pullback naar steun/waarde is reeds succesvol voltooid. De trade koerst nu richting TP1 (${chart.tpLines[0] ? fmtPrice(chart.tpLines[0].price) : '—'}) en TP2 (${chart.tpLines[1] ? fmtPrice(chart.tpLines[1].price) : '—'}) met stop-loss beveiliging op ${chart.slLine ? fmtPrice(chart.slLine.price) : '—'}.`;
+              return `De ${sideName} positie op ${formatSymbol(symbol)} is actief geopend op ${fmtPrice(chart.entryPrice)} met ${lev} hefboom${pnlStr}. De instap-pullback naar steun/waarde is reeds succesvol voltooid. De trade koerst nu richting TP1 (${chart.tpLines[0] ? fmtPrice(chart.tpLines[0].price) : '—'}) en TP2 (${chart.tpLines[1] ? fmtPrice(chart.tpLines[1].price) : '—'}) met stop-loss beveiliging op ${chart.slLine ? fmtPrice(chart.slLine.price) : '—'}.`;
             }
             if (notes.length === 0) {
               return `De bot ziet een sterke ${sideName} kans met ${conf} overtuiging (${lev} hefboom). Alle marktstructuur- en momentumvoorwaarden zijn vervuld. Zodra de scanner de volgende cyclus draait, kan de order direct geactiveerd worden.`;
@@ -1338,7 +1423,7 @@ export function SignalChart({
             if (chart.isPriceInZone) {
               return `De koers bevindt zich in de Golden Zone (${fmtPrice(chart.goldenLow)} – ${fmtPrice(chart.goldenHigh)})! De bot wacht nu op de micro-timing trigger (een bevestigende reversal candle op het 15m/5m tijdsframe met stijgende RSI) om een valse uitbraak te voorkomen.`;
             }
-            return `De bot monitort ${symbol.replace('_', '/')} voor een potentiële ${sideName} positie. Er wordt gewacht op bevestiging van het hogere tijdsframe en het bereiken van de optimale marktstructuur.`;
+            return `De bot monitort ${formatSymbol(symbol)} voor een potentiële ${sideName} positie. Er wordt gewacht op bevestiging van het hogere tijdsframe en het bereiken van de optimale marktstructuur.`;
           })()}
         </p>
 
@@ -1364,12 +1449,13 @@ export function SignalChart({
 
           <div className={styles.howAndWhatItem}>
             <span className={styles.howAndWhatItemHead}>
-              ⏱️ <b>2. Tijdsframe & Micro-Trigger</b>
+              ⏱️ <b>2. Multi-Timeframe Instapmethode (4H · 1H · 15m · 5m)</b>
             </span>
             <p className={styles.howAndWhatItemDesc}>
-              Geselecteerd TF: <b>{TIMEFRAMES.find((t) => t.key === interval)?.label}</b>. 4u-macrotrend is{' '}
-              <b>{effectiveSignal?.higherRegime || 'Onbekend'}</b>{' '}
-              {effectiveSignal?.alignedWithHigher ? '(✓ Bevestigd)' : '(⏳ Nog niet uitgelijnd)'}. Vereist een bevestigde 15m/5m reversal candle voor orderactivatie.
+              <b>4u:</b> Bepaalt de overkoepelende richting ({effectiveSignal?.higherRegime || 'Macro Trend'}).<br />
+              <b>1u:</b> Master Setup & Structuur (EMA-trend, POC & Confluenties).<br />
+              <b>15m:</b> Wacht op een gezonde pullback naar de Golden Zone (geen FOMO op de top).<br />
+              <b>5m:</b> <u>Exacte instaptiming!</u> Zodra een 5m candle groen sluit met momentum, vuurt de bot de marktorder af op de huidige marktprijs ({fmtPrice(chart.lastClose)}).
             </p>
           </div>
 

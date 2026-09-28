@@ -419,6 +419,13 @@
   font-variant-numeric: tabular-nums;
 }
 
+.plannedEntryLine {
+  stroke: #38bdf8;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
 .entryLine {
   stroke: #38bdf8;
   stroke-width: 1.5;

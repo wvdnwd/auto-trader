@@ -326,6 +326,7 @@ export type TradePlan = {
   strategyType?: StrategyType;
   setupScore?: SetupScore;
   leverageBreakdown?: LeverageBreakdown;
+  clusterRiskMultiplier?: number;
 };
 
 /**
@@ -339,6 +340,7 @@ export type Position = {
   quantity: number;
   leverage: number;
   margin: number;
+  initialMargin?: number;
   notional: number;
   stopLoss: number;
   /** Final target — the last and furthest take-profit level. */
@@ -430,6 +432,14 @@ export type Position = {
   strategyType?: StrategyType;
   setupScore?: SetupScore;
   leverageBreakdown?: LeverageBreakdown;
+  /** Active market session during which this position was opened. */
+  session?: string;
+  /** Maximum favorable excursion (peak unrealised R reached while open). */
+  peakR?: number;
+  /** Maximum adverse excursion (worst unrealised drawdown in R experienced). */
+  troughR?: number;
+  /** Portfolio cluster risk multiplier applied at entry. */
+  clusterRiskMultiplier?: number;
 };
 
 /** Post-mortem diagnosis of a completed trade. */
@@ -442,6 +452,9 @@ export type TradePostMortem = {
   whatWentWell: string[];
   whatWentWrong: string[];
   lesson: string;
+  session?: string;
+  mfeR?: number;
+  maeR?: number;
 };
 
 /** Historical performance statistics for a technical factor/indicator. */
@@ -449,6 +462,54 @@ export type FactorStat = {
   wins: number;
   losses: number;
   netR: number;
+  winRate?: number;
+  weightMultiplier?: number;
+};
+
+/** Performance statistics per market trading session. */
+export type SessionStat = {
+  session: string;
+  dayOfWeek?: number;
+  wins: number;
+  losses: number;
+  netR: number;
+  winRate: number;
+  edgeMultiplier: number;
+};
+
+/** Asset-specific behavioural learning profile (Coin DNA). */
+export type CoinDNA = {
+  symbol: string;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  netR: number;
+  winRate: number;
+  avgDurationMinutes: number;
+  avgMfeR: number;
+  avgMaeR: number;
+  volatilityTier: 'MAJOR' | 'ALT' | 'MEME';
+  stopLossMultiplier: number;
+  takeProfitMultiplier: number;
+};
+
+/** Aggregate excursion statistics across all trades for dynamic target optimization. */
+export type MfeMaeStats = {
+  totalTracked: number;
+  avgMfeR: number;
+  avgMaeR: number;
+  medianMfeR: number;
+  optimalTp1R: number;
+  optimalTp2R: number;
+};
+
+/** Real-time cluster risk and directional exposure metrics. */
+export type ClusterRiskEvaluation = {
+  activeSameSide: number;
+  group: string;
+  inGroup: number;
+  multiplier: number;
+  reason?: string;
 };
 
 /** Temporary trading penalty (strafbankje) for underperforming symbols. */
@@ -463,6 +524,14 @@ export type SymbolPenalty = {
 export type LearningState = {
   factorStats: Record<string, FactorStat>;
   penalties: Record<string, SymbolPenalty>;
+  sessionStats?: Record<string, SessionStat>;
+  coinDNA?: Record<string, CoinDNA>;
+  mfeMaeStats?: MfeMaeStats;
+  clusterStatus?: {
+    activeLongs: number;
+    activeShorts: number;
+    lastDampener: number;
+  };
 };
 
 /**
@@ -1025,6 +1094,17 @@ export type EngineEvent = {
   message: string;
 };
 
+export type SystemError = {
+  id: string;
+  at: number;
+  level: 'error' | 'fatal' | 'warn';
+  source: string;
+  message: string;
+  stack?: string;
+  details?: Record<string, unknown> | string;
+  occurrences?: number;
+};
+
 /**
  * One open position as reported directly by MEXC, shown instead of the paper
  * position list once live trading is armed — see {@link ExchangeAccountSnapshot}.
@@ -1068,3 +1148,56 @@ export type ExchangeAccountSnapshot = {
   /** Set when the fetch failed — the dashboard falls back to showing this instead of stale/blank data. */
   error?: string;
 };
+
+/**
+ * Fear & Greed index reading for overall crypto market sentiment.
+ */
+export type FearAndGreed = {
+  score: number;
+  classification: string;
+  updatedAt: number;
+};
+
+/**
+ * High-impact economic calendar event (e.g. CPI, FOMC, NFP).
+ */
+export type MacroEvent = {
+  title: string;
+  country: string;
+  date: string;
+  impact: 'High' | 'Medium' | 'Low' | 'Holiday';
+  forecast?: string;
+  previous?: string;
+  timeUntilMinutes: number;
+  activeShield: boolean;
+};
+
+/**
+ * Breaking crypto news headline with sentiment classification and coin tags.
+ */
+export type NewsItem = {
+  id: string;
+  title: string;
+  link: string;
+  source: 'Cointelegraph' | 'CoinDesk' | 'CryptoPanic';
+  publishedAt: number;
+  sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  coins: string[];
+  summary?: string;
+};
+
+/**
+ * Market & Macro Intelligence payload.
+ */
+export type MarketIntelligence = {
+  fearAndGreed: FearAndGreed | null;
+  macroShield: {
+    active: boolean;
+    reason?: string;
+    nextEvent?: MacroEvent | null;
+  };
+  upcomingMacroEvents: MacroEvent[];
+  breakingNews: NewsItem[];
+  fetchedAt: number;
+};
+

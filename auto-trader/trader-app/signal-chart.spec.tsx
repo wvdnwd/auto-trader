@@ -35,7 +35,7 @@ const baseSignal: Signal = {
 describe('SignalChart', () => {
   it('renders a candlestick chart when there is enough history', () => {
     render(<SignalChart candles={makeCandles(30)} signal={baseSignal} symbol="BTC_USDT" />);
-    expect(screen.getByRole('img', { name: /BTC\/USDT/ })).toBeTruthy();
+    expect(screen.getByRole('img', { name: /BTC\/USDC/ })).toBeTruthy();
   });
 
   it('falls back to an empty state with too little history', () => {
@@ -108,7 +108,7 @@ describe('SignalChart', () => {
       unrealisedPnl: 10,
     };
     render(<SignalChart candles={makeCandles(30)} signal={baseSignal} position={livePosition} symbol="BTC_USDT" />);
-    expect(screen.getByRole('img', { name: /BTC\/USDT/ })).toBeTruthy();
+    expect(screen.getByRole('img', { name: /BTC\/USDC/ })).toBeTruthy();
     expect(screen.getByText(/Ongerealiseerde winst\/verlies: \+\$10\.00/)).toBeTruthy();
   });
 });

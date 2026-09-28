@@ -47,8 +47,8 @@ const HELP_TEXTS: Record<string, HelpInfo> = {
   },
   minTradeMarginUsdt: {
     title: 'Min. trade-inleg ($)',
-    desc: 'De absolute minimale eigen inleg (margin) per trade in USDT/EUR. Voorkomt dat de bot te kleine trades opent als er weinig saldo vrij is of bij volatiele munten.',
-    example: 'Bij 35 opent de bot nooit een trade kleiner dan $35. Heeft de bot minder vrij saldo, dan wacht hij tot een eerdere trade sluit.',
+    desc: 'De absolute minimale eigen inleg (margin) per trade in USDC/EUR. Voorkomt dat de bot te kleine trades opent als er weinig saldo vrij is of bij volatiele munten.',
+    example: 'Bij 30 opent de bot nooit een trade kleiner dan $30 (USDC). Heeft de bot minder vrij saldo, dan wacht hij tot een eerdere trade sluit.',
   },
   minConfidence: {
     title: 'Min. conviction (%)',
@@ -62,7 +62,7 @@ const HELP_TEXTS: Record<string, HelpInfo> = {
   },
   maxLeverage: {
     title: 'Max leverage (x)',
-    desc: 'Het absolute hefboom-plafond dat de bot mag instellen op MEXC Futures.',
+    desc: 'Het absolute hefboom-plafond dat de bot mag instellen op Hyperliquid.',
     example: 'Bij 12x zal de bot voor altcoins nooit meer dan 12x hefboom kiezen, zelfs niet bij een strakke stop-loss. Dit beschermt tegen plotselinge liquidaties door uitschieters (wicks).',
   },
   maxOverflowPositions: {

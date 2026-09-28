@@ -294,7 +294,7 @@ export function BtcForecast({ snap }: BtcForecastProps) {
           <span className={styles.icon}>🪙</span>
           <div className={styles.titleText}>
             <h2 className={styles.title}>
-              Bitcoin (BTC/USDT) Voorspelling & Trend
+              Bitcoin (BTC/USDC) Voorspelling & Trend
               <span className={`${styles.badge} ${isBull ? styles.badgeUp : isBear ? styles.badgeDown : styles.badgeNeutral}`}>
                 {isBull ? '🚀 Bullish' : isBear ? '🔻 Bearish' : '⚖️ Neutraal'}
               </span>

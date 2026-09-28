@@ -89,6 +89,7 @@ export type ExchangePosition = {
   entryPrice: number;
   liquidationPrice: number;
   unrealisedPnl: number;
+  margin?: number;
   createTime?: number;
 };
 

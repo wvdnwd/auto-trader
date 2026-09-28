@@ -58,12 +58,30 @@ const COIN_INFO: Record<string, CoinInfo> = {
 /**
  * Split a venue contract symbol into its base coin and quote asset.
  *
- * @param symbol contract symbol, e.g. `BTC_USDT`.
- * @returns the base ticker (e.g. `BTC`) and quote ticker (e.g. `USDT`).
+ * @param symbol contract symbol, e.g. `BTC_USDT`, `BTC_USDC`, or `BTC-PERP`.
+ * @returns the base ticker (e.g. `BTC`) and quote ticker (e.g. `USDC`).
  */
 export function splitSymbol(symbol: string): { base: string; quote: string } {
-  const [base, quote] = symbol.split('_');
-  return { base: base || symbol, quote: quote || '' };
+  if (symbol.includes('_')) {
+    const [base, quote] = symbol.split('_');
+    const displayQuote = quote === 'USDT' ? 'USDC' : (quote || 'USDC');
+    return { base: base || symbol, quote: displayQuote };
+  }
+  if (symbol.includes('-')) {
+    const [base, quote] = symbol.split('-');
+    return { base: base || symbol, quote: quote || 'USDC' };
+  }
+  return { base: symbol, quote: 'USDC' };
+}
+
+/**
+ * Format a contract symbol for display in the UI (Hyperliquid USDC standard).
+ * E.g. 'BTC_USDT' -> 'BTC/USDC', 'SOL_USDC' -> 'SOL/USDC', 'ETH' -> 'ETH/USDC'.
+ */
+export function formatSymbol(symbol: string): string {
+  if (!symbol) return '';
+  const { base, quote } = splitSymbol(symbol);
+  return `${base}/${quote || 'USDC'}`;
 }
 
 /**

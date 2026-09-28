@@ -25,12 +25,23 @@ import { LIVE_EXECUTION_DISABLED_REASON, MexcExchangeAdapter, type IExchangeAdap
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { notify } from './notifier.js';
 import { rankCandidates } from './candidate-ranking.js';
-import { DEFAULT_RISK, concentrationBlock, correlationGroup, isPositionDerisked, planTrade, previewLeverage, tradingBlockedReason } from './risk.js';
+import { DEFAULT_RISK, concentrationBlock, correlationGroup, getCoinProfile, isPositionDerisked, planTrade, previewLeverage, tradingBlockedReason } from './risk.js';
 import { btcTrendConflict, buildSignal, checkLtfReversal, detectRegime } from './strategy.js';
 import { analyzeMarketStructure } from './market-structure.js';
 import { getMarketSession } from './sessions.js';
 import { Store } from './store.js';
 import { analyzeClosedTrade } from './post-mortem.js';
+import { NewsEngine } from './news-engine.js';
+import { ErrorLogger } from './error-logger.js';
+import {
+  computeFactorWeight,
+  evaluateCandidateFactorEdge,
+  evaluateClusterRisk,
+  evaluateSessionEdge,
+  updateCoinDNA,
+  updateMfeMaeStats,
+  updateSessionStat,
+} from './ai-learning.js';
 import type {
   Account,
   BlockedState,
@@ -74,7 +85,6 @@ export const MEME_UNIVERSE = [
   'PEPE_USDT',
   'WIF_USDT',
   '1000BONK_USDT',
-  'FLOKI_USDT',
   'FARTCOIN_USDT',
   'PENGU_USDT',
   'SPX_USDT',
@@ -82,66 +92,143 @@ export const MEME_UNIVERSE = [
   'BOME_USDT',
   'TURBO_USDT',
   'PNUT_USDT',
-  'NEIROCTO_USDT',
   'MOODENG_USDT',
   'BRETT_USDT',
   'MEW_USDT',
   'GOAT_USDT',
   '1000000MOG_USDT',
-  'ACT_USDT',
+  'TRUMP_USDT',
+  'FLOKI_USDT',
+];
+
+/** Gaming & Metaverse — high-beta narrative coins, ATR-based stops */
+export const GAMING_UNIVERSE = [
+  'AXS_USDT',
+  'SAND_USDT',
+  'MANA_USDT',
+  'IMX_USDT',
+  'GALA_USDT',
+  'ENJ_USDT',
+  'BEAM_USDT',
+  'RON_USDT',
+  'MAGIC_USDT',
+  'YGG_USDT',
+];
+
+/** DeFi blue-chips — liquidity-sensitive, TP runners on breakouts */
+export const DEFI_UNIVERSE = [
+  'AAVE_USDT',
+  'UNI_USDT',
+  'CRV_USDT',
+  'MKR_USDT',
+  'SNX_USDT',
+  'JUP_USDT',
+  'PENDLE_USDT',
+  'GMX_USDT',
+  'DYDX_USDT',
+  'ENA_USDT',
+  'ETHFI_USDT',
+  'LDO_USDT',
+  'ONDO_USDT',
+  'HYPE_USDT',
+  'CAKE_USDT',
+];
+
+/** Layer 2 / Scaling tokens */
+export const LAYER2_UNIVERSE = [
+  'ARB_USDT',
+  'OP_USDT',
+  'STRK_USDT',
+  'POL_USDT',
+  'MANTA_USDT',
+  'METIS_USDT',
 ];
 
 export const CORE_UNIVERSE = [
+  // ── Majors ───────────────────────────────────────────────────────────────
   'BTC_USDT',
   'ETH_USDT',
-  'SOL_USDT',
+  'BNB_USDT',
   'XRP_USDT',
-  'DOGE_USDT',
-  'SUI_USDT',
-  'NEAR_USDT',
-  'PEPE_USDT',
-  'ARB_USDT',
+  'LTC_USDT',
+  'BCH_USDT',
+  'ETC_USDT',
+
+  // ── Layer 1 ──────────────────────────────────────────────────────────────
+  'SOL_USDT',
   'AVAX_USDT',
-  'LINK_USDT',
   'ADA_USDT',
-  'UNI_USDT',
-  'TAO_USDT',
+  'DOT_USDT',
+  'NEAR_USDT',
+  'SUI_USDT',
   'APT_USDT',
+  'SEI_USDT',
   'TIA_USDT',
   'INJ_USDT',
-  'FET_USDT',
-  'RENDER_USDT',
-  'SHIB_USDT',
-  'WIF_USDT',
-  '1000BONK_USDT',
-  'DOT_USDT',
-  'LTC_USDT',
   'KAS_USDT',
-  'SEI_USDT',
+  'ICP_USDT',
+  'HBAR_USDT',
+  'XLM_USDT',
+  'TON_USDT',
+  'ATOM_USDT',
+  'ALGO_USDT',
+  'FTM_USDT',
+  'AR_USDT',
+  'DOGE_USDT',
+
+  // ── Layer 2 / Scaling ────────────────────────────────────────────────────
+  'ARB_USDT',
+  'OP_USDT',
+  'STRK_USDT',
+  'POL_USDT',
+  'MANTA_USDT',
+  'METIS_USDT',
+
+  // ── DeFi ─────────────────────────────────────────────────────────────────
+  'LINK_USDT',
   'AAVE_USDT',
+  'UNI_USDT',
+  'CRV_USDT',
+  'MKR_USDT',
+  'SNX_USDT',
+  'JUP_USDT',
+  'PENDLE_USDT',
+  'GMX_USDT',
+  'DYDX_USDT',
+  'ENA_USDT',
+  'ETHFI_USDT',
+  'LDO_USDT',
   'ONDO_USDT',
   'HYPE_USDT',
-  'ENA_USDT',
-  'BNB_USDT',
+  'CAKE_USDT',
+
+  // ── AI / Tech ─────────────────────────────────────────────────────────────
+  'TAO_USDT',
+  'FET_USDT',
+  'RENDER_USDT',
   'WLD_USDT',
-  'OP_USDT',
-  'XLM_USDT',
-  'AR_USDT',
-  'ETC_USDT',
-  'STRK_USDT',
-  'HBAR_USDT',
-  'BCH_USDT',
-  'POL_USDT',
-  'ICP_USDT',
-  'LDO_USDT',
-  'ETHFI_USDT',
-  'RAY_USDT',
-  'CRV_USDT',
-  'SAGA_USDT',
   'VIRTUAL_USDT',
-  'ZEC_USDT',
-  // Top liquid meme coins on MEXC
-  'FLOKI_USDT',
+  'ARKM_USDT',
+  'AI16Z_USDT',
+  'AIXBT_USDT',
+
+  // ── Gaming / Metaverse ────────────────────────────────────────────────────
+  'AXS_USDT',
+  'SAND_USDT',
+  'MANA_USDT',
+  'IMX_USDT',
+  'GALA_USDT',
+  'ENJ_USDT',
+  'BEAM_USDT',
+  'RON_USDT',
+  'MAGIC_USDT',
+  'YGG_USDT',
+
+  // ── Meme coins ────────────────────────────────────────────────────────────
+  'SHIB_USDT',
+  'PEPE_USDT',
+  'WIF_USDT',
+  '1000BONK_USDT',
   'FARTCOIN_USDT',
   'PENGU_USDT',
   'SPX_USDT',
@@ -149,13 +236,18 @@ export const CORE_UNIVERSE = [
   'BOME_USDT',
   'TURBO_USDT',
   'PNUT_USDT',
-  'NEIROCTO_USDT',
   'MOODENG_USDT',
   'BRETT_USDT',
   'MEW_USDT',
   'GOAT_USDT',
   '1000000MOG_USDT',
-  'ACT_USDT',
+  'TRUMP_USDT',
+  'FLOKI_USDT',
+
+  // ── Legacy Low-Leverage Alts ──────────────────────────────────────────────
+  'DASH_USDT',
+  'ZEC_USDT',
+  'SAGA_USDT',
 ];
 
 /**
@@ -169,6 +261,20 @@ export const ENTRY_INTERVAL = 'Min60';
 export const CONFIRM_INTERVAL = 'Hour4';
 export const MICRO_INTERVAL = 'Min15';
 export const SNIPER_INTERVAL = 'Min5';
+
+/**
+ * Rounds a quantity to the nearest step precision (e.g. 0.01 for Hyperliquid fractional coins,
+ * or 1 for MEXC integer contracts) to avoid leaving unallocated fractional dust.
+ */
+export function roundToStep(val: number, step: number): number {
+  if (!Number.isFinite(val) || val <= 0) return 0;
+  if (!Number.isFinite(step) || step <= 0) return val;
+  if (step >= 1) return Math.round(val);
+  const decimals = Math.max(0, Math.min(8, Math.round(-Math.log10(step))));
+  const factor = Math.pow(10, decimals);
+  return Math.round(val * factor) / factor;
+}
+
 
 /**
  * How close to the entry threshold a signal must be for the engine to switch to
@@ -288,6 +394,8 @@ export class Engine {
   private liveDayKey = '';
   /** Rolling BTC price history for flash-dump detection (last 20 mins) */
   private btcPriceHistory: { time: number; price: number }[] = [];
+  /** Timestamp of the last market-wide candidate scan */
+  private lastFullScanAt = 0;
 
   constructor(
     private readonly store: Store,
@@ -597,7 +705,7 @@ export class Engine {
       earlyBreakEvenR: num(merged.earlyBreakEvenR, 0.5, 3.0, this.risk.earlyBreakEvenR ?? 1.2),
       btcChopFilterEnabled: merged.btcChopFilterEnabled !== undefined
         ? Boolean(merged.btcChopFilterEnabled)
-        : (this.risk.btcChopFilterEnabled ?? true),
+        : (this.risk.btcChopFilterEnabled ?? false),
       pauseNewEntries: merged.pauseNewEntries !== undefined
         ? Boolean(merged.pauseNewEntries)
         : (this.risk.pauseNewEntries ?? false),
@@ -606,7 +714,7 @@ export class Engine {
         : (this.risk.mssProtectionEnabled ?? true),
       premiumDiscountFilterEnabled: merged.premiumDiscountFilterEnabled !== undefined
         ? Boolean(merged.premiumDiscountFilterEnabled)
-        : (this.risk.premiumDiscountFilterEnabled ?? true),
+        : (this.risk.premiumDiscountFilterEnabled ?? false),
       imbalanceScalpEnabled: merged.imbalanceScalpEnabled !== undefined
         ? Boolean(merged.imbalanceScalpEnabled)
         : (this.risk.imbalanceScalpEnabled ?? true),
@@ -619,6 +727,20 @@ export class Engine {
       volumeProfileEnabled: merged.volumeProfileEnabled !== undefined
         ? Boolean(merged.volumeProfileEnabled)
         : (this.risk.volumeProfileEnabled ?? true),
+      maxPortfolioHeat: num(merged.maxPortfolioHeat, 0.005, 0.5, this.risk.maxPortfolioHeat ?? 0.050),
+      maxCorrelatedRisk: num(merged.maxCorrelatedRisk, 0.005, 0.3, this.risk.maxCorrelatedRisk ?? 0.030),
+      maxPositionsPerSymbol: Math.round(num(merged.maxPositionsPerSymbol, 1, 5, this.risk.maxPositionsPerSymbol ?? 1)),
+      minScore: num(merged.minScore, 10, 100, this.risk.minScore ?? 70),
+      minReversalScore: num(merged.minReversalScore, 10, 100, this.risk.minReversalScore ?? 80),
+      goldenZoneLow: num(merged.goldenZoneLow, 0.1, 0.9, this.risk.goldenZoneLow ?? 0.618),
+      goldenZoneHigh: num(merged.goldenZoneHigh, 0.1, 0.95, this.risk.goldenZoneHigh ?? 0.650),
+      minimumRrSwing: num(merged.minimumRrSwing, 0.5, 10, this.risk.minimumRrSwing ?? 2.0),
+      minimumRrPullback: num(merged.minimumRrPullback, 0.5, 10, this.risk.minimumRrPullback ?? 1.5),
+      minimumRrBreakout: num(merged.minimumRrBreakout, 0.5, 10, this.risk.minimumRrBreakout ?? 2.0),
+      cooldownTpMinutes: num(merged.cooldownTpMinutes, 0, 1440, this.risk.cooldownTpMinutes ?? 15),
+      cooldownBeMinutes: num(merged.cooldownBeMinutes, 0, 1440, this.risk.cooldownBeMinutes ?? 30),
+      cooldownSlMinutes: num(merged.cooldownSlMinutes, 0, 1440, this.risk.cooldownSlMinutes ?? 60),
+      cooldownFakeoutMinutes: num(merged.cooldownFakeoutMinutes, 0, 1440, this.risk.cooldownFakeoutMinutes ?? 120),
     };
     // Keep the pairs coherent regardless of the order the user edits them in.
     this.risk.maxRiskPct = Math.max(this.risk.maxRiskPct, this.risk.baseRiskPct);
@@ -676,7 +798,23 @@ export class Engine {
    */
   private async tick(): Promise<void> {
     try {
-      await this.cycle();
+      const now = Date.now();
+      const minScanGap = 30_000;
+      if (this.fast && now - this.lastFullScanAt < minScanGap) {
+        if (!this.busy && !this.resetting) {
+          this.busy = true;
+          try {
+            await this.refreshMarks();
+            await this.reconcileLivePositions();
+            await this.manageOpenPositions();
+          } finally {
+            this.busy = false;
+          }
+        }
+      } else {
+        this.lastFullScanAt = now;
+        await this.cycle();
+      }
       if (this.stopped) return;
       const wasFast = this.fast;
       this.fast = await this.nearDecision();
@@ -689,6 +827,7 @@ export class Engine {
         );
       }
     } catch (err) {
+      ErrorLogger.getInstance().error('Engine', err, { phase: 'tick' });
       await this.log('error', `Fout in engine tick: ${(err as Error).message}`).catch(() => {});
     } finally {
       if (!this.stopped) {
@@ -762,6 +901,7 @@ export class Engine {
       await this.manageOpenPositions();
       await this.scanAndEnter();
     } catch (err) {
+      ErrorLogger.getInstance().error('Engine', err, { phase: 'cycle' });
       await this.log('error', `Cyclus mislukt: ${(err as Error).message}`);
       void notify({ kind: 'engine-error', message: `Scan-cyclus mislukt: ${(err as Error).message}` });
     } finally {
@@ -854,6 +994,36 @@ export class Engine {
     } finally {
       this.closingPositions.delete(id);
     }
+  }
+
+  /**
+   * Close all active positions immediately at market (panic / emergency close).
+   * Works for both paper and live positions.
+   */
+  async closeAllPositions(): Promise<{ closed: number; total: number; errors: string[] }> {
+    const open = await this.store.positions('OPEN');
+    let closed = 0;
+    const errors: string[] = [];
+
+    for (const position of open) {
+      try {
+        const ok = await this.closePosition(position.id);
+        if (ok) {
+          closed += 1;
+        } else {
+          errors.push(`${position.symbol}: kon positie niet sluiten`);
+        }
+      } catch (err) {
+        errors.push(`${position.symbol}: ${(err as Error).message}`);
+      }
+    }
+
+    await this.log(
+      closed > 0 ? 'trade' : 'warn',
+      `🚨 Noodsluiting voltooid: ${closed}/${open.length} posities gesloten.${errors.length ? ` Fouten: ${errors.join(', ')}` : ''}`
+    );
+
+    return { closed, total: open.length, errors };
   }
 
   /**
@@ -1023,7 +1193,7 @@ export class Engine {
     try {
       onVenue = await this.exchange.getOpenPositions();
     } catch (err) {
-      await this.log('warn', `Reconciliatie mislukt — kon posities niet ophalen bij MEXC: ${(err as Error).message}`);
+      await this.log('warn', `Reconciliatie mislukt — kon posities niet ophalen bij Hyperliquid: ${(err as Error).message}`);
       return;
     }
 
@@ -1055,18 +1225,22 @@ export class Engine {
         continue;
       }
 
-      const expectedVol = Math.floor((position.remainingQuantity ?? position.quantity) / contractSize);
-      if (expectedVol > 0 && Math.abs(venue.vol - expectedVol) >= 1) {
+      const expectedQty = position.remainingQuantity ?? position.quantity;
+      const expectedVol = expectedQty / contractSize;
+      const detail = await this.market
+        .contractDetail(position.symbol)
+        .catch(() => ({ contractSize, minVol: 0.0001, maxVol: 100000, priceScale: 4 }));
+      const minDelta = (detail.minVol && detail.minVol > 0) ? detail.minVol * 0.5 : 0.00001;
+      const volDiff = venue.vol - expectedVol;
+
+      if (Math.abs(volDiff) > minDelta) {
         const newQty = venue.vol * contractSize;
-        const detail = await this.market
-          .contractDetail(position.symbol)
-          .catch(() => ({ contractSize, minVol: 1, maxVol: 100000, priceScale: 4 }));
         const priceScale = detail.priceScale ?? 4;
         const isLiveArmed = this.exchange.status().enabled;
 
-        if (venue.vol > expectedVol) {
+        if (volDiff > 0) {
           // Handmatige bijkoop op exchange / manual scale-in
-          const addedVol = venue.vol - expectedVol;
+          const addedVol = volDiff;
           const addedQty = addedVol * contractSize;
           const oldEntry = position.entry;
           const newEntry = venue.entryPrice > 0 ? venue.entryPrice : oldEntry;
@@ -1092,18 +1266,26 @@ export class Engine {
               : calculatedSl;
           }
 
-          // Bereken nieuwe TP targets geschaald vanaf de nieuwe gewogen entry
+          // Bereken TP-targets via coin-profiel zodat meme/DeFi/L1 hun eigen R-multiples krijgen
+          const cpBijkoop = getCoinProfile(position.symbol);
+          const r1 = cpBijkoop.firstTargetR;
+          const r2 = Number((r1 + (cpBijkoop.finalTargetR - r1) * 0.45).toFixed(1));
+          const r3 = cpBijkoop.finalTargetR;
+          const p1 = cpBijkoop.firstTargetPortion;
+          const p2 = Number(((1 - p1) / 2).toFixed(2));
+          const p3 = Number((1 - p1 - p2).toFixed(2));
           const currentRisk = Math.abs(newEntry - newStopLoss);
+
           const updatedTakeProfits = (position.takeProfits && position.takeProfits.length > 0)
             ? position.takeProfits.map((tp) => ({
                 ...tp,
                 hit: false,
-                price: Number((newEntry + dir * currentRisk * (tp.rMultiple || 1.8)).toFixed(priceScale)),
+                price: Number((newEntry + dir * currentRisk * (tp.rMultiple || r1)).toFixed(priceScale)),
               }))
             : [
-                { price: Number((newEntry + dir * currentRisk * 1.8).toFixed(priceScale)), portion: 0.45, rMultiple: 1.8, hit: false },
-                { price: Number((newEntry + dir * currentRisk * 2.7).toFixed(priceScale)), portion: 0.28, rMultiple: 2.7, hit: false },
-                { price: Number((newEntry + dir * currentRisk * 5.76).toFixed(priceScale)), portion: 0.27, rMultiple: 5.76, hit: false },
+                { price: Number((newEntry + dir * currentRisk * r1).toFixed(priceScale)), portion: p1, rMultiple: r1, hit: false },
+                { price: Number((newEntry + dir * currentRisk * r2).toFixed(priceScale)), portion: p2, rMultiple: r2, hit: false },
+                { price: Number((newEntry + dir * currentRisk * r3).toFixed(priceScale)), portion: p3, rMultiple: r3, hit: false },
               ];
 
           const newNotional = newQty * newEntry;
@@ -1127,12 +1309,13 @@ export class Engine {
               position.liveStopOrderId = stop.orderId;
 
               // Plaats nieuwe TP orders voor het volledige volume
+              const step = detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
               let remainingVol = venue.vol;
               for (let i = 0; i < updatedTakeProfits.length; i++) {
                 const tp = updatedTakeProfits[i];
                 const isLast = i === updatedTakeProfits.length - 1;
-                const tpVol = isLast ? remainingVol : Math.max(detail.minVol, Math.round(venue.vol * tp.portion));
-                remainingVol -= tpVol;
+                const tpVol = isLast ? roundToStep(remainingVol, step) : Math.max(detail.minVol, roundToStep(venue.vol * tp.portion, step));
+                remainingVol = roundToStep(remainingVol - tpVol, step);
                 if (tpVol > 0) {
                   await this.exchange
                     .placeTakeProfitOrder({
@@ -1153,6 +1336,7 @@ export class Engine {
           }
 
           // 2. Update positie in database en geheugen
+          const newInitialRisk = Math.abs(newEntry - newStopLoss);
           await this.store.updatePosition(position.id, {
             entry: newEntry,
             quantity: position.quantity + addedQty,
@@ -1166,6 +1350,7 @@ export class Engine {
             liveStopOrderId: position.liveStopOrderId,
             scaleInCount: (position.scaleInCount ?? 0) + 1,
             scaledInAt: Date.now(),
+            initialRisk: newInitialRisk,
           });
 
           position.entry = newEntry;
@@ -1179,6 +1364,7 @@ export class Engine {
           position.takeProfits = updatedTakeProfits;
           position.scaleInCount = (position.scaleInCount ?? 0) + 1;
           position.scaledInAt = Date.now();
+          position.initialRisk = newInitialRisk;
 
           await this.log(
             'trade',
@@ -1190,18 +1376,78 @@ export class Engine {
           });
         } else {
           // Volume op venue is lager (deel gesloten of TP geraakt)
-          await this.log(
-            'info',
-            `Reconciliatie: ${position.symbol} ${position.side} venue-volume ${venue.vol} lager dan lokaal ${expectedVol}. Restant bijgewerkt naar ${newQty}.`
-          );
-          if (isLiveArmed && position.liveStopOrderId) {
-            await this.moveLiveStop(position, position.stopLoss, newQty).catch(() => {});
+          const closedQty = Math.max(0, -volDiff * contractSize);
+          const dir = position.side === 'LONG' ? 1 : -1;
+          const markPx = this.marks.get(position.symbol) || venue.entryPrice;
+
+          // Bepaal welke TP-levels zijn geraakt
+          let bookedPnl = 0;
+          let movedBreakEven = false;
+          let newStop = position.stopLoss;
+
+          const updatedTps = (position.takeProfits || []).map((tp, idx) => {
+            const isHit =
+              tp.hit ||
+              (dir === 1 ? markPx >= tp.price : markPx <= tp.price);
+            if (isHit && !tp.hit) {
+              if (idx === 0) movedBreakEven = true;
+              return { ...tp, hit: true };
+            }
+            return tp;
+          });
+
+          // Als er geen specifiek TP level gematcht werd maar volume toch daalde:
+          const unhitTp = position.takeProfits?.find((t) => !t.hit);
+          const effectiveFillPx = unhitTp?.price || markPx;
+          bookedPnl = dir * (effectiveFillPx - position.entry) * closedQty;
+
+          if (movedBreakEven || (position.takeProfits && position.takeProfits[0]?.hit)) {
+            position.breakEven = true;
+            const isStopBeyondEntry = dir === 1 ? newStop >= position.entry : newStop <= position.entry;
+            if (!isStopBeyondEntry) {
+              newStop = position.entry;
+            }
           }
+
+          const leverage = position.leverage || 5;
+          const freedMargin = (closedQty * position.entry) / leverage;
+          const newRealised = (position.realisedPnl || 0) + bookedPnl;
+          const newMargin = Math.max(0, position.margin - freedMargin);
+          const newNotional = Math.max(0, newQty * position.entry);
+
+          await this.log(
+            'trade',
+            `🎯 Deelsluiting / TP geraakt op exchange voor ${position.symbol} ${position.side}: ${closedQty.toFixed(2)} contracten gesloten (+${bookedPnl >= 0 ? '$' : '-$'}${Math.abs(bookedPnl).toFixed(2)} winst geboekt). Restant: ${newQty.toFixed(2)} contracten${movedBreakEven ? ' · Stop naar break-even' : ''}.`
+          );
+
+          if (bookedPnl !== 0 || freedMargin > 0) {
+            await this.store.applyBalanceDelta({
+              balance: freedMargin + bookedPnl,
+              realisedPnl: bookedPnl,
+            });
+          }
+
+          position.remainingQuantity = Math.max(0, newQty);
+          position.realisedPnl = newRealised;
+          position.margin = newMargin;
+          position.notional = newNotional;
+          position.stopLoss = newStop;
+          position.takeProfits = updatedTps;
+
+          if (isLiveArmed && newQty > 0) {
+            await this.moveLiveStop(position, newStop, newQty).catch(() => {});
+          }
+
           await this.store.updatePosition(position.id, {
             remainingQuantity: newQty,
+            realisedPnl: newRealised,
+            margin: newMargin,
+            notional: newNotional,
+            breakEven: position.breakEven,
+            stopLoss: newStop,
+            takeProfits: updatedTps,
             liveStopOrderId: position.liveStopOrderId,
           });
-          position.remainingQuantity = Math.max(0, newQty);
         }
       }
     }
@@ -1223,15 +1469,24 @@ export class Engine {
         const dir = venue.side === 'LONG' ? 1 : -1;
         const stopDistance = entry * 0.05;
         let stopLoss = Number((venue.side === 'LONG' ? entry - stopDistance : entry + stopDistance).toFixed(scale));
-        const tp1 = Number((entry + dir * stopDistance * 1.8).toFixed(scale));
-        const tp2 = Number((entry + dir * stopDistance * 2.7).toFixed(scale));
-        const tp3 = Number((entry + dir * stopDistance * 5.76).toFixed(scale));
+        // TP-doelen via coin-profiel zodat meme/DeFi/L1 hun eigen R-multiples krijgen
+        const cpAdopted = getCoinProfile(venue.symbol);
+        const adR1 = cpAdopted.firstTargetR;
+        const adR2 = Number((adR1 + (cpAdopted.finalTargetR - adR1) * 0.45).toFixed(1));
+        const adR3 = cpAdopted.finalTargetR;
+        const adP1 = cpAdopted.firstTargetPortion;
+        const adP2 = Number(((1 - adP1) / 2).toFixed(2));
+        const adP3 = Number((1 - adP1 - adP2).toFixed(2));
+        const dirAdopted = venue.side === 'LONG' ? 1 : -1;
+        const tp1 = Number((entry + dirAdopted * stopDistance * adR1).toFixed(scale));
+        const tp2 = Number((entry + dirAdopted * stopDistance * adR2).toFixed(scale));
+        const tp3 = Number((entry + dirAdopted * stopDistance * adR3).toFixed(scale));
 
         let liveStopOrderId: string | undefined;
         const takeProfits = [
-          { price: tp1, portion: 0.45, rMultiple: 1.8, hit: false },
-          { price: tp2, portion: 0.28, rMultiple: 2.7, hit: false },
-          { price: tp3, portion: 0.27, rMultiple: 5.76, hit: false },
+          { price: tp1, portion: adP1, rMultiple: adR1, hit: false },
+          { price: tp2, portion: adP2, rMultiple: adR2, hit: false },
+          { price: tp3, portion: adP3, rMultiple: adR3, hit: false },
         ];
 
         try {
@@ -1270,6 +1525,7 @@ export class Engine {
           quantity: qty,
           leverage,
           margin,
+          initialMargin: margin,
           notional,
           stopLoss,
           takeProfit: takeProfits[takeProfits.length - 1]?.price ?? tp3,
@@ -1305,9 +1561,6 @@ export class Engine {
     const open = await this.store.positions('OPEN');
     for (const position of open) {
       if (this.closingPositions.has(position.id)) continue;
-      // Local price-derived exits cannot safely manage venue exposure without
-      // confirmed fills. Keep live positions visible and reconcile them only.
-      if (position.live) continue;
 
       // Missing data is tracked for diagnostics, never used as a synthetic exit price.
       const missCount = this.missingTicks.get(position.symbol) || 0;
@@ -1326,20 +1579,34 @@ export class Engine {
       // No fresh price means no decision — never act on a stale fallback value.
       if (!price) continue;
 
-      // Liquidation guard: the margin behind the position is effectively wiped out.
-      if (isLiquidated(position, price)) {
-        await this.close(position, price, 'LIQUIDATED');
-        continue;
-      }
+      // Paper-only synthetic exits. For live positions, exchange resting orders handle SL/TP;
+      // however, if a live position lacks a broker-side stop order, the engine acts as an emergency stop.
+      if (!position.live) {
+        // Liquidation guard: the margin behind the position is effectively wiped out.
+        if (isLiquidated(position, price)) {
+          await this.close(position, price, 'LIQUIDATED');
+          continue;
+        }
 
-      if (isStopHit(position, price)) {
-        await this.close(position, price, stopReason(position));
-        continue;
-      }
+        if (isStopHit(position, price)) {
+          await this.close(position, price, stopReason(position));
+          continue;
+        }
 
-      // Staged take-profits: book a tranche at each level the price has reached.
-      const filled = await this.takePartialProfits(position, price);
-      if (filled === 'CLOSED') continue;
+        // Staged take-profits: book a tranche at each level the price has reached.
+        const filled = await this.takePartialProfits(position, price);
+        if (filled === 'CLOSED') continue;
+      } else {
+        // Emergency stop fallback for live positions: if no broker-side stop is active and stop is breached
+        if (!position.liveStopOrderId && isStopHit(position, price)) {
+          await this.log(
+            'warn',
+            `🚨 Noodstop geactiveerd voor live positie ${position.symbol}: geen actieve broker stop-order en stop (${position.stopLoss}) is geraakt.`
+          );
+          await this.close(position, price, stopReason(position));
+          continue;
+        }
+      }
       // Re-read after any attempted settlement so a failed final close or a
       // concurrent close cannot continue mutating a stale OPEN object.
       const current = await this.store.position(position.id);
@@ -1577,8 +1844,9 @@ export class Engine {
         }
       }
 
-      // Early Profit Protection: move stop to break-even once price reaches +1.2R before TP1 fills
-      const earlyR = this.risk.earlyBreakEvenR ?? 1.2;
+      // Early Profit Protection: move stop to break-even once price reaches +1.1R/+1.2R before TP1 fills
+      const profile = getCoinProfile(current.symbol);
+      const earlyR = this.risk.earlyBreakEvenR ?? profile.earlyBreakEvenR;
       if (!current.breakEven && earlyR > 0) {
         const earlyProtect = earlyProfitProtect(current, price, earlyR);
         if (earlyProtect) {
@@ -1628,6 +1896,22 @@ export class Engine {
           (patch.stopLoss !== undefined && patch.stopLoss !== current.stopLoss))
       ) {
         await this.moveLiveStop(current, patch.stopLoss ?? current.stopLoss, current.remainingQuantity);
+      }
+      // Continuous excursion tracking (MFE / MAE) for AI learning
+      const dir = direction(current);
+      const riskDistance = current.initialRisk > 0 ? current.initialRisk : Math.abs(current.entry - current.stopLoss);
+      if (riskDistance > 0) {
+        const curR = ((price - current.entry) * dir) / riskDistance;
+        const curPeak = current.peakR !== undefined ? Math.max(current.peakR, curR) : curR;
+        const curTrough = current.troughR !== undefined ? Math.min(current.troughR, curR) : curR;
+        if (curPeak !== current.peakR) {
+          patch.peakR = Math.round(curPeak * 100) / 100;
+          current.peakR = patch.peakR;
+        }
+        if (curTrough !== current.troughR) {
+          patch.troughR = Math.round(curTrough * 100) / 100;
+          current.troughR = patch.troughR;
+        }
       }
       if (Object.keys(patch).length) await this.store.updatePosition(current.id, patch);
     }
@@ -1762,24 +2046,42 @@ export class Engine {
       }
       penalties[position.symbol] = prev;
 
-      // Update factor statistics
+      // 1. Update factor statistics & dynamic weights
       const factorStats = { ...learning.factorStats };
       for (const factor of postMortem.entryFactors) {
         const stat = factorStats[factor] || { wins: 0, losses: 0, netR: 0 };
         if (postMortem.verdict === 'WIN') stat.wins += 1;
         else if (postMortem.verdict === 'LOSS') stat.losses += 1;
         stat.netR = Math.round((stat.netR + postMortem.rMultiple) * 100) / 100;
+        const total = stat.wins + stat.losses;
+        stat.winRate = total > 0 ? Math.round((stat.wins / total) * 100) / 100 : 0;
+        stat.weightMultiplier = computeFactorWeight(stat);
         factorStats[factor] = stat;
       }
 
-      await this.store.updateLearning({ penalties, factorStats });
+      // 2. Update session statistics
+      const sessionKey = position.session || postMortem.session || getMarketSession(new Date(position.openedAt || Date.now())).session;
+      const sessionStats = updateSessionStat(sessionKey, postMortem.verdict, postMortem.rMultiple, learning.sessionStats);
+
+      // 3. Update Coin DNA
+      const mfeR = postMortem.mfeR ?? 0;
+      const maeR = postMortem.maeR ?? 0;
+      const durationMin = postMortem.durationMinutes ?? 1;
+      const coinDNA = updateCoinDNA(position.symbol, postMortem.verdict, postMortem.rMultiple, durationMin, mfeR, maeR, learning.coinDNA);
+
+      // 4. Update MFE/MAE aggregate statistics
+      const mfeMaeStats = updateMfeMaeStats(mfeR, maeR, learning.mfeMaeStats);
+
+      await this.store.updateLearning({ penalties, factorStats, sessionStats, coinDNA, mfeMaeStats });
     } catch {
       // Non-fatal if learning update fails
     }
 
+    const mfeStr = postMortem.mfeR !== undefined ? ` | MFE: +${postMortem.mfeR}R` : '';
+    const maeStr = postMortem.maeR !== undefined ? ` | MAE: ${postMortem.maeR}R` : '';
     await this.log(
       'info',
-      `🧠 Post-Mortem ${position.symbol}: ${postMortem.verdict} (${postMortem.rMultiple > 0 ? '+' : ''}${postMortem.rMultiple}R) — ${postMortem.lesson}`
+      `🧠 Post-Mortem ${position.symbol}: ${postMortem.verdict} (${postMortem.rMultiple > 0 ? '+' : ''}${postMortem.rMultiple}R${mfeStr}${maeStr}) — ${postMortem.lesson}`
     );
 
     return postMortem;
@@ -1823,7 +2125,9 @@ export class Engine {
       closedAt: Date.now(),
       exit: price,
       pnl: net,
-      pnlPct: position.margin ? net / position.margin : 0,
+      pnlPct: (position.initialMargin ?? (position.quantity && position.entry && position.leverage ? (position.quantity * position.entry) / position.leverage : position.margin)) > 0
+        ? net / (position.initialMargin ?? (position.quantity && position.entry && position.leverage ? (position.quantity * position.entry) / position.leverage : position.margin))
+        : 0,
       exitReason: 'TAKE_PROFIT',
       takeProfits: levels,
       remainingQuantity: 0,
@@ -1926,6 +2230,20 @@ export class Engine {
       }
     }
 
+    // Macro Shield Gatekeeper: block new entries around High-Impact economic news (FOMC, CPI, NFP, etc.)
+    const macroShield = await NewsEngine.getInstance().getMacroShield().catch(() => ({ active: false, reason: undefined }));
+    if (macroShield.active) {
+      const shieldBlock: BlockedState = {
+        kind: 'regime',
+        message: macroShield.reason || 'Macro Shield actief — wachten op afronding van hoog-impact economisch nieuws.',
+      };
+      if (this.blockedReason?.kind !== 'regime' || this.blockedReason?.message !== shieldBlock.message) {
+        await this.log('warn', `🛡️ ${shieldBlock.message}`);
+      }
+      this.blockedReason = shieldBlock;
+      return;
+    }
+
     const held = new Set(open.map((p) => p.symbol));
     const book = atRisk.map((p) => ({ symbol: p.symbol, side: p.side }));
 
@@ -1968,8 +2286,20 @@ export class Engine {
     })();
 
     const learning = await this.store.learning();
+    const currentSession = getMarketSession(new Date()).session;
+    const prioritizedSignals = rankCandidates(signals, learning, currentSession);
 
-    for (const signal of signals) {
+    const activeLongs = open.filter((p) => p.side === 'LONG').length;
+    const activeShorts = open.filter((p) => p.side === 'SHORT').length;
+    await this.store.updateLearning({
+      clusterStatus: {
+        activeLongs,
+        activeShorts,
+        lastDampener: learning.clusterStatus?.lastDampener ?? 1.0,
+      },
+    }).catch(() => {});
+
+    for (const signal of prioritizedSignals) {
       if (slots <= 0 && overflow <= 0) break;
 
       // Strafbankje Gatekeeper: block coins on cooldown after 2 consecutive losses
@@ -1997,6 +2327,37 @@ export class Engine {
           'BLOCKED_COOLDOWN'
         );
         continue;
+      }
+
+      // Breaking News Catalyst Check: boosts score on positive news, blocks on adverse news
+      const catalyst = await NewsEngine.getInstance().getCatalystForSymbol(signal.symbol).catch(() => ({ hasCatalyst: false, sentiment: 'NEUTRAL' as const, scoreBoost: 0 }));
+      if (catalyst.hasCatalyst) {
+        if (catalyst.sentiment === 'BEARISH' && signal.side === 'LONG') {
+          signal.blockReasonCode = 'BLOCKED_LOW_SCORE';
+          await this.logSkip(
+            signal.symbol,
+            `Advers nieuws katalysator: "${catalyst.news?.title}" — longs geblokkeerd`,
+            'BLOCKED_LOW_SCORE'
+          );
+          continue;
+        } else if (catalyst.sentiment === 'BULLISH' && signal.side === 'SHORT') {
+          signal.blockReasonCode = 'BLOCKED_LOW_SCORE';
+          await this.logSkip(
+            signal.symbol,
+            `Bullish nieuws katalysator: "${catalyst.news?.title}" — shorts geblokkeerd`,
+            'BLOCKED_LOW_SCORE'
+          );
+          continue;
+        } else if (
+          (catalyst.sentiment === 'BULLISH' && signal.side === 'LONG') ||
+          (catalyst.sentiment === 'BEARISH' && signal.side === 'SHORT')
+        ) {
+          if (signal.setupScore) {
+            signal.setupScore.total = Math.min(100, signal.setupScore.total + catalyst.scoreBoost);
+            signal.setupScore.details.push(`🔥 Nieuws Katalysator (+${catalyst.scoreBoost}): ${catalyst.news?.title}`);
+          }
+          signal.reasons.push(`🔥 Nieuws Katalysator: ${catalyst.news?.title}`);
+        }
       }
 
       // MTF Setup Score Check: Score < 70 = NO TRADE. Reversal requires >= 80.
@@ -2032,6 +2393,7 @@ export class Engine {
         if (this.risk.pyramidingEnabled === false) continue;
         if ((existingPos.scaleInCount ?? 0) >= 1) continue; // Max 1 scale-in (2 tranches total)
         if (existingPos.side !== signal.side) {
+          if (existingPos.live) continue;
           if (score >= minReversalScore) {
             await this.log(
               'trade',
@@ -2101,7 +2463,7 @@ export class Engine {
           signal.symbol,
           signal.side,
           btcRegime,
-          this.risk.btcChopFilterEnabled !== false,
+          this.risk.btcChopFilterEnabled === true,
           hasVolumeSpurt,
           rs
         );
@@ -2138,7 +2500,7 @@ export class Engine {
       }
 
       // Premium vs. Discount Gatekeeper: never buy in Premium (>50%), never sell in Discount (<50%)
-      if (this.risk.premiumDiscountFilterEnabled !== false && signal.marketStructure?.dealingRange) {
+      if (this.risk.premiumDiscountFilterEnabled === true && signal.marketStructure?.dealingRange) {
         const zone = signal.marketStructure.dealingRange.zone;
         const inGoldenZone = signal.checks?.some((c) => c.name === 'Fibonacci confluentie' && c.passed);
         const inSniperPullback = signal.checks?.some((c) => c.name === 'Sniper Pullback' && c.passed);
@@ -2271,16 +2633,6 @@ export class Engine {
         break;
       }
 
-
-      // Pacing timer removed
-        // pacing check removed
-
-
-
-
-
-
-
       const usingOverflow = slots <= 0;
       if (usingOverflow && signal.confidence < this.risk.highConvictionConfidence) continue;
       // Correlated markets all lose together, so cap one-way and same-group
@@ -2291,7 +2643,8 @@ export class Engine {
         await this.logSkip(signal.symbol, crowded, 'BLOCKED_CORRELATED_RISK');
         continue;
       }
-      const plan = planTrade(signal, account, this.risk);
+      const detail = await this.market.contractDetail(signal.symbol).catch(() => null);
+      const plan = planTrade(signal, account, this.risk, FEE, detail?.maxLeverage);
       if (!plan) {
         const minReq = Math.max(5, this.risk.minTradeMarginUsdt ?? 5);
         if (account.balance < minReq) {
@@ -2303,9 +2656,23 @@ export class Engine {
         continue;
       }
 
+      // 5. Apply AI Cluster-Risk & Portfolio Market Beta Dampener
+      const clusterRisk = evaluateClusterRisk(signal, open, btcRegime);
+      if (clusterRisk.multiplier < 1.0) {
+        plan.margin = Math.round(plan.margin * clusterRisk.multiplier * 100) / 100;
+        plan.quantity = Math.round((plan.quantity * clusterRisk.multiplier) * 10000) / 10000;
+        plan.notional = Math.round(plan.notional * clusterRisk.multiplier * 100) / 100;
+        plan.riskPct = Math.round(plan.riskPct * clusterRisk.multiplier * 10000) / 10000;
+        plan.clusterRiskMultiplier = clusterRisk.multiplier;
+        await this.log(
+          'info',
+          `🛡️ Cluster-Risico AI: ${signal.symbol} risicoschaling naar ${Math.round(clusterRisk.multiplier * 100)}% (${clusterRisk.reason})`
+        );
+      }
+
       // Portfolio Heat & Correlated Group Risk Limits
-      const maxPortfolioHeat = this.risk.maxPortfolioHeat ?? 0.015;
-      const maxCorrelatedRisk = this.risk.maxCorrelatedRisk ?? 0.010;
+      const maxPortfolioHeat = this.risk.maxPortfolioHeat ?? 0.050;
+      const maxCorrelatedRisk = this.risk.maxCorrelatedRisk ?? 0.030;
 
       const currentHeat = open
         .filter((p) => !isPositionDerisked(p))
@@ -2426,12 +2793,63 @@ export class Engine {
     const tickerMap = new Map(allTickers.map((t) => [t.symbol, t]));
     this.lastTickers = tickerMap;
     const minVol = this.risk.minQuoteVolume24h ?? 1_000_000;
-    const candidates = allTickers.filter(
+    // 1. Filter all liquid perpetual contracts meeting minimum volume ($1M default)
+    const liquidTickers = allTickers.filter(
       (t) =>
-        allowed.has(t.symbol) &&
         isCryptoPerp(t.symbol) &&
-        (t.symbol === 'BTC_USDT' || t.quoteVolume24h >= minVol)
+        (t.symbol === 'BTC_USDT' || t.quoteVolume24h >= minVol) &&
+        Number.isFinite(t.lastPrice) &&
+        t.lastPrice > 0
     );
+
+    // 2. Discover Coins in Play: Top 24h Gainers (+%) and Top 24h Losers (-%)
+    const withChange = liquidTickers.filter((t) => Number.isFinite(t.changeRate24h));
+    const topGainers = [...withChange]
+      .filter((t) => t.changeRate24h > 0)
+      .sort((a, b) => b.changeRate24h - a.changeRate24h)
+      .slice(0, 6);
+    const topLosers = [...withChange]
+      .filter((t) => t.changeRate24h < 0)
+      .sort((a, b) => a.changeRate24h - b.changeRate24h)
+      .slice(0, 6);
+
+    // 3. Assemble priority candidate universe (majors + open positions + top movers + core universe)
+    const prioritySymbols = new Set<string>();
+
+    // A. Majors: BTC, ETH, SOL
+    for (const sym of ['BTC_USDT', 'ETH_USDT', 'SOL_USDT']) {
+      if (tickerMap.has(sym)) prioritySymbols.add(sym);
+    }
+
+    // B. Any open positions or active holdings
+    const openPositions = await this.store.positions('OPEN').catch(() => []);
+    for (const pos of openPositions) {
+      if (tickerMap.has(pos.symbol)) prioritySymbols.add(pos.symbol);
+    }
+
+    // In restricted test environments (where BTC is omitted from universe), only scan allowed symbols
+    const isRestrictedUniverse = !allowed.has('BTC_USDT');
+
+    // C. Top 6 Gainers (+%) & Top 6 Losers (-%)
+    for (const g of topGainers) {
+      if (!isRestrictedUniverse || allowed.has(g.symbol)) prioritySymbols.add(g.symbol);
+    }
+    for (const l of topLosers) {
+      if (!isRestrictedUniverse || allowed.has(l.symbol)) prioritySymbols.add(l.symbol);
+    }
+
+    // D. Core allowed universe markets (highest volume first, fill up to 60)
+    const coreLiquid = liquidTickers
+      .filter((t) => allowed.has(t.symbol))
+      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
+    for (const t of coreLiquid) {
+      if (prioritySymbols.size >= 60) break;
+      prioritySymbols.add(t.symbol);
+    }
+
+    const candidates = Array.from(prioritySymbols)
+      .map((sym) => tickerMap.get(sym)!)
+      .filter(Boolean);
 
     // A market that yields no signal is normal — the strategy vetoes setups that
     // fight the higher timeframe. A market that errors or has no data at all is
@@ -2447,40 +2865,50 @@ export class Engine {
         : Promise.resolve([] as Candle[]),
       this.store.learning(),
     ]);
-    const results = await Promise.all(
-      candidates.map(async (ticker) => {
-        try {
-          // Two timeframes: 1h drives the entry, 4h confirms the context.
-          // 15m micro-timing confirms entry when enabled.
-          const fetchLower = this.risk.microTiming15mEnabled !== false;
-          const [candles, higher, lower, sniper] = await Promise.all([
-            this.market.candles(ticker.symbol, ENTRY_INTERVAL),
-            this.market.candles(ticker.symbol, CONFIRM_INTERVAL).catch(() => []),
-            fetchLower ? this.market.candles(ticker.symbol, MICRO_INTERVAL).catch(() => []) : Promise.resolve([]),
-            this.market.candles(ticker.symbol, SNIPER_INTERVAL).catch(() => []),
-          ]);
-          if (candles.length < 60) {
-            broken.push(`${ticker.symbol} (${candles.length} candles)`);
+    const results: Array<ReturnType<typeof buildSignal> | null> = [];
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+      const batch = candidates.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (ticker) => {
+          try {
+            // Two timeframes: 1h drives the entry, 4h confirms the context.
+            // 15m micro-timing confirms entry when enabled.
+            const fetchLower = this.risk.microTiming15mEnabled !== false;
+            const [candles, higher, lower, sniper] = await Promise.all([
+              this.market.candles(ticker.symbol, ENTRY_INTERVAL),
+              this.market.candles(ticker.symbol, CONFIRM_INTERVAL).catch(() => []),
+              fetchLower ? this.market.candles(ticker.symbol, MICRO_INTERVAL).catch(() => []) : Promise.resolve([]),
+              this.market.candles(ticker.symbol, SNIPER_INTERVAL).catch(() => []),
+            ]);
+            if (candles.length < 60) {
+              broken.push(`${ticker.symbol} (${candles.length} candles)`);
+              return null;
+            }
+            const bmCandles = ticker.symbol === 'BTC_USDT' ? ethCandles : btcCandles;
+            const bmSymbol = ticker.symbol === 'BTC_USDT' ? 'ETH_USDT' : 'BTC_USDT';
+            return buildSignal(
+              ticker,
+              candles,
+              higher,
+              lower,
+              learning,
+              bmCandles,
+              bmSymbol,
+              sniper
+            );
+          } catch (err) {
+            broken.push(`${ticker.symbol} (${(err as Error).message})`);
             return null;
           }
-          const bmCandles = ticker.symbol === 'BTC_USDT' ? ethCandles : btcCandles;
-          const bmSymbol = ticker.symbol === 'BTC_USDT' ? 'ETH_USDT' : 'BTC_USDT';
-          return buildSignal(
-            ticker,
-            candles,
-            higher,
-            lower,
-            learning,
-            bmCandles,
-            bmSymbol,
-            sniper
-          );
-        } catch (err) {
-          broken.push(`${ticker.symbol} (${(err as Error).message})`);
-          return null;
-        }
-      })
-    );
+        })
+      );
+      results.push(...batchResults);
+      if (i + BATCH_SIZE < candidates.length) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+
 
     const absent = this.effectiveUniverse.filter((s) => !tickerMap.has(s));
     if (absent.length) {
@@ -2491,10 +2919,13 @@ export class Engine {
       await this.log('warn', `Marktdata ontbreekt voor ${broken.join(', ')}`);
     }
 
+    const currentSession = getMarketSession(new Date()).session;
     return rankCandidates(
       results
         .filter((s): s is Signal => s !== null)
-        .map((s) => ({ ...s, plannedLeverage: previewLeverage(s, this.risk) }))
+        .map((s) => ({ ...s, plannedLeverage: previewLeverage(s, this.risk) })),
+      learning,
+      currentSession
     );
   }
 
@@ -2533,7 +2964,10 @@ export class Engine {
         return false;
       }
       const contractSize = existing.liveContractSize || 1;
-      const vol = Math.max(1, Math.round(addedQty / contractSize));
+      const detail = await this.market.contractDetail(existing.symbol).catch(() => null);
+      const step = detail && detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
+      const minVol = detail?.minVol || 1;
+      const vol = Math.max(minVol, roundToStep(addedQty / contractSize, step));
       try {
         const order = await this.exchange.placeMarketOrder({
           symbol: existing.symbol,
@@ -2611,6 +3045,7 @@ export class Engine {
       quantity: plan.quantity,
       leverage: plan.leverage,
       margin: plan.margin,
+      initialMargin: plan.margin,
       notional: plan.notional,
       stopLoss: plan.stopLoss,
       takeProfit: plan.takeProfit,
@@ -2631,6 +3066,10 @@ export class Engine {
       strategyType: plan.strategyType,
       setupScore: plan.setupScore,
       leverageBreakdown: plan.leverageBreakdown,
+      session: signal?.session || getMarketSession(new Date()).session,
+      peakR: 0,
+      troughR: 0,
+      clusterRiskMultiplier: plan.clusterRiskMultiplier ?? 1.0,
     };
 
     // Mirror onto the real MEXC account when armed. Done BEFORE the position is
@@ -2692,11 +3131,21 @@ export class Engine {
     }
     try {
       const detail = await this.market.contractDetail(position.symbol);
-      const vol = Math.round(position.quantity / detail.contractSize);
+      const step = detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
+      const vol = roundToStep(position.quantity / detail.contractSize, step);
       if (vol < detail.minVol) {
         await this.log(
           'warn',
           `Live entry overgeslagen: ${position.symbol} — gesized volume (${vol}) onder het minimum van de exchange (${detail.minVol}). Vergroot de inzet of sla dit signaal over.`
+        );
+        return false;
+      }
+
+      const orderValue = vol * detail.contractSize * position.entry;
+      if (orderValue < 10) {
+        await this.log(
+          'warn',
+          `Live entry overgeslagen: ${position.symbol} — orderwaarde ($${orderValue.toFixed(2)}) is lager dan het Hyperliquid minimum van $10 USDC. Verhoog de inzet.`
         );
         return false;
       }
@@ -2779,12 +3228,30 @@ export class Engine {
 
       // Place each Take Profit target in the ladder directly on the exchange
       if (position.takeProfits?.length) {
+        const step = detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
+        const totalNotional = vol * detail.contractSize * position.entry;
+
+        // Hyperliquid requires each order to have >= $10 notional.
+        // Adapt target portions so each active order clears the $10 minimum:
+        // - totalNotional < 20: 1 target (100% at TP1)
+        // - totalNotional < 30: 2 targets (50% / 50%)
+        // - totalNotional >= 30: all 3 targets
+        let tpsToPlace = position.takeProfits;
+        if (totalNotional < 20) {
+          tpsToPlace = [{ ...position.takeProfits[0], portion: 1.0 }];
+        } else if (totalNotional < 30 && position.takeProfits.length >= 2) {
+          tpsToPlace = [
+            { ...position.takeProfits[0], portion: 0.5 },
+            { ...position.takeProfits[position.takeProfits.length - 1], portion: 0.5 },
+          ];
+        }
+
         let remainingVol = vol;
-        for (let i = 0; i < position.takeProfits.length; i++) {
-          const tp = position.takeProfits[i];
-          const isLast = i === position.takeProfits.length - 1;
-          const tpVol = isLast ? remainingVol : Math.max(detail.minVol, Math.round(vol * tp.portion));
-          remainingVol -= tpVol;
+        for (let i = 0; i < tpsToPlace.length; i++) {
+          const tp = tpsToPlace[i];
+          const isLast = i === tpsToPlace.length - 1;
+          const tpVol = isLast ? roundToStep(remainingVol, step) : Math.max(detail.minVol, roundToStep(vol * tp.portion, step));
+          remainingVol = roundToStep(remainingVol - tpVol, step);
           if (tpVol > 0) {
             const tpTargetPrice = Number(tp.price.toFixed(priceScale));
             await this.exchange
@@ -2813,7 +3280,9 @@ export class Engine {
 
   private async reduceLivePosition(position: Position, qty: number): Promise<boolean> {
     const contractSize = position.liveContractSize || 1;
-    const vol = Math.round(qty / contractSize);
+    const detail = await this.market.contractDetail(position.symbol).catch(() => null);
+    const step = detail && detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
+    const vol = roundToStep(qty / contractSize, step);
     if (vol <= 0) return true;
     try {
       await this.exchange.closePosition({
@@ -2845,14 +3314,21 @@ export class Engine {
   }
 
   private async moveLiveStop(position: Position, stopPrice: number, remainingQty: number): Promise<void> {
-    if (!position.liveStopOrderId) return;
-    try {
-      await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
-    } catch {
-      // Ignore
+    // Cancel existing stop order (if any) before placing a new one.
+    // Note: do NOT early-return if liveStopOrderId is null — we still need to place a fresh stop.
+    if (position.liveStopOrderId) {
+      try {
+        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
+      } catch {
+        // Ignore — order may already be gone
+      }
+      position.liveStopOrderId = null;
     }
     const contractSize = position.liveContractSize || 1;
-    const vol = Math.max(1, Math.round(remainingQty / contractSize));
+    const detail = await this.market.contractDetail(position.symbol).catch(() => null);
+    const step = detail && detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
+    const minVol = detail?.minVol || 1;
+    const vol = Math.max(minVol, roundToStep(remainingQty / contractSize, step));
     try {
       const stop = await this.exchange.placeStopOrder({
         symbol: position.symbol,
@@ -2862,6 +3338,11 @@ export class Engine {
         externalOid: `${position.id}-stop-${Date.now()}`,
       });
       position.liveStopOrderId = stop.orderId;
+      position.stopLoss = stopPrice;
+      await this.store.updatePosition(position.id, {
+        liveStopOrderId: stop.orderId,
+        stopLoss: stopPrice,
+      });
     } catch (err) {
       await this.log('warn', `Stop verplaatsen op exchange mislukt voor ${position.symbol}: ${(err as Error).message}`);
     }
@@ -2882,14 +3363,18 @@ export class Engine {
       await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
     }
     const { total, settling, net } = closeSettlement(position, price);
+    const postMortem = await this.recordPostMortem(position, price, reason, net);
     const claimed = await this.store.settlePosition(position.id, {
       closedAt: Date.now(),
       exit: price,
       pnl: net,
-      pnlPct: position.margin ? net / position.margin : 0,
+      pnlPct: (position.initialMargin ?? (position.quantity && position.entry && position.leverage ? (position.quantity * position.entry) / position.leverage : position.margin)) > 0
+        ? net / (position.initialMargin ?? (position.quantity && position.entry && position.leverage ? (position.quantity * position.entry) / position.leverage : position.margin))
+        : 0,
       exitReason: reason,
       remainingQuantity: 0,
       realisedPnl: total,
+      postMortem,
     });
     if (!claimed) return;
     await this.store.applyBalanceDelta({
@@ -2941,20 +3426,29 @@ export class Engine {
         hit: false,
       }));
     } else {
-      // Automatic smart recalculation using ATR and market structure
+      // Automatic smart recalculation using coin profile, ATR and entry price
+      const profile = getCoinProfile(position.symbol);
       const candles = await this.market.candles(position.symbol, 'Min60').catch(() => []);
-      const atrVal = candles.length >= 14 ? atr(candles, 14) : price * 0.02;
-      const stopDistance = Math.max(price * 0.015, atrVal * 1.5);
-      newSl = Number((price - dir * stopDistance).toFixed(priceScale));
+      const atrVal = candles.length >= 14 ? atr(candles, 14) : position.entry * 0.02;
+      const stopDistance = Math.max(position.entry * 0.015, atrVal * profile.atrStopMultiple);
+      newSl = Number((position.entry - dir * stopDistance).toFixed(priceScale));
 
-      const tp1 = Number((price + dir * stopDistance * 1.5).toFixed(priceScale));
-      const tp2 = Number((price + dir * stopDistance * 2.5).toFixed(priceScale));
-      const tp3 = Number((price + dir * stopDistance * 3.5).toFixed(priceScale));
+      const r1 = profile.firstTargetR;
+      const r2 = Number((profile.firstTargetR + (profile.finalTargetR - profile.firstTargetR) * 0.5).toFixed(1));
+      const r3 = profile.finalTargetR;
+
+      const p1 = profile.firstTargetPortion;
+      const p2 = Number(((1 - p1) / 2).toFixed(2));
+      const p3 = Number((1 - p1 - p2).toFixed(2));
+
+      const tp1 = Number((position.entry + dir * stopDistance * r1).toFixed(priceScale));
+      const tp2 = Number((position.entry + dir * stopDistance * r2).toFixed(priceScale));
+      const tp3 = Number((position.entry + dir * stopDistance * r3).toFixed(priceScale));
 
       newTps = [
-        { price: tp1, portion: 0.33, rMultiple: 1.5, hit: false },
-        { price: tp2, portion: 0.33, rMultiple: 2.5, hit: false },
-        { price: tp3, portion: 0.34, rMultiple: 3.5, hit: false },
+        { price: tp1, portion: p1, rMultiple: r1, hit: false },
+        { price: tp2, portion: p2, rMultiple: r2, hit: false },
+        { price: tp3, portion: p3, rMultiple: r3, hit: false },
       ];
     }
 
@@ -2975,22 +3469,28 @@ export class Engine {
     if (position.live && this.exchange.status().enabled) {
       const remainingQty = position.remainingQuantity ?? position.quantity;
       const contractSize = position.liveContractSize || 1;
-      const vol = Math.max(detail.minVol, Math.round(remainingQty / contractSize));
+      const step = detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
+      const vol = Math.max(detail.minVol, roundToStep(remainingQty / contractSize, step));
 
-      // 1. Move or place Stop Loss
+      // 1. Cancel ALL existing open orders for this symbol FIRST (TP + SL from before),
+      //    so we start with a clean slate and don't accidentally cancel the new SL below.
+      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
+
+      // 2. Place a fresh Stop Loss (moveLiveStop also cancels any remaining stop by ID,
+      //    but since we just bulk-cancelled everything, liveStopOrderId may now be stale — reset it).
+      position.liveStopOrderId = null;
       await this.moveLiveStop(position, newSl, remainingQty).catch((err) => {
         void this.log('warn', `Stop Loss bijwerken op exchange mislukt voor ${position.symbol}: ${(err as Error).message}`);
       });
 
-      // 2. Cancel old plan/TP orders and place fresh TP orders
-      await this.exchange.cancelAllPlanOrders(position.symbol).catch(() => {});
+      // 3. Place fresh TP orders
 
       let remainingVol = vol;
       for (let i = 0; i < newTps.length; i++) {
         const tp = newTps[i];
         const isLast = i === newTps.length - 1;
-        const tpVol = isLast ? remainingVol : Math.max(detail.minVol, Math.round(vol * tp.portion));
-        remainingVol -= tpVol;
+        const tpVol = isLast ? roundToStep(remainingVol, step) : Math.max(detail.minVol, roundToStep(vol * tp.portion, step));
+        remainingVol = roundToStep(remainingVol - tpVol, step);
         if (tpVol > 0) {
           await this.exchange
             .placeTakeProfitOrder({
@@ -3004,6 +3504,13 @@ export class Engine {
               void this.log('warn', `TP${i + 1} herplaatsen op exchange mislukt: ${(err as Error).message}`);
             });
         }
+      }
+
+      // Persist the new liveStopOrderId so it survives restarts
+      if (position.liveStopOrderId !== undefined) {
+        await this.store.updatePosition(position.id, {
+          liveStopOrderId: position.liveStopOrderId ?? undefined,
+        });
       }
     }
 
@@ -3063,7 +3570,9 @@ export class Engine {
       // Reported result includes the entry fee, so the number the user sees is
       // what the trade actually made.
       pnl: net,
-      pnlPct: position.margin ? net / position.margin : 0,
+      pnlPct: (position.initialMargin ?? (position.quantity && position.entry && position.leverage ? (position.quantity * position.entry) / position.leverage : position.margin)) > 0
+        ? net / (position.initialMargin ?? (position.quantity && position.entry && position.leverage ? (position.quantity * position.entry) / position.leverage : position.margin))
+        : 0,
       exitReason: reason,
       remainingQuantity: 0,
       realisedPnl: total,
@@ -3214,8 +3723,11 @@ export class Engine {
       };
     }
     const executionSignal = { ...signal, price: fresh };
-    const account = await this.account();
-    const executionPlan = planTrade(executionSignal, account, this.risk);
+    const [account, detail] = await Promise.all([
+      this.account(),
+      this.market.contractDetail(executionSignal.symbol).catch(() => null),
+    ]);
+    const executionPlan = planTrade(executionSignal, account, this.risk, FEE, detail?.maxLeverage);
     if (
       !executionPlan || executionPlan.symbol !== signal.symbol || executionPlan.side !== signal.side ||
       executionPlan.entry !== fresh || !this.planMatchesAcceptedEntry(executionPlan, fresh, account.equity)
@@ -3246,5 +3758,12 @@ export class Engine {
 
   private async log(level: EngineEvent['level'], message: string): Promise<void> {
     await this.store.addEvent({ at: Date.now(), level, message });
+    if (level === 'error') {
+      const isHl = /hyperliquid|dex|live/i.test(message);
+      ErrorLogger.getInstance().error(isHl ? 'Hyperliquid' : 'Engine', message);
+    } else if (level === 'warn') {
+      const isHl = /hyperliquid|dex|live/i.test(message);
+      ErrorLogger.getInstance().warn(isHl ? 'Hyperliquid' : 'Engine', message);
+    }
   }
 }

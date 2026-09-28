@@ -9,7 +9,7 @@ import { HyperliquidExchangeAdapter } from './hyperliquid-adapter.js';
 import { MarketScout } from './market-scout.js';
 import { MarketData, isCryptoPerp } from './market-data.js';
 import { hasNotificationChannel, notify } from './notifier.js';
-import { Store } from './store.js';
+import { Store, type ExchangeCredentials } from './store.js';
 import { buildSignal } from './strategy.js';
 import { isPositionDerisked, planTrade } from './risk.js';
 import type {
@@ -22,14 +22,18 @@ import type {
   EngineEvent,
   ExchangeAccountSnapshot,
   LearningState,
+  MarketIntelligence,
   OptimizeStatus,
   Position,
   RiskConfig,
   ScoutStatus,
   Signal,
+  SystemError,
   Ticker,
   TradePlan,
 } from './types.js';
+import { NewsEngine } from './news-engine.js';
+import { ErrorLogger } from './error-logger.js';
 
 /**
  * Chart payload for one symbol: the exact candles the strategy scores it on,
@@ -76,7 +80,7 @@ export type Snapshot = {
   marks: Record<string, number>;
   /** State of the background job that widens the trading universe over time. */
   scout: ScoutStatus;
-  /** Readiness of the (not-yet-active) live MEXC order connection. */
+  /** Readiness of the (not-yet-active) live Hyperliquid order connection. */
   exchange: LiveTradingStatus;
   /** Whether a Telegram bot or webhook is configured to receive trade alerts. */
   notificationsEnabled: boolean;
@@ -95,6 +99,12 @@ export type Snapshot = {
   cooldowns?: Record<string, { until: number; reason: string; remainingSec: number }>;
   /** Most recent skip reasons per symbol. */
   skipReasons?: Record<string, { reason: string; at: number; blockCode?: BlockReasonCode }>;
+  /** Live market intelligence including Fear & Greed, Macro Shield, and breaking news. */
+  marketIntelligence?: MarketIntelligence;
+  /** Recent system, exchange, and process errors. */
+  recentErrors?: SystemError[];
+  /** Total count of errors logged since engine start or clear. */
+  errorsCount?: number;
 };
 
 /**
@@ -213,31 +223,32 @@ export class TradingService {
         : 'Explicit non-live local development: using in-memory state',
     });
     const stored = await this.store.exchangeCredentials();
-    const venue = stored.venue || 'hyperliquid';
-    if (venue === 'hyperliquid') {
-      const adapter = new HyperliquidExchangeAdapter(
-        stored.walletAddress || process.env.HYPERLIQUID_WALLET,
-        stored.privateKey || process.env.HYPERLIQUID_PRIVATE_KEY,
-        stored.isTestnet ?? (process.env.HYPERLIQUID_TESTNET === 'true')
-      );
-      this.exchange = adapter;
-      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
-    } else {
-      const adapter = new MexcExchangeAdapter(
-        stored.apiKey || process.env.MEXC_API_KEY,
-        stored.apiSecret || process.env.MEXC_API_SECRET
-      );
-      this.exchange = adapter;
-      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
-    }
+    const adapter = new HyperliquidExchangeAdapter(
+      stored.walletAddress || process.env.HYPERLIQUID_WALLET,
+      stored.privateKey || process.env.HYPERLIQUID_PRIVATE_KEY,
+      stored.isTestnet ?? (process.env.HYPERLIQUID_TESTNET === 'true')
+    );
+    this.exchange = adapter;
+    if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
 
     const isConfigured = Boolean(this.exchange?.isConfigured?.());
     const persistedLive = readPersistedLiveTrading();
+    let fileLiveTrading: boolean | null = null;
+    try {
+      const hlJsonPath = path.resolve(process.cwd(), '.hyperliquid-credentials.json');
+      if (fs.existsSync(hlJsonPath)) {
+        const parsed = JSON.parse(fs.readFileSync(hlJsonPath, 'utf8'));
+        if (typeof parsed?.liveTrading === 'boolean') fileLiveTrading = parsed.liveTrading;
+      }
+    } catch {
+      // ignore
+    }
+
     if (!isConfigured) {
       process.env.LIVE_TRADING_ENABLED = 'false';
-    } else if (persistedLive !== false) {
+    } else if (fileLiveTrading === true || persistedLive === true || process.env.LIVE_TRADING_ENABLED === 'true') {
       process.env.LIVE_TRADING_ENABLED = 'true';
-    } else if (process.env.LIVE_TRADING_ENABLED !== 'true') {
+    } else if (persistedLive === false) {
       process.env.LIVE_TRADING_ENABLED = 'false';
     }
 
@@ -261,13 +272,14 @@ export class TradingService {
    */
   async snapshot(): Promise<Snapshot> {
     const exchangeStatus = this.exchange.status();
-    const [account, open, closed, events, exchangeAccount, learning] = await Promise.all([
+    const [account, open, closed, events, exchangeAccount, learning, marketIntelligence] = await Promise.all([
       this.engine.account(),
       this.store.positions('OPEN'),
       this.store.positions('CLOSED', 100),
       this.store.events(60),
       (exchangeStatus.enabled || exchangeStatus.configured) ? this.fetchExchangeAccount() : Promise.resolve(null),
       this.store.learning(),
+      NewsEngine.getInstance().getMarketIntelligence().catch(() => null),
     ]);
     // Recompute capacity against the active at-risk count: positions that reached
     // TP1 are derisked and do not consume a slot against maxOpenPositions.
@@ -300,16 +312,17 @@ export class TradingService {
       learning,
       cooldowns: this.engine.getCooldowns(),
       skipReasons: this.engine.getSkipReasons(),
+      marketIntelligence: marketIntelligence || undefined,
+      recentErrors: ErrorLogger.getInstance().getErrors(50),
+      errorsCount: ErrorLogger.getInstance().getTotalCount(),
     };
   }
 
   /**
-   * Fetch the real MEXC account state — balances and open positions — for the
-   * dashboard to display in place of the paper ledger while live trading is
-   * armed. Never throws: a failed fetch (rate limit, network blip, revoked
-   * key) resolves to a snapshot carrying only an `error`, so the dashboard can
-   * show a clear warning instead of silently reverting to paper numbers that
-   * would look like real ones.
+   * Fetch the real exchange account state — balances and open positions — for
+   * the dashboard. Works for both Hyperliquid and MEXC.
+   * Never throws: a failed fetch resolves to a snapshot carrying only an
+   * `error` so the dashboard can show a clear warning.
    *
    * @returns the venue account snapshot, or an error-carrying stub on failure.
    */
@@ -319,22 +332,31 @@ export class TradingService {
         this.exchange.getAccountAssets(),
         this.exchange.getOpenPositions(),
       ]);
-      const usdt = assets.find((a) => a.currency === 'USDT' || a.currency === 'USDC');
+      const usdc = assets.find((a) => a.currency === 'USDT' || a.currency === 'USDC');
       const marks = this.engine.markPrices;
+      const isHyperliquid = this.exchange.venue === 'hyperliquid';
 
-      // MEXC's `unrealised` field on this endpoint is not reliably populated, and
-      // `vol` is contract count, not base-asset quantity — both need converting
-      // via the contract spec before they mean anything to a person reading the
-      // dashboard. Computed the same way the paper ledger does (see `openPnl` in
-      // exits.ts) so live and paper numbers are directly comparable.
       const open = await Promise.all(
         positions.map(async (p) => {
-          const detail = await this.market.contractDetail(p.symbol).catch(() => null);
-          const contractSize = detail?.contractSize || 1;
-          const baseQty = p.vol * contractSize;
-          const markPrice = marks[p.symbol] ?? p.entryPrice;
-          const dir = p.side === 'LONG' ? 1 : -1;
-          const unrealisedPnl = dir * (markPrice - p.entryPrice) * baseQty;
+          let unrealisedPnl: number;
+          let baseQty: number;
+          let markPrice: number;
+
+          if (isHyperliquid) {
+            // Hyperliquid: adapter already provides unrealisedPnl and vol in base asset
+            baseQty = p.vol;
+            markPrice = marks[p.symbol] ?? p.entryPrice;
+            unrealisedPnl = p.unrealisedPnl ?? 0;
+          } else {
+            // MEXC: vol is contract count, convert via contractSize
+            const detail = await this.market.contractDetail(p.symbol).catch(() => null);
+            const contractSize = detail?.contractSize || 1;
+            baseQty = p.vol * contractSize;
+            markPrice = marks[p.symbol] ?? p.entryPrice;
+            const dir = p.side === 'LONG' ? 1 : -1;
+            unrealisedPnl = dir * (markPrice - p.entryPrice) * baseQty;
+          }
+
           return {
             symbol: p.symbol,
             side: p.side,
@@ -345,14 +367,15 @@ export class TradingService {
             liquidationPrice: p.liquidationPrice,
             unrealisedPnl,
             openedAt: p.createTime,
+            margin: p.margin ?? (p.entryPrice > 0 && baseQty > 0 ? (p.entryPrice * baseQty) / Math.max(1, p.leverage) : 0),
           };
         })
       );
       const unrealisedPnl = open.reduce((sum, p) => sum + p.unrealisedPnl, 0);
       return {
-        equity: usdt?.equity ?? 0,
-        available: usdt?.available ?? 0,
-        frozen: usdt?.frozen ?? 0,
+        equity: usdc?.equity ?? 0,
+        available: usdc?.available ?? 0,
+        frozen: usdc?.frozen ?? 0,
         unrealisedPnl,
         open,
         fetchedAt: Date.now(),
@@ -414,6 +437,13 @@ export class TradingService {
       throw new Error('Live positions cannot be closed through the local engine while execution is disarmed');
     }
     return this.engine.closePosition(id);
+  }
+
+  /**
+   * Close all active positions immediately at market (panic / emergency close).
+   */
+  async closeAllPositions(): Promise<{ closed: number; total: number; errors: string[] }> {
+    return this.engine.closeAllPositions();
   }
 
   /**
@@ -496,10 +526,15 @@ export class TradingService {
     }
 
     const btcCandles = symbol !== 'BTC_USDT' ? this.market.getCachedCandles('BTC_USDT', interval) || [] : [];
-    const signal =
-      ticker && candles.length >= 30
-        ? buildSignal(ticker, candles, higherCandles, [], undefined, btcCandles, 'BTC_USDT')
-        : null;
+    // To prevent multi-timeframe discrepancies, use the canonical 1H signal from the engine if available,
+    // so the entry, stop loss, and take profit targets remain consistent regardless of which timeframe is viewed.
+    const engineSignal = Array.isArray(this.engine?.signals)
+      ? this.engine.signals.find((s) => s.symbol === symbol)
+      : undefined;
+    let signal = engineSignal || null;
+    if (!signal && ticker && candles.length >= 20) {
+      signal = buildSignal(ticker, candles, higherCandles, [], undefined, btcCandles, 'BTC_USDT');
+    }
     const open = await this.store.positions('OPEN');
     const position = open.find((p) => p.symbol === symbol) || null;
     let plannedTrade: TradePlan | null = null;
@@ -779,75 +814,69 @@ export class TradingService {
   }
 
   /**
-   * Switch the active trading exchange venue (MEXC or Hyperliquid).
+   * Switch the active trading exchange venue (Hyperliquid L1).
    */
-  async setExchangeVenue(venue: 'mexc' | 'hyperliquid'): Promise<LiveTradingStatus> {
+  async setExchangeVenue(venue: 'mexc' | 'hyperliquid' = 'hyperliquid'): Promise<LiveTradingStatus> {
+    void venue;
     const stored = await this.store.exchangeCredentials();
-    stored.venue = venue;
+    stored.venue = 'hyperliquid';
     await this.store.saveExchangeCredentials(stored);
 
-    if (venue === 'hyperliquid') {
-      const adapter = new HyperliquidExchangeAdapter(
-        stored.walletAddress,
-        stored.privateKey,
-        stored.isTestnet
-      );
-      this.exchange = adapter;
-      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
-    } else {
-      const adapter = new MexcExchangeAdapter(stored.apiKey, stored.apiSecret);
-      this.exchange = adapter;
-      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
-    }
+    const adapter = new HyperliquidExchangeAdapter(
+      stored.walletAddress || process.env.HYPERLIQUID_WALLET,
+      stored.privateKey || process.env.HYPERLIQUID_PRIVATE_KEY,
+      stored.isTestnet ?? (process.env.HYPERLIQUID_TESTNET === 'true')
+    );
+    this.exchange = adapter;
+    if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
 
     await this.store.addEvent({
       at: Date.now(),
       level: 'info',
-      message: `Exchange gewisseld naar ${venue.toUpperCase()}.`,
+      message: 'Exchange ingesteld op Hyperliquid L1 (USDC).',
     });
 
     return this.exchange.status();
   }
 
   /**
-   * Save credentials for either MEXC or Hyperliquid.
+   * Save credentials for Hyperliquid.
    */
   async saveExchangeCredentials(
     credentialsOrApiKey: { apiKey?: string; apiSecret?: string; walletAddress?: string; privateKey?: string; isTestnet?: boolean; venue?: 'mexc' | 'hyperliquid' } | string,
     maybeSecret?: string
   ): Promise<LiveTradingStatus> {
-    const creds = typeof credentialsOrApiKey === 'string'
-      ? { apiKey: credentialsOrApiKey, apiSecret: maybeSecret || '', venue: 'mexc' as const }
-      : credentialsOrApiKey;
+    let creds: Partial<ExchangeCredentials>;
+    if (typeof credentialsOrApiKey === 'string') {
+      creds = { walletAddress: credentialsOrApiKey, privateKey: maybeSecret || '', venue: 'hyperliquid' };
+    } else {
+      creds = { ...credentialsOrApiKey, venue: 'hyperliquid' };
+    }
 
     const current = await this.store.exchangeCredentials();
-    const updated = {
+    const updated: ExchangeCredentials = {
       ...current,
       ...creds,
-      venue: creds.venue || current.venue || 'hyperliquid',
+      venue: 'hyperliquid',
     };
 
     await this.store.saveExchangeCredentials(updated);
 
-    if (updated.venue === 'hyperliquid') {
-      const adapter = new HyperliquidExchangeAdapter(
-        updated.walletAddress,
-        updated.privateKey,
-        updated.isTestnet
-      );
-      this.exchange = adapter;
-      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
-    } else {
-      const adapter = new MexcExchangeAdapter(updated.apiKey, updated.apiSecret);
-      this.exchange = adapter;
-      if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
-    }
+    const adapter = new HyperliquidExchangeAdapter(
+      updated.walletAddress,
+      updated.privateKey,
+      updated.isTestnet
+    );
+    this.exchange = adapter;
+    if (typeof this.engine?.setExchange === 'function') this.engine.setExchange(adapter);
 
-    const hasCreds = Boolean((updated.apiKey && updated.apiSecret) || (updated.walletAddress && updated.privateKey));
+    const hasCreds = Boolean(
+      updated.walletAddress && updated.privateKey
+    );
     if (hasCreds) {
       writePersistedLiveTrading(true);
       process.env.LIVE_TRADING_ENABLED = 'true';
-    } else if (!updated.walletAddress && !updated.apiKey) {
+    } else if (!updated.walletAddress) {
       writePersistedLiveTrading(false);
       process.env.LIVE_TRADING_ENABLED = 'false';
     }
@@ -855,8 +884,8 @@ export class TradingService {
       at: Date.now(),
       level: 'info',
       message: hasCreds
-        ? `Exchange credentials opgeslagen voor ${updated.venue?.toUpperCase() || 'exchange'} (live trading actief).`
-        : 'Exchange credentials verwijderd.',
+        ? 'Hyperliquid credentials opgeslagen (klaar voor live USDC trading).'
+        : 'Hyperliquid credentials verwijderd.',
     });
 
     return this.exchange.status();
@@ -911,14 +940,11 @@ export class TradingService {
    */
   static from(market: MarketData = new MarketData()): TradingService {
     const store = new Store();
-    const venue = (process.env.EXCHANGE_VENUE?.toLowerCase() === 'mexc') ? 'mexc' : 'hyperliquid';
-    const exchange: IExchangeAdapter = venue === 'hyperliquid'
-      ? new HyperliquidExchangeAdapter(
-          process.env.HYPERLIQUID_WALLET,
-          process.env.HYPERLIQUID_PRIVATE_KEY,
-          process.env.HYPERLIQUID_TESTNET === 'true'
-        )
-      : new MexcExchangeAdapter();
+    const exchange: IExchangeAdapter = new HyperliquidExchangeAdapter(
+      process.env.HYPERLIQUID_WALLET,
+      process.env.HYPERLIQUID_PRIVATE_KEY,
+      process.env.HYPERLIQUID_TESTNET === 'true'
+    );
     const engine = new Engine(store, market, undefined, undefined, undefined, exchange);
     const scout = new MarketScout(
       market,

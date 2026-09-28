@@ -180,7 +180,7 @@ export function BacktestSummary({ result }: BacktestSummaryProps) {
           <div className={styles.exitGrid}>
             {result.bySymbol.map((s) => (
               <div key={s.symbol} className={styles.exitCell}>
-                <span className={styles.exitName}>{s.symbol.replace('_USDT', '')}</span>
+                <span className={styles.exitName}>{s.symbol.replace(/_USDT$|_USDC$/i, '')}</span>
                 <span className={s.pnl >= 0 ? styles.up : styles.down}>
                   {signed(s.pnl, (v) => usd(v, 0))}
                 </span>
@@ -229,7 +229,7 @@ export function BacktestSummary({ result }: BacktestSummaryProps) {
               <tbody>
                 {result.tradeLog.map((t, i) => (
                   <tr key={`${t.symbol}-${t.closedAt}-${i}`}>
-                    <td>{t.symbol.replace('_USDT', '')}</td>
+                    <td>{t.symbol.replace(/_USDT$|_USDC$/i, '')}</td>
                     <td>
                       <span className={t.side === 'LONG' ? styles.long : styles.short}>{t.side}</span>
                     </td>

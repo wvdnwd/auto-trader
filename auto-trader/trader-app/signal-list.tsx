@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import styles from './trader-app.module.css';
 import { fetchChart } from './api.js';
-import { coinInfo, splitSymbol } from './coin-info.js';
+import { coinInfo, formatSymbol, splitSymbol } from './coin-info.js';
 import { pct, price as fmtPrice } from './format.js';
 import { SignalChart } from './signal-chart.js';
 import type { ChartData, Signal } from './types.js';
@@ -112,46 +112,58 @@ type ActionPlanInfo = {
 };
 
 function getActionPlan(s: Signal, threshold: number): ActionPlanInfo {
-  const passes = s.confidence >= threshold;
-  const failedChecks = s.checks?.filter((c) => !c.passed) || [];
+  const score = s.setupScore?.total ?? Math.round(s.confidence * 100);
+  const passesConfidence = s.confidence >= threshold;
+  const passesScore = score >= 70;
+  const passedChecks = s.checks?.filter((c) => c.passed) || [];
+  const totalChecks = s.checks?.length || 18;
+
   const pullbackCheck = s.checks?.find((c) => c.name === 'Sniper Pullback');
   const higherTfCheck = s.checks?.find((c) => c.name === 'Hoger tijdsframe');
   const structureCheck = s.checks?.find((c) => c.name === 'Ruimte tot structuur');
   const regimeCheck = s.checks?.find((c) => c.name === 'Verhandelbaar regime');
 
-  let badgeText = `⏳ ${failedChecks.length} Check(s) Open`;
-  let badgeClass: 'badgeSuccess' | 'badgeWarning' | 'badgeNeutral' = 'badgeWarning';
-  let actionTitle = 'Wachten op confluences';
-  const missing = failedChecks.map((c) => c.name).slice(0, 2).join(', ');
-  let actionDetail = missing
-    ? `Wacht op ontbrekende voorwaarden (${missing}). Bot bewaakt de markt actief.`
-    : 'Wachten op bevestiging van het handelssignaal.';
+  // Hard blocking gatekeepers
+  const isChopBlocked = regimeCheck && !regimeCheck.passed;
+  const isTrendBlocked = higherTfCheck && !higherTfCheck.passed;
+  const isStructureBlocked = structureCheck && !structureCheck.passed;
+  const isPullbackBlocked = pullbackCheck && !pullbackCheck.passed;
 
-  if (passes && failedChecks.length === 0) {
-    badgeText = '⚡ Gereed voor Order';
-    badgeClass = 'badgeSuccess';
-    actionTitle = 'Klaar voor order';
-    actionDetail = `Alle filters zijn groen (${s.checks.length}/${s.checks.length}). Bot wacht op de 5m trigger-kaars om direct een ${s.side} positie te openen met ${s.plannedLeverage ?? 5}x hefboom.`;
-  } else if (regimeCheck && !regimeCheck.passed) {
+  let badgeText = `🎯 ${passedChecks.length}/${totalChecks} Confluences`;
+  let badgeClass: 'badgeSuccess' | 'badgeWarning' | 'badgeNeutral' = 'badgeNeutral';
+  let actionTitle = 'Scanner analyseert';
+  let actionDetail = `Score: ${score}/100 (${passedChecks.length} confluences actief). Bot bewaakt de markt voor een volwaardig instapmoment.`;
+
+  if (isChopBlocked) {
     badgeText = '🛑 CHOP / Geen Trend';
     badgeClass = 'badgeNeutral';
     actionTitle = 'Zijwaartse markt (CHOP)';
-    actionDetail = 'De markt zit in chop zonder duidelijke trend. Bot plaatst géén orders om verlies te vermijden.';
-  } else if (pullbackCheck && !pullbackCheck.passed) {
-    badgeText = '⏳ Wacht op Dip';
-    badgeClass = 'badgeWarning';
-    actionTitle = 'Niet blind kopen (FOMO-stop)';
-    actionDetail = 'Koers is te ver weggelopen. De bot koopt pas bij een gezonde retracement richting de Golden Zone / EMA21.';
-  } else if (higherTfCheck && !higherTfCheck.passed) {
+    actionDetail = 'De markt zit in chop zonder duidelijke richting. Bot plaatst géén orders om zaagverliezen te vermijden.';
+  } else if (isTrendBlocked) {
     badgeText = '⚠️ Trend Conflict';
     badgeClass = 'badgeWarning';
     actionTitle = 'Hoger tijdsframe conflict';
-    actionDetail = `1-uurs regime (${s.higherRegime}) bevestigt de ${s.side} trade nog niet. Bot wacht tot hogere tijdsframes synchroon lopen.`;
-  } else if (structureCheck && !structureCheck.passed) {
+    actionDetail = `Hoger tijdsframe (${s.higherRegime}) bevestigt de ${s.side} richting nog niet. Bot wacht tot hogere tijdsframes synchroon lopen.`;
+  } else if (isStructureBlocked) {
     badgeText = '⚠️ Weerstand Nabij';
     badgeClass = 'badgeWarning';
     actionTitle = 'Onvoldoende ademruimte';
     actionDetail = `Slechts ${Number.isFinite(s.roomToStructure) ? s.roomToStructure.toFixed(1) : 0}R tot steun/weerstand (minimaal 2.0R vereist).`;
+  } else if (isPullbackBlocked) {
+    badgeText = '⏳ Wacht op Dip';
+    badgeClass = 'badgeWarning';
+    actionTitle = 'Niet blind kopen (FOMO-stop)';
+    actionDetail = 'Koers is te ver weggelopen. De bot koopt pas bij een gezonde retracement richting de Golden Zone / EMA21.';
+  } else if (passesConfidence && passesScore) {
+    badgeText = '⚡ Gereed voor Order';
+    badgeClass = 'badgeSuccess';
+    actionTitle = 'Klaar voor order';
+    actionDetail = `Voldoende confluences actief (${passedChecks.length}/${totalChecks}, score ${score}/100). Bot wacht op de 5m trigger-kaars om direct een ${s.side} positie te openen met ${s.plannedLeverage ?? 5}x hefboom.`;
+  } else if (passesConfidence) {
+    badgeText = `📈 Score ${score}/100`;
+    badgeClass = 'badgeWarning';
+    actionTitle = 'Wachten op kwaliteitsscore';
+    actionDetail = `Signaal is ${Math.round(s.confidence * 100)}% zeker, maar setup-kwaliteit is ${score}/100 (minimaal 70 vereist voor entry).`;
   }
 
   return {
@@ -247,7 +259,7 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
                   {splitSymbol(s.symbol).base.slice(0, 1)}
                 </span>
                 <span className={styles.symbolText}>
-                  <span className={styles.symbol}>{s.symbol.replace('_', '/')}</span>
+                  <span className={styles.symbol}>{formatSymbol(s.symbol)}</span>
                   <span className={styles.coinName}>{coinInfo(s.symbol).name}</span>
                 </span>
                 <span className={`${styles.tag} ${s.side === 'LONG' ? styles.long : styles.short}`}>
@@ -551,7 +563,7 @@ export function SignalList({ signals, threshold, onOpenChart }: SignalListProps)
               <div className={styles.inlineChartWrap}>
                 {loading && (
                   <p className={styles.empty} style={{ padding: '0.8rem 0' }}>
-                    Grafiek en wachtzone laden voor {s.symbol.replace('_', '/')}…
+                    Grafiek en wachtzone laden voor {formatSymbol(s.symbol)}…
                   </p>
                 )}
                 {err && (

@@ -1,6 +1,7 @@
 import styles from './trader-app.module.css';
 import { useState } from 'react';
 import { approveScoutCandidate, dismissScoutCandidate, runScoutNow } from './api.js';
+import { formatSymbol } from './coin-info.js';
 import { duration, pct, since, time } from './format.js';
 import type { ScoutStatus } from './types.js';
 
@@ -65,7 +66,7 @@ export function ScoutPanel({ scout, onDecision }: ScoutPanelProps) {
               <div key={`pending-${r.symbol}`} className={`${styles.signal} ${styles.pendingCard}`}>
                 <div className={styles.rowTop}>
                   <div className={styles.symbolWrap}>
-                    <span className={styles.symbol}>{r.symbol.replace('_', '/')}</span>
+                    <span className={styles.symbol}>{formatSymbol(r.symbol)}</span>
                     <span className={`${styles.tag} ${styles.amber}`}>wacht op goedkeuring</span>
                   </div>
                   <span className={styles.logTime}>{time(r.testedAt)}</span>
@@ -110,7 +111,7 @@ export function ScoutPanel({ scout, onDecision }: ScoutPanelProps) {
           <div className={styles.meta} style={{ marginBottom: '0.75rem' }}>
             {scout.universeExtras.map((s) => (
               <span key={s} className={`${styles.tag} ${styles.safe}`}>
-                {s.replace('_', '/')}
+                {formatSymbol(s)}
               </span>
             ))}
           </div>
@@ -122,7 +123,7 @@ export function ScoutPanel({ scout, onDecision }: ScoutPanelProps) {
               <div key={`${r.symbol}-${r.testedAt}`} className={styles.signal}>
                 <div className={styles.rowTop}>
                   <div className={styles.symbolWrap}>
-                    <span className={styles.symbol}>{r.symbol.replace('_', '/')}</span>
+                    <span className={styles.symbol}>{formatSymbol(r.symbol)}</span>
                     <span className={`${styles.tag} ${r.passed ? styles.safe : styles.neutral}`}>
                       {r.passed ? 'geslaagd' : 'afgewezen'}
                     </span>

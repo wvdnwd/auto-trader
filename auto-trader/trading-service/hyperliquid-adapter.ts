@@ -19,6 +19,7 @@ import type {
   PlaceStopOrderInput,
 } from './exchange-adapter.js';
 import type { Side } from './types.js';
+import { ErrorLogger } from './error-logger.js';
 
 export const HYPERLIQUID_MAINNET_API = MAINNET_API_URL;
 export const HYPERLIQUID_TESTNET_API = TESTNET_API_URL;
@@ -49,6 +50,10 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
 
   private metaUniverse: Array<{ szDecimals: number; name: string; maxLeverage: number }> = [];
   private metaLoadedAt = 0;
+
+  // Cache balance for 15 seconds to avoid Hyperliquid rate limits
+  private balanceCache: { equity: number; available: number; frozen: number; at: number } | null = null;
+  private readonly BALANCE_CACHE_TTL = 15_000;
 
   constructor(
     walletAddress = process.env.HYPERLIQUID_WALLET || '',
@@ -119,26 +124,78 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
   }
 
   /**
-   * Fetch USDC account balance from Hyperliquid clearinghouse state.
+   * Fetch USDC account balance from Hyperliquid.
+   * Supports both standard (cross-margin) and unified accounts.
+   * For unified accounts, spot USDC is already counted as margin — we use
+   * `marginSummary.accountValue` which includes spot collateral.
+   * Results are cached for 15 s to prevent rate limiting from frequent polls.
    */
   async getAccountAssets(): Promise<ExchangeAccountAsset[]> {
     if (!this.walletAddress) return [];
-    try {
-      const state = await this.infoClient.clearinghouseState({ user: this.walletAddress as `0x${string}` });
-      const equity = Number(state.crossMarginSummary?.accountValue || 0);
-      const available = Number(state.withdrawable || 0);
-      const frozen = Math.max(0, equity - available);
 
-      return [
-        {
-          currency: 'USDC',
-          equity,
-          available,
-          frozen,
-        },
-      ];
+    // Return cached value if still fresh
+    const now = Date.now();
+    if (this.balanceCache && now - this.balanceCache.at < this.BALANCE_CACHE_TTL) {
+      return [{ currency: 'USDC', ...this.balanceCache }];
+    }
+
+    try {
+      const user = this.walletAddress as `0x${string}`;
+
+      // Fetch perp and spot in parallel
+      const [perpState, spotState] = await Promise.all([
+        this.infoClient.clearinghouseState({ user }),
+        this.infoClient.spotClearinghouseState({ user }),
+      ]);
+
+      // Unified accounts: marginSummary.accountValue already includes spot collateral
+      // Standard accounts: crossMarginSummary.accountValue is perp-only
+      const marginValue = Number((perpState as { marginSummary?: { accountValue?: string } }).marginSummary?.accountValue || 0);
+      const crossValue = Number(perpState.crossMarginSummary?.accountValue || 0);
+      const perpEquity = Math.max(marginValue, crossValue);
+      const perpAvailable = Number(perpState.withdrawable || 0);
+
+      // Spot USDC (token index 0 = USDC on Hyperliquid)
+      const spotUsdc = (spotState.balances || []).find(
+        (b: { coin: string; total: string; hold: string }) => b.coin === 'USDC'
+      );
+      const spotTotal = Number(spotUsdc?.total || 0);
+      const spotHold = Number(spotUsdc?.hold || 0);
+      const spotAvailable = Math.max(0, spotTotal - spotHold);
+
+      // For unified accounts, marginValue already includes spot USDC — don't double count
+      const isUnified = marginValue > crossValue;
+      const totalEquity = isUnified ? perpEquity : perpEquity + spotTotal;
+      const totalAvailable = isUnified ? perpAvailable + spotAvailable : perpAvailable + spotAvailable;
+      const frozen = Math.max(0, totalEquity - totalAvailable);
+
+      this.balanceCache = { equity: totalEquity, available: totalAvailable, frozen, at: now };
+
+      return [{ currency: 'USDC', equity: totalEquity, available: totalAvailable, frozen }];
     } catch {
       return [];
+    }
+  }
+
+
+  /**
+   * Transfer USDC from the spot account to the perp account (or vice versa).
+   * Required before the bot can open leveraged perpetual positions.
+   *
+   * @param amount USDC amount to transfer (e.g. 200)
+   * @param toPerp true = spot→perp, false = perp→spot
+   */
+  async spotToPerpTransfer(amount: number, toPerp = true): Promise<{ ok: boolean; message: string }> {
+    if (!this.exchangeClient) {
+      return { ok: false, message: 'Private key niet geconfigureerd — kan niet overmaken.' };
+    }
+    try {
+      await this.exchangeClient.usdClassTransfer({ amount: String(amount), toPerp });
+      // Invalidate balance cache so next poll reflects new balance
+      this.balanceCache = null;
+      return { ok: true, message: `${amount} USDC succesvol overgeboekt naar ${toPerp ? 'perp' : 'spot'} account.` };
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
     }
   }
 
@@ -156,6 +213,7 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
         .map((pos) => {
           const szi = Number(pos.szi);
           const symbol = pos.coin.includes('_') ? pos.coin : `${pos.coin}_USDT`;
+          const marginUsed = Number((pos as any).marginUsed || 0);
           return {
             symbol,
             side: (szi > 0 ? 'LONG' : 'SHORT') as Side,
@@ -164,6 +222,7 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
             entryPrice: Number(pos.entryPx || 0),
             liquidationPrice: Number(pos.liquidationPx || 0),
             unrealisedPnl: Number(pos.unrealizedPnl || 0),
+            margin: marginUsed > 0 ? marginUsed : undefined,
           };
         });
     } catch {
@@ -189,14 +248,46 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
       await this.setLeverage(input.symbol, input.leverage || 5, isBuy ? 'LONG' : 'SHORT', input.openType || 'isolated').catch(() => {});
     }
 
-    // Determine market execution price with 5% slippage bound from mid
+    // Determine dynamic slippage bound and check spread
     const mids = await this.infoClient.allMids();
     const midStr = mids[coin];
     if (!midStr) {
       throw new Error(`Geen actuele mid-prijs gevonden voor ${coin} op Hyperliquid`);
     }
     const midPrice = Number(midStr);
-    const slippagePrice = isBuy ? midPrice * 1.05 : midPrice * 0.95;
+
+    const isMajor = /^(BTC|ETH|SOL)$/i.test(coin);
+    const isMeme = /^(kPEPE|kBONK|kSHIB|kMOG|TRUMP|FARTCOIN|PENGU)$/i.test(coin);
+    const slippagePct = isReduce
+      ? (isMeme ? 0.035 : 0.02)
+      : (isMajor ? 0.008 : isMeme ? 0.025 : 0.015);
+
+    // Spread guard on new entries: reject if book is too illiquid or spread is blown out
+    if (!isReduce) {
+      try {
+        const book = await this.infoClient.l2Book({ coin });
+        if (book?.levels?.[0]?.[0] && book?.levels?.[1]?.[0]) {
+          const bestBid = Number(book.levels[0][0].px);
+          const bestAsk = Number(book.levels[1][0].px);
+          if (bestBid > 0 && bestAsk > 0 && midPrice > 0) {
+            const spreadPct = (bestAsk - bestBid) / midPrice;
+            const maxSpread = isMeme ? 0.025 : 0.012;
+            if (spreadPct > maxSpread) {
+              throw new Error(
+                `Order geweigerd voor ${coin}: spread te wijd (${(spreadPct * 100).toFixed(2)}% > ${(maxSpread * 100).toFixed(2)}%)`
+              );
+            }
+          }
+        }
+      } catch (bookErr) {
+        if ((bookErr as Error).message.includes('spread te wijd')) {
+          throw bookErr;
+        }
+        // Non-fatal if l2Book query fails, proceed with dynamic slippage
+      }
+    }
+
+    const slippagePrice = isBuy ? midPrice * (1 + slippagePct) : midPrice * (1 - slippagePct);
 
     const formattedPrice = formatPrice(slippagePrice, szDecimals);
     const formattedSize = formatSize(input.vol, szDecimals);
@@ -237,7 +328,13 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
         side: input.intent === 'OPEN_LONG' ? 'LONG' : 'SHORT',
         vol: input.vol,
         triggerPrice: input.stopLossPrice,
-      }).catch(() => {});
+      }).catch((err) => {
+        ErrorLogger.getInstance().error(
+          'Hyperliquid',
+          `Attached stop order mislukt voor ${input.symbol}: ${(err as Error).message}`,
+          { symbol: input.symbol, triggerPrice: input.stopLossPrice }
+        );
+      });
     }
     if (input.takeProfitPrice && (input.intent === 'OPEN_LONG' || input.intent === 'OPEN_SHORT')) {
       await this.placeTakeProfitOrder({
@@ -245,7 +342,13 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
         side: input.intent === 'OPEN_LONG' ? 'LONG' : 'SHORT',
         vol: input.vol,
         triggerPrice: input.takeProfitPrice,
-      }).catch(() => {});
+      }).catch((err) => {
+        ErrorLogger.getInstance().error(
+          'Hyperliquid',
+          `Attached take profit order mislukt voor ${input.symbol}: ${(err as Error).message}`,
+          { symbol: input.symbol, triggerPrice: input.takeProfitPrice }
+        );
+      });
     }
 
     return {
@@ -467,15 +570,31 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
       const cleanCoin = symbol ? this.normalizeCoin(symbol) : null;
       return openOrders
         .filter((o) => !cleanCoin || o.coin === cleanCoin)
-        .map((o) => ({
-          id: String(o.oid),
-          symbol: o.coin.includes('_') ? o.coin : `${o.coin}_USDT`,
-          side: o.side === 'B' ? 1 : 2,
-          triggerType: o.isTrigger ? 1 : 0,
-          triggerPrice: Number(o.triggerPx || o.limitPx),
-          vol: Number(o.sz),
-          createTime: o.timestamp,
-        }));
+        .map((o) => {
+          const isSell = o.side === 'A';
+          const orderTypeLower = (o.orderType || '').toLowerCase();
+          const trigCondLower = (o.triggerCondition || '').toLowerCase();
+          const isStop = orderTypeLower.includes('stop') || trigCondLower.includes('stop');
+          const isTp = orderTypeLower.includes('take profit') || orderTypeLower.includes('tp');
+
+          let side = isSell ? 4 : 2; // 4 = Close Long (Sell), 2 = Close Short (Buy)
+          let triggerType = 0;
+          if (isSell) {
+            triggerType = isStop ? 2 : isTp ? 1 : 0;
+          } else {
+            triggerType = isStop ? 1 : isTp ? 2 : 0;
+          }
+
+          return {
+            id: String(o.oid),
+            symbol: o.coin.includes('_') ? o.coin : `${o.coin}_USDT`,
+            side,
+            triggerType,
+            triggerPrice: Number(o.triggerPx || o.limitPx),
+            vol: Number(o.sz),
+            createTime: o.timestamp,
+          };
+        });
     } catch {
       return [];
     }

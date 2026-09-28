@@ -86,7 +86,13 @@ export class Store {
     },
     scout: { universeExtras: [], cooldowns: {}, lastRunAt: null },
     exchangeCredentials: { apiKey: '', apiSecret: '', walletAddress: '', privateKey: '', isTestnet: false, venue: 'hyperliquid' },
-    learning: { factorStats: {}, penalties: {} },
+    learning: {
+      factorStats: {},
+      penalties: {},
+      sessionStats: {},
+      coinDNA: {},
+      mfeMaeStats: { totalTracked: 0, avgMfeR: 0, avgMaeR: 0, medianMfeR: 0, optimalTp1R: 1.5, optimalTp2R: 3.0 },
+    },
   };
 
   private loadMemoryState(): void {
@@ -133,7 +139,10 @@ export class Store {
     }
     if (isRecord(raw.learning) &&
         (raw.learning.factorStats !== undefined && !isRecord(raw.learning.factorStats) ||
-          raw.learning.penalties !== undefined && !isRecord(raw.learning.penalties))) {
+          raw.learning.penalties !== undefined && !isRecord(raw.learning.penalties) ||
+          raw.learning.sessionStats !== undefined && !isRecord(raw.learning.sessionStats) ||
+          raw.learning.coinDNA !== undefined && !isRecord(raw.learning.coinDNA) ||
+          raw.learning.mfeMaeStats !== undefined && !isRecord(raw.learning.mfeMaeStats))) {
       throw new Error('Stored learning state is invalid');
     }
     if (Array.isArray(raw.positions)) {
@@ -155,6 +164,11 @@ export class Store {
       this.memory.learning = {
         factorStats: { ...this.memory.learning.factorStats, ...(learning.factorStats || {}) },
         penalties: { ...this.memory.learning.penalties, ...(learning.penalties || {}) },
+        sessionStats: { ...this.memory.learning.sessionStats, ...(learning.sessionStats || {}) },
+        coinDNA: { ...this.memory.learning.coinDNA, ...(learning.coinDNA || {}) },
+        mfeMaeStats: learning.mfeMaeStats
+          ? { ...this.memory.learning.mfeMaeStats, ...learning.mfeMaeStats }
+          : this.memory.learning.mfeMaeStats,
       };
     }
   }
@@ -392,6 +406,10 @@ export class Store {
     this.memory.learning = {
       factorStats: { ...this.memory.learning.factorStats, ...(patch.factorStats || {}) },
       penalties: { ...this.memory.learning.penalties, ...(patch.penalties || {}) },
+      sessionStats: { ...(this.memory.learning.sessionStats || {}), ...(patch.sessionStats || {}) },
+      coinDNA: { ...(this.memory.learning.coinDNA || {}), ...(patch.coinDNA || {}) },
+      mfeMaeStats: patch.mfeMaeStats ?? this.memory.learning.mfeMaeStats,
+      clusterStatus: patch.clusterStatus ?? this.memory.learning.clusterStatus,
     };
     this.persistMemoryState();
   }
@@ -610,39 +628,79 @@ export class Store {
       const doc = await this.storageOperation(() => ExchangeCredentialsModel.findOne({ key: this.tenantId }).lean());
       if (doc) {
         const d = doc as unknown as Record<string, unknown>;
-        if (d.apiKey || d.walletAddress) {
+        if (d.walletAddress || d.apiKey) {
+          const venue = (d.venue as 'mexc' | 'hyperliquid') || 'hyperliquid';
           return {
             apiKey: (d.apiKey as string) || '',
             apiSecret: (d.apiSecret as string) || '',
             walletAddress: (d.walletAddress as string) || '',
             privateKey: (d.privateKey as string) || '',
             isTestnet: Boolean(d.isTestnet),
-            venue: (d.venue as 'mexc' | 'hyperliquid') || 'hyperliquid',
+            venue,
           };
         }
       }
     }
-    if (this.memory.exchangeCredentials.apiKey || this.memory.exchangeCredentials.walletAddress) {
+    if (this.memory.exchangeCredentials.walletAddress || this.memory.exchangeCredentials.apiKey) {
       return { ...this.memory.exchangeCredentials };
     }
+    // Check .hyperliquid-credentials.json on disk if present
+    try {
+      const hlJsonPath = path.resolve(process.cwd(), '.hyperliquid-credentials.json');
+      if (fs.existsSync(hlJsonPath)) {
+        const parsed = JSON.parse(fs.readFileSync(hlJsonPath, 'utf8'));
+        if (parsed?.walletAddress) {
+          return {
+            walletAddress: String(parsed.walletAddress),
+            privateKey: String(parsed.privateKey || ''),
+            isTestnet: Boolean(parsed.isTestnet),
+            venue: 'hyperliquid',
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const envVenue = (process.env.EXCHANGE_VENUE as 'mexc' | 'hyperliquid' | undefined) || 'hyperliquid';
     return {
       apiKey: process.env.MEXC_API_KEY || '',
       apiSecret: process.env.MEXC_API_SECRET || '',
       walletAddress: process.env.HYPERLIQUID_WALLET || '',
       privateKey: process.env.HYPERLIQUID_PRIVATE_KEY || '',
       isTestnet: process.env.HYPERLIQUID_TESTNET === 'true',
-      venue: (process.env.EXCHANGE_VENUE as 'mexc' | 'hyperliquid') || 'hyperliquid',
+      venue: envVenue,
     };
   }
 
   /**
-   * Save (or clear, when passed empty strings) the MEXC API credentials
+   * Save (or clear, when passed empty strings) the Hyperliquid credentials
    * entered from the dashboard.
    *
-   * @param credentials the API key and secret to store.
+   * @param credentials the wallet address and private key to store.
    */
   async saveExchangeCredentials(credentials: ExchangeCredentials): Promise<void> {
     this.assertHealthy();
+    if (credentials.walletAddress) {
+      try {
+        const hlJsonPath = path.resolve(process.cwd(), '.hyperliquid-credentials.json');
+        fs.writeFileSync(
+          hlJsonPath,
+          JSON.stringify(
+            {
+              walletAddress: credentials.walletAddress,
+              privateKey: credentials.privateKey,
+              isTestnet: credentials.isTestnet,
+              liveTrading: process.env.LIVE_TRADING_ENABLED === 'true',
+            },
+            null,
+            2
+          ),
+          'utf8'
+        );
+      } catch {
+        // ignore
+      }
+    }
     if (this.connected) {
       await this.storageOperation(() => ExchangeCredentialsModel.updateOne({ key: this.tenantId }, { $set: credentials }, { upsert: true }));
     }
@@ -673,8 +731,8 @@ export type ScoutState = {
 };
 
 /**
-   * MEXC API credentials persisted for the single service instance.
- */
+   * Hyperliquid credentials persisted for the single service instance.
+   */
 export type ExchangeCredentials = {
   apiKey?: string;
   apiSecret?: string;
@@ -682,7 +740,6 @@ export type ExchangeCredentials = {
   privateKey?: string;
   isTestnet?: boolean;
   venue?: 'mexc' | 'hyperliquid';
-
 };
 
 function toPosition(doc: Record<string, unknown>): Position {

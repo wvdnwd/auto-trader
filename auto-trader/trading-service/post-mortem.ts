@@ -136,6 +136,22 @@ export function analyzeClosedTrade(
     whatWentWrong.push('Geen enkel take-profit niveau kunnen aantikken voor de ommekeer.');
   }
 
+  // MFE & MAE excursion analysis
+  const mfeR = position.peakR !== undefined ? round(position.peakR, 2) : rMultiple > 0 ? rMultiple : 0;
+  const maeR = position.troughR !== undefined ? round(position.troughR, 2) : rMultiple < 0 ? rMultiple : 0;
+  const session = position.session;
+
+  if (mfeR >= 1.8 && (verdict === 'LOSS' || verdict === 'BREAK_EVEN')) {
+    whatWentWrong.push(
+      `MFE bereikte maximaal +${mfeR}R maar keerde daarna om — dynamische TP leert doelen realistischer af te stemmen.`
+    );
+  }
+  if (maeR <= -0.85 && verdict === 'WIN') {
+    whatWentWell.push(
+      `Positie doorstond een drawdown van ${maeR}R dankzij een beschermende stop-loss buffer en herstelde naar winst.`
+    );
+  }
+
   // Synthesize lesson in clear Dutch
   let lesson = '';
   if (verdict === 'WIN') {
@@ -172,5 +188,8 @@ export function analyzeClosedTrade(
     whatWentWell,
     whatWentWrong,
     lesson,
+    session,
+    mfeR,
+    maeR,
   };
 }

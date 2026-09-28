@@ -55,6 +55,9 @@ export class PositionDoc {
   @prop({ type: () => Number, required: true })
   public margin!: number;
 
+  @prop({ type: () => Number })
+  public initialMargin?: number;
+
   @prop({ type: () => Number, required: true })
   public notional!: number;
 

@@ -272,6 +272,42 @@ describe('market-structure: planImbalanceScalp', () => {
     expect(scalp?.targetReason).toContain('61.8%');
     expect(scalp?.rrEstimate).toBeGreaterThanOrEqual(1.8);
   });
+
+  it('plans an FVG Exhaustion Retracement SHORT when sweep is null and price rejects near peak with unmitigated FVG below', () => {
+    // Candles simulating an explosive breakout to 73 followed by a rejection upper wick and pullback to 71.5
+    const candles: Candle[] = [
+      makeCandle(57, 59, 56, 58, 1000),
+      makeCandle(58, 64, 57, 63, 2000), // Bullish FVG bottom around 64
+      makeCandle(63, 67, 62, 66, 3000),
+      makeCandle(66, 70, 65, 69, 4000), // Bullish FVG top at 67
+      makeCandle(69, 72, 68, 71, 5000),
+      makeCandle(71, 73.5, 70.5, 73, 6000), // Peak at 73.5
+      makeCandle(73, 73.4, 71.2, 71.5, 7000), // Rejection red candle pulling back to 71.5
+      makeCandle(71.5, 72.8, 71.2, 71.4, 8000), // Upper wick rejection: high 72.8, close 71.4 (upper wick = 1.4, range = 1.6 -> 87% wick)
+      makeCandle(71.4, 72.8, 71.0, 72.2, 9000),
+      makeCandle(72.2, 72.5, 71.8, 72.0, 10000),
+    ];
+    const fvgs = [
+      {
+        direction: 'BULLISH' as const,
+        top: 67,
+        bottom: 63,
+        midpoint: 65,
+        candleIndex: 1,
+        time: 2000,
+        mitigated: false,
+      },
+    ];
+
+    const scalp = planImbalanceScalp(candles, 72.0, null, fvgs, null);
+    expect(scalp).not.toBeNull();
+    expect(scalp!.eligible).toBe(true);
+    expect(scalp!.side).toBe('SHORT');
+    expect(scalp!.targetPrice).toBe(67);
+    expect(scalp!.targetReason).toContain('Fair Value Gap ($67.0000)');
+    expect(scalp!.stopLoss).toBeGreaterThan(73.5);
+    expect(scalp!.rrEstimate).toBeGreaterThanOrEqual(1.8);
+  });
 });
 
 describe('market-structure: computeVolumeProfile', () => {
