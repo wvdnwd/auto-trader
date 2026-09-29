@@ -1507,6 +1507,13 @@ export class Engine {
           });
         }
       }
+
+      // Per-cycle venue-stop safety net. The venue is the source of truth for
+      // whether this position is actually protected; runs after the drift block
+      // so any quantity change above has already been mirrored.
+      if (this.exchange.status().enabled) {
+        await this.ensureLiveStopProtection(position, venue.vol);
+      }
     }
 
     // Adopt any positions open on MEXC that were not in the local book (e.g. after server restart)
@@ -2099,7 +2106,7 @@ export class Engine {
     // when that stop covers entry fees for the remaining quantity.
     if (patch.stopLoss !== undefined && position.live) {
       await this.moveLiveStop(position, patch.stopLoss, fill.remaining);
-      await this.store.updatePosition(position.id, { liveStopOrderId: position.liveStopOrderId ?? undefined });
+      await this.store.updatePosition(position.id, { liveStopOrderId: position.liveStopOrderId ?? null });
     }
 
     const labels = fill.filled.map((t) => `${t.rMultiple}R`).join(', ');
@@ -2692,12 +2699,38 @@ export class Engine {
       }
 
       // Spread & Slippage Shield: reject tokens with excessive bid-ask spread.
-      // In live mode missing spread data fails closed so a real order is never
-      // routed blind; the paper path stays permissive when the ticker is absent.
+      // In live mode a real order is routed against the LIVE L2 touch, re-read
+      // from the adapter at decision time; an unavailable book fails closed. The
+      // paper path (and adapters without L2 access) fall back to the ticker's
+      // impact-price spread proxy, staying permissive when it is absent.
       if (this.risk.spreadShieldEnabled !== false) {
         const maxSpread = this.risk.maxSpreadPct ?? 0.0015;
         const liveEntry = this.exchange.status().enabled;
-        if (ticker?.spreadPct !== undefined) {
+        const useLiveBook = liveEntry && typeof this.exchange.getBestBidAsk === 'function';
+        if (useLiveBook) {
+          let book: { bid: number; ask: number } | null = null;
+          try {
+            book = (await this.exchange.getBestBidAsk!(signal.symbol)) ?? null;
+          } catch {
+            book = null;
+          }
+          if (!book || !(book.bid > 0) || !(book.ask > 0)) {
+            await this.logSkip(
+              signal.symbol,
+              `Spread onbekend (live orderboek niet beschikbaar) — live entry gefaald-gesloten, risico op slippage`
+            );
+            continue;
+          }
+          const mid = (book.bid + book.ask) / 2;
+          const spreadPct = mid > 0 ? (book.ask - book.bid) / mid : Number.POSITIVE_INFINITY;
+          if (spreadPct > maxSpread) {
+            await this.logSkip(
+              signal.symbol,
+              `Spread te wijd (${(spreadPct * 100).toFixed(2)}% > max ${(maxSpread * 100).toFixed(2)}%) — liquiditeit onvoldoende, risico op slippage`
+            );
+            continue;
+          }
+        } else if (ticker?.spreadPct !== undefined) {
           if (ticker.spreadPct > maxSpread) {
             await this.logSkip(
               signal.symbol,
@@ -3627,38 +3660,141 @@ export class Engine {
     }
   }
 
-  private async moveLiveStop(position: Position, stopPrice: number, remainingQty: number): Promise<void> {
-    // Cancel existing stop order (if any) before placing a new one.
-    // Note: do NOT early-return if liveStopOrderId is null — we still need to place a fresh stop.
-    if (position.liveStopOrderId) {
-      try {
-        await this.exchange.cancelStopOrder(position.liveStopOrderId, position.symbol);
-      } catch {
-        // Ignore — order may already be gone
-      }
-      position.liveStopOrderId = null;
-    }
+  /**
+   * Move a live position's protective stop to a new price, without ever leaving
+   * the position unprotected.
+   *
+   * Ordering matters: the replacement stop is placed FIRST (with a bounded
+   * retry) and only once a real order id comes back is the new id + stop price
+   * persisted. Only then is the previous stop cancelled. That way a failed
+   * placement leaves the previous resting stop and its id untouched, instead of
+   * cancelling protection and then failing to replace it.
+   *
+   * @param position the live position whose stop is moving.
+   * @param stopPrice the new stop trigger price.
+   * @param remainingQty the open quantity in base units the stop must cover.
+   * @returns true when a stop is confirmed resting on the venue, false otherwise.
+   */
+  private async moveLiveStop(position: Position, stopPrice: number, remainingQty: number): Promise<boolean> {
+    const previousStopId = position.liveStopOrderId ?? null;
     const contractSize = position.liveContractSize || 1;
     const detail = await this.market.contractDetail(position.symbol).catch(() => null);
     const step = detail && detail.minVol > 0 && detail.minVol < 1 ? detail.minVol : 1;
     const minVol = detail?.minVol || 1;
     const vol = Math.max(minVol, roundToStep(remainingQty / contractSize, step));
+
+    // Place the replacement BEFORE cancelling the old stop. Two bounded attempts
+    // so a single transient rejection cannot strip protection.
+    let stop: { orderId: string } | null = null;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const placed = await this.exchange.placeStopOrder({
+          symbol: position.symbol,
+          side: position.side,
+          vol,
+          triggerPrice: stopPrice,
+          externalOid: `${position.id}-stop-${Date.now()}-${attempt}`,
+        });
+        if (placed && placed.orderId) {
+          stop = placed;
+          break;
+        }
+        lastErr = new Error('exchange retourneerde geen stop-orderId');
+      } catch (err) {
+        lastErr = err;
+      }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (!stop) {
+      await this.log('warn', `Stop verplaatsen op exchange mislukt voor ${position.symbol}: ${(lastErr as Error).message}`);
+      if (previousStopId) {
+        // A stop is still resting on the venue — leave it and its id untouched.
+        return false;
+      }
+      // No previous stop and none placed: persist an EXPLICIT null (not
+      // undefined, which Mongoose `$set` strips) so the retry gate at
+      // `!current.liveStopOrderId && current.stopLoss` re-arms it next cycle.
+      position.liveStopOrderId = null;
+      await this.store.updatePosition(position.id, { liveStopOrderId: null });
+      return false;
+    }
+
+    // Confirmed resting: persist the new id + stop BEFORE cancelling the old one.
+    position.liveStopOrderId = stop.orderId;
+    position.stopLoss = stopPrice;
+    await this.store.updatePosition(position.id, {
+      liveStopOrderId: stop.orderId,
+      stopLoss: stopPrice,
+    });
+
+    if (previousStopId && previousStopId !== stop.orderId) {
+      try {
+        await this.exchange.cancelStopOrder(previousStopId, position.symbol);
+      } catch {
+        // The replacement is already resting and persisted; a stale cancel that
+        // fails (order already gone) must never throw away the new protection.
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Ensure a live position has a venue-confirmed protective stop, using the
+   * venue's own open plan orders as the source of truth.
+   *
+   * A query that throws is treated as "unknown" (never as "no stop"), so a
+   * transient API failure can neither trigger a redundant replace nor an
+   * emergency close. When the venue confirms no stop at all, the engine re-arms
+   * via {@link moveLiveStop}; if that fails the position is emergency-closed,
+   * mirroring the entry path's escalation.
+   *
+   * @param position the live position to verify.
+   * @param venueVol the open size reported by the venue, in contracts.
+   */
+  private async ensureLiveStopProtection(position: Position, venueVol: number): Promise<void> {
+    if (!this.exchange.status().enabled) return;
+    if (position.remainingQuantity <= 0) return;
+
+    let planOrders: Awaited<ReturnType<IExchangeAdapter['getOpenPlanOrders']>>;
     try {
-      const stop = await this.exchange.placeStopOrder({
-        symbol: position.symbol,
-        side: position.side,
-        vol,
-        triggerPrice: stopPrice,
-        externalOid: `${position.id}-stop-${Date.now()}`,
-      });
-      position.liveStopOrderId = stop.orderId;
-      position.stopLoss = stopPrice;
-      await this.store.updatePosition(position.id, {
-        liveStopOrderId: stop.orderId,
-        stopLoss: stopPrice,
-      });
-    } catch (err) {
-      await this.log('warn', `Stop verplaatsen op exchange mislukt voor ${position.symbol}: ${(err as Error).message}`);
+      planOrders = await this.exchange.getOpenPlanOrders(position.symbol);
+    } catch {
+      // Unknown — do NOT treat a failed query as "the venue has no stop".
+      return;
+    }
+
+    const isLong = position.side === 'LONG';
+    const stopOrders = planOrders
+      .filter((o) => (isLong ? o.triggerType === 2 && o.side === 4 : o.triggerType === 1 && o.side === 2))
+      .sort((a, b) => b.createTime - a.createTime);
+    const known =
+      position.liveStopOrderId && stopOrders.find((o) => o.id === position.liveStopOrderId);
+    const venueStop = known || stopOrders[0];
+
+    if (venueStop) {
+      if (position.liveStopOrderId !== venueStop.id || position.stopLoss !== venueStop.triggerPrice) {
+        position.liveStopOrderId = venueStop.id;
+        position.stopLoss = venueStop.triggerPrice;
+        await this.store.updatePosition(position.id, {
+          liveStopOrderId: venueStop.id,
+          stopLoss: venueStop.triggerPrice,
+        });
+      }
+      return;
+    }
+
+    // No venue-confirmed stop: re-arm, covering exactly the size on the venue.
+    const contractSize = position.liveContractSize || 1;
+    const qty = venueVol > 0 ? venueVol * contractSize : position.remainingQuantity;
+    const armed = await this.moveLiveStop(position, position.stopLoss, qty);
+    if (!armed) {
+      await this.log(
+        'error',
+        `🚨 Live positie ${position.symbol} heeft geen bevestigde venue-stop en herapplaceren mislukte — noodsluiting om kapitaal te beschermen.`
+      );
+      await this.close(position, this.markOf(position), 'STOP_LOSS').catch(() => {});
     }
   }
 
@@ -3823,7 +3959,7 @@ export class Engine {
       // Persist the new liveStopOrderId so it survives restarts
       if (position.liveStopOrderId !== undefined) {
         await this.store.updatePosition(position.id, {
-          liveStopOrderId: position.liveStopOrderId ?? undefined,
+          liveStopOrderId: position.liveStopOrderId ?? null,
         });
       }
     }

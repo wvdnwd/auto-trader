@@ -40,7 +40,7 @@ function parseArgs() {
       symbols = args[i + 1].split(',').map((s) => (s.includes('_') ? s.toUpperCase() : `${s.toUpperCase()}_USDT`));
       i++;
     } else if (args[i] === '--bars' && args[i + 1]) {
-      limit = Math.min(5000, Math.max(100, Number(args[i + 1]) || 1000));
+      limit = Math.min(40000, Math.max(100, Number(args[i + 1]) || 1000));
       i++;
     } else if (args[i] === '--balance' && args[i + 1]) {
       startingBalance = Math.max(10, Number(args[i + 1]) || 100);

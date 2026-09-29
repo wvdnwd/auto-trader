@@ -117,6 +117,12 @@ export const LIVE_EXECUTION_DISABLED_REASON =
 
 export type ExchangeVenue = 'mexc' | 'hyperliquid';
 
+/** Best live L2 bid/ask touch for a symbol, as reported by the venue. */
+export type BestBidAsk = {
+  bid: number;
+  ask: number;
+};
+
 export interface IExchangeAdapter {
   readonly venue: ExchangeVenue;
   isConfigured(): boolean;
@@ -132,6 +138,15 @@ export interface IExchangeAdapter {
   cancelPlanOrders(orders: Array<{ symbol: string; orderId: string }>): Promise<void>;
   cancelAllPlanOrders(symbol?: string): Promise<void>;
   setLeverage(symbol: string, leverage: number, side: Side, openType?: OpenType): Promise<void>;
+  /**
+   * Fetch the currently resting plan (trigger) orders from the venue.
+   *
+   * Implementations must let query errors propagate: callers rely on the
+   * distinction between "the venue confirmed there are no orders" (an empty
+   * array) and "the query failed / state is unknown" (a thrown error), and must
+   * never treat the two as equivalent. Returning `[]` on error would make the
+   * engine believe a live position has no protective stop and re-arm one.
+   */
   getOpenPlanOrders(symbol?: string): Promise<
     Array<{
       id: string;
@@ -143,6 +158,16 @@ export interface IExchangeAdapter {
       createTime: number;
     }>
   >;
+  /**
+   * Optional live L2 best bid/ask for a symbol.
+   *
+   * Adapters that can read a real order book implement this so the engine's
+   * spread shield can measure the actual touch at decision time instead of
+   * relying on a ticker-derived impact-price proxy. Returns `null` when the
+   * book is unavailable or malformed; adapters without L2 access omit the
+   * method entirely.
+   */
+  getBestBidAsk?(symbol: string): Promise<BestBidAsk | null>;
 }
 
 const INTENT_SIDE: Record<OrderIntent, 1 | 2 | 3 | 4> = {

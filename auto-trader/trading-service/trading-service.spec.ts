@@ -69,6 +69,8 @@ class FakeExchange {
   public closes: { symbol: string; vol: number }[] = [];
   public stopPlacements: { symbol: string; triggerPrice: number; vol: number }[] = [];
   public cancelledStops: string[] = [];
+  /** Live L2 touch reported by {@link getBestBidAsk}; set to null to simulate an unavailable book. */
+  public bestBidAsk: { bid: number; ask: number } | null = { bid: 100, ask: 100.05 };
   /** Set by tests to control what {@link getOpenPositions} reports back, simulating the real venue state. */
   public venuePositions: { symbol: string; side: 'LONG' | 'SHORT'; vol: number; leverage: number; entryPrice: number; liquidationPrice: number; unrealisedPnl: number }[] | null = null;
   private stopSeq = 0;
@@ -89,11 +91,22 @@ class FakeExchange {
     return { orderId: `order-${this.opens.length}`, symbol: input.symbol };
   }
 
-  async placeStopOrder(input: { symbol: string; triggerPrice: number; vol: number }) {
+  async placeStopOrder(input: { symbol: string; triggerPrice: number; vol: number; side?: 'LONG' | 'SHORT' }) {
     if (this.failNextStop) throw new Error('venue rejected stop');
     this.stopPlacements.push(input);
     this.stopSeq += 1;
-    return { orderId: `stop-${this.stopSeq}`, symbol: input.symbol };
+    const orderId = `stop-${this.stopSeq}`;
+    // Mirror the placed stop onto the simulated venue so reconciliation can see it.
+    this.venuePlanOrders.push({
+      id: orderId,
+      symbol: input.symbol,
+      side: input.side === 'SHORT' ? 2 : 4,
+      triggerType: input.side === 'SHORT' ? 1 : 2,
+      triggerPrice: input.triggerPrice,
+      vol: input.vol,
+      createTime: Date.now(),
+    });
+    return { orderId, symbol: input.symbol };
   }
 
   async placeTakeProfitOrder(_input: { symbol: string; triggerPrice: number; vol: number }) {
@@ -102,6 +115,11 @@ class FakeExchange {
 
   async cancelStopOrder(orderId: string, _symbol?: string): Promise<void> {
     this.cancelledStops.push(orderId);
+    this.venuePlanOrders = this.venuePlanOrders.filter((o) => o.id !== orderId);
+  }
+
+  async getBestBidAsk(_symbol?: string): Promise<{ bid: number; ask: number } | null> {
+    return this.bestBidAsk;
   }
 
   venuePlanOrders: Array<{
@@ -117,6 +135,8 @@ class FakeExchange {
 
   async cancelPlanOrders(orders: Array<{ symbol: string; orderId: string }>): Promise<void> {
     this.cancelledPlanOrders.push(...orders);
+    const ids = new Set(orders.map((o) => o.orderId));
+    this.venuePlanOrders = this.venuePlanOrders.filter((o) => !ids.has(o.id));
   }
 
   async getOpenPlanOrders(_symbol?: string): Promise<
@@ -130,10 +150,12 @@ class FakeExchange {
       createTime: number;
     }>
   > {
-    return this.venuePlanOrders;
+    return _symbol ? this.venuePlanOrders.filter((o) => o.symbol === _symbol) : this.venuePlanOrders;
   }
 
-  async cancelAllPlanOrders(_symbol?: string): Promise<void> {}
+  async cancelAllPlanOrders(symbol?: string): Promise<void> {
+    this.venuePlanOrders = symbol ? this.venuePlanOrders.filter((o) => o.symbol !== symbol) : [];
+  }
 
   async closePosition(input: { symbol: string; vol: number }) {
     this.closes.push(input);
@@ -932,6 +954,137 @@ describe('live position reconciliation', () => {
     expect(open.map((position) => position.side).sort()).toEqual(['LONG', 'SHORT']);
     expect(exchange.closes).toHaveLength(0);
     expect(exchange.cancelledPlanOrders).toHaveLength(0);
+  });
+});
+
+type StopMover = {
+  moveLiveStop(position: Position, stopPrice: number, remainingQty: number): Promise<boolean>;
+};
+
+type Reconciler = {
+  reconcileLivePositions(): Promise<void>;
+};
+
+describe('live stop durability', () => {
+  it('keeps the previous venue stop and its id when moving the stop fails', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = liveEngineWith(market);
+    await engine.cycle();
+
+    const [position] = await store.positions('OPEN');
+    expect(position.liveStopOrderId).toBeTruthy();
+    const oldStopId = position.liveStopOrderId as string;
+    const oldStopLoss = position.stopLoss;
+    const placementsBefore = exchange.stopPlacements.length;
+
+    exchange.failNextStop = true;
+    const moved = await (engine as unknown as StopMover).moveLiveStop(
+      position,
+      position.entry * 1.05,
+      position.remainingQuantity
+    );
+
+    expect(moved).toBe(false);
+    const after = await store.position(position.id);
+    // The old protection is untouched: same id, same price, never cancelled.
+    expect(after!.liveStopOrderId).toBe(oldStopId);
+    expect(after!.stopLoss).toBe(oldStopLoss);
+    expect(exchange.cancelledStops).not.toContain(oldStopId);
+    expect(exchange.stopPlacements.length).toBe(placementsBefore);
+  });
+
+  it('persists an explicit null and re-arms next cycle when a stop fails with no prior stop', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = liveEngineWith(market);
+    await engine.cycle();
+
+    const [position] = await store.positions('OPEN');
+    const stop = position.stopLoss;
+    const qty = position.remainingQuantity;
+
+    // Simulate a locally-cleared id AND a venue with no resting stop anymore.
+    exchange.venuePlanOrders = [];
+    await store.updatePosition(position.id, { liveStopOrderId: null });
+    position.liveStopOrderId = null;
+
+    exchange.failNextStop = true;
+    const moved = await (engine as unknown as StopMover).moveLiveStop(position, stop, qty);
+    expect(moved).toBe(false);
+    // Explicit null (not undefined, which Mongoose `$set` strips) is what makes
+    // the retry gate re-arm the stop on the next cycle.
+    expect((await store.position(position.id))!.liveStopOrderId).toBeNull();
+
+    // Keep the venue reporting the position open so reconciliation does not settle it.
+    exchange.venuePositions = [{
+      symbol: position.symbol,
+      side: position.side,
+      vol: position.quantity / (position.liveContractSize || 1),
+      leverage: position.leverage,
+      entryPrice: position.entry,
+      liquidationPrice: 0,
+      unrealisedPnl: 0,
+    }];
+    exchange.failNextStop = false;
+    await engine.cycle();
+
+    const rearmed = await store.position(position.id);
+    expect(rearmed!.status).toBe('OPEN');
+    expect(rearmed!.liveStopOrderId).toBeTruthy();
+  });
+
+  it('treats a thrown plan-order query as unknown, never as "no stop"', async () => {
+    const market = new FakeMarket();
+    const { store, engine, exchange } = liveEngineWith(market);
+    await engine.cycle();
+    const [position] = await store.positions('OPEN');
+    const placementsBefore = exchange.stopPlacements.length;
+
+    exchange.venuePositions = [{
+      symbol: position.symbol,
+      side: position.side,
+      vol: position.quantity / (position.liveContractSize || 1),
+      leverage: position.leverage,
+      entryPrice: position.entry,
+      liquidationPrice: 0,
+      unrealisedPnl: 0,
+    }];
+    exchange.getOpenPlanOrders = async () => {
+      throw new Error('venue query failed');
+    };
+
+    await (engine as unknown as Reconciler).reconcileLivePositions();
+
+    // Unknown state must not trigger a redundant replacement or an emergency close.
+    expect(exchange.stopPlacements.length).toBe(placementsBefore);
+    expect((await store.position(position.id))!.status).toBe('OPEN');
+  });
+});
+
+describe('live spread shield', () => {
+  it('opens on a tight live book and blocks on a wide one', async () => {
+    const tight = liveEngineWith(new FakeMarket());
+    tight.exchange.bestBidAsk = { bid: 100, ask: 100.05 };
+    await tight.engine.cycle();
+    expect((await tight.store.positions('OPEN')).length).toBeGreaterThan(0);
+
+    const wide = liveEngineWith(new FakeMarket());
+    wide.exchange.bestBidAsk = { bid: 100, ask: 101 };
+    await wide.engine.cycle();
+    expect(await wide.store.positions('OPEN')).toHaveLength(0);
+    expect(wide.exchange.opens).toHaveLength(0);
+  });
+
+  it('fails closed on an unknown live book but keeps the paper path permissive', async () => {
+    const live = liveEngineWith(new FakeMarket());
+    live.exchange.bestBidAsk = null;
+    await live.engine.cycle();
+    expect(await live.store.positions('OPEN')).toHaveLength(0);
+    expect(live.exchange.opens).toHaveLength(0);
+
+    const paper = engineWith(new FakeMarket());
+    paper.exchange.bestBidAsk = null;
+    await paper.engine.cycle();
+    expect((await paper.store.positions('OPEN')).length).toBeGreaterThan(0);
   });
 });
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ExchangeClient,
   InfoClient,
@@ -8,6 +9,7 @@ import {
 import { formatPrice, formatSize } from '@nktkas/hyperliquid/utils';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import type {
+  BestBidAsk,
   ClosePositionInput,
   ExchangeAccountAsset,
   ExchangeOrderResult,
@@ -30,6 +32,76 @@ export type HyperliquidConfig = {
   privateKey?: string;
   isTestnet?: boolean;
 };
+
+/**
+ * Derive a valid Hyperliquid client order id (cloid) from an arbitrary external
+ * order id.
+ *
+ * Hyperliquid requires `^0x[a-fA-F0-9]{32}$` (exactly 34 characters), whereas
+ * the engine's external oids are UUIDs with tags and can be arbitrary lengths.
+ * Sha256 the oid and keep the first 32 hex characters.
+ *
+ * @param externalOid the engine's external order id.
+ * @returns a `0x`-prefixed 32-hex-char cloid, or undefined when no oid is given.
+ */
+export function toHyperliquidCloid(externalOid?: string): `0x${string}` | undefined {
+  if (!externalOid) return undefined;
+  const hex = createHash('sha256').update(externalOid).digest('hex').slice(0, 32);
+  return `0x${hex}`;
+}
+
+/**
+ * Extract the venue order id (`oid`) from a Hyperliquid order status entry.
+ *
+ * Only a real `filled` or `resting` acknowledgement carries an oid. The other
+ * statuses (`waitingForFill`, `waitingForTrigger`, `{ error }`) must never be
+ * turned into a fabricated id.
+ *
+ * @param status one entry from the order response's `statuses` array.
+ * @returns the numeric oid as a string, or null when the status has none.
+ */
+export function extractHlOrderId(status: unknown): string | null {
+  if (!status || typeof status !== 'object') return null;
+  if ('filled' in status) {
+    const filled = (status as { filled?: { oid?: unknown } }).filled;
+    if (filled?.oid !== undefined && filled.oid !== null) return String(filled.oid);
+  }
+  if ('resting' in status) {
+    const resting = (status as { resting?: { oid?: unknown } }).resting;
+    if (resting?.oid !== undefined && resting.oid !== null) return String(resting.oid);
+  }
+  return null;
+}
+
+/**
+ * Whether an order failure is a duplicate cloid rejection.
+ *
+ * Hyperliquid rejects re-used client order ids; we detect it from either a
+ * thrown error or an `{ error }` status entry by requiring a cloid/client-order-id
+ * reference together with duplicate/already-used wording.
+ */
+export function isDuplicateCloidError(value: unknown): boolean {
+  const message =
+    value instanceof Error
+      ? value.message
+      : value && typeof value === 'object' && 'error' in value
+        ? String((value as { error: unknown }).error)
+        : String(value ?? '');
+  const lower = message.toLowerCase();
+  const mentionsCloid =
+    lower.includes('cloid') || lower.includes('client order id') || lower.includes('client orderid');
+  const mentionsDuplicate =
+    lower.includes('duplicate') ||
+    lower.includes('already') ||
+    lower.includes('used') ||
+    lower.includes('exist') ||
+    lower.includes('unique');
+  return mentionsCloid && mentionsDuplicate;
+}
+
+/** Parameters accepted by the SDK's {@link ExchangeClient.order}. */
+type HlOrderParams = Parameters<ExchangeClient['order']>[0];
+
 
 /**
  * Hyperliquid Exchange Adapter for decentralized perpetuals on Hyperliquid L1.
@@ -266,18 +338,14 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
     // Spread guard on new entries: reject if book is too illiquid or spread is blown out
     if (!isReduce) {
       try {
-        const book = await this.infoClient.l2Book({ coin });
-        if (book?.levels?.[0]?.[0] && book?.levels?.[1]?.[0]) {
-          const bestBid = Number(book.levels[0][0].px);
-          const bestAsk = Number(book.levels[1][0].px);
-          if (bestBid > 0 && bestAsk > 0 && midPrice > 0) {
-            const spreadPct = (bestAsk - bestBid) / midPrice;
-            const maxSpread = isMeme ? 0.025 : 0.012;
-            if (spreadPct > maxSpread) {
-              throw new Error(
-                `Order geweigerd voor ${coin}: spread te wijd (${(spreadPct * 100).toFixed(2)}% > ${(maxSpread * 100).toFixed(2)}%)`
-              );
-            }
+        const book = await this.fetchBestBidAsk(coin);
+        if (book && midPrice > 0) {
+          const spreadPct = (book.ask - book.bid) / midPrice;
+          const maxSpread = isMeme ? 0.025 : 0.012;
+          if (spreadPct > maxSpread) {
+            throw new Error(
+              `Order geweigerd voor ${coin}: spread te wijd (${(spreadPct * 100).toFixed(2)}% > ${(maxSpread * 100).toFixed(2)}%)`
+            );
           }
         }
       } catch (bookErr) {
@@ -297,29 +365,31 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
       throw new Error(`Ordergrootte ${input.vol} te klein voor ${coin} (minimaal ${Math.pow(10, -szDecimals)})`);
     }
 
-    const res = await this.exchangeClient.order({
-      orders: [
-        {
-          a: assetId,
-          b: isBuy,
-          p: formattedPrice,
-          s: formattedSize,
-          r: isReduce,
-          t: { limit: { tif: 'FrontendMarket' } },
-        },
-      ],
-      grouping: 'na',
-    });
+    const cloid = toHyperliquidCloid(input.externalOid);
+    const status = await this.submitOrder(
+      {
+        orders: [
+          {
+            a: assetId,
+            b: isBuy,
+            p: formattedPrice,
+            s: formattedSize,
+            r: isReduce,
+            t: { limit: { tif: 'FrontendMarket' } },
+          },
+        ],
+        grouping: 'na',
+      },
+      cloid
+    );
 
-    const status = res.response.data.statuses[0];
-    if (typeof status === 'object' && 'error' in status) {
-      throw new Error(`Hyperliquid order geweigerd: ${status.error}`);
+    if (typeof status === 'object' && status !== null && 'error' in status) {
+      throw new Error(`Hyperliquid order geweigerd: ${(status as { error: unknown }).error}`);
     }
 
-    let orderId = `hl-${Date.now()}`;
-    if (typeof status === 'object') {
-      if ('filled' in status) orderId = String(status.filled.oid);
-      else if ('resting' in status) orderId = String(status.resting.oid);
+    const orderId = await this.resolveOrderId(cloid, status);
+    if (!orderId) {
+      throw new Error(`Hyperliquid order voor ${input.symbol} geaccepteerd maar geen order-id bevestigd`);
     }
 
     // Place attached stop loss or take profit trigger orders if requested
@@ -381,35 +451,37 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
     const formattedPrice = formatPrice(input.triggerPrice, szDecimals);
     const formattedSize = formatSize(input.vol, szDecimals);
 
-    const res = await this.exchangeClient.order({
-      orders: [
-        {
-          a: assetId,
-          b: isBuy,
-          p: formattedPrice,
-          s: formattedSize,
-          r: true,
-          t: {
-            trigger: {
-              isMarket: true,
-              triggerPx: formattedPrice,
-              tpsl: 'sl',
+    const cloid = toHyperliquidCloid(input.externalOid);
+    const status = await this.submitOrder(
+      {
+        orders: [
+          {
+            a: assetId,
+            b: isBuy,
+            p: formattedPrice,
+            s: formattedSize,
+            r: true,
+            t: {
+              trigger: {
+                isMarket: true,
+                triggerPx: formattedPrice,
+                tpsl: 'sl',
+              },
             },
           },
-        },
-      ],
-      grouping: 'na',
-    });
+        ],
+        grouping: 'na',
+      },
+      cloid
+    );
 
-    const status = res.response.data.statuses[0];
-    if (typeof status === 'object' && 'error' in status) {
-      throw new Error(`Hyperliquid stop order geweigerd: ${status.error}`);
+    if (typeof status === 'object' && status !== null && 'error' in status) {
+      throw new Error(`Hyperliquid stop order geweigerd: ${(status as { error: unknown }).error}`);
     }
 
-    let orderId = `hl-sl-${Date.now()}`;
-    if (typeof status === 'object') {
-      if ('resting' in status) orderId = String(status.resting.oid);
-      else if ('filled' in status) orderId = String(status.filled.oid);
+    const orderId = await this.resolveOrderId(cloid, status);
+    if (!orderId) {
+      throw new Error(`Hyperliquid stop order voor ${input.symbol} geaccepteerd maar geen order-id bevestigd`);
     }
 
     return {
@@ -430,35 +502,37 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
     const formattedPrice = formatPrice(input.triggerPrice, szDecimals);
     const formattedSize = formatSize(input.vol, szDecimals);
 
-    const res = await this.exchangeClient.order({
-      orders: [
-        {
-          a: assetId,
-          b: isBuy,
-          p: formattedPrice,
-          s: formattedSize,
-          r: true,
-          t: {
-            trigger: {
-              isMarket: true,
-              triggerPx: formattedPrice,
-              tpsl: 'tp',
+    const cloid = toHyperliquidCloid(input.externalOid);
+    const status = await this.submitOrder(
+      {
+        orders: [
+          {
+            a: assetId,
+            b: isBuy,
+            p: formattedPrice,
+            s: formattedSize,
+            r: true,
+            t: {
+              trigger: {
+                isMarket: true,
+                triggerPx: formattedPrice,
+                tpsl: 'tp',
+              },
             },
           },
-        },
-      ],
-      grouping: 'na',
-    });
+        ],
+        grouping: 'na',
+      },
+      cloid
+    );
 
-    const status = res.response.data.statuses[0];
-    if (typeof status === 'object' && 'error' in status) {
-      throw new Error(`Hyperliquid TP order geweigerd: ${status.error}`);
+    if (typeof status === 'object' && status !== null && 'error' in status) {
+      throw new Error(`Hyperliquid TP order geweigerd: ${(status as { error: unknown }).error}`);
     }
 
-    let orderId = `hl-tp-${Date.now()}`;
-    if (typeof status === 'object') {
-      if ('resting' in status) orderId = String(status.resting.oid);
-      else if ('filled' in status) orderId = String(status.filled.oid);
+    const orderId = await this.resolveOrderId(cloid, status);
+    if (!orderId) {
+      throw new Error(`Hyperliquid TP order voor ${input.symbol} geaccepteerd maar geen order-id bevestigd`);
     }
 
     return {
@@ -566,39 +640,122 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
     }>
   > {
     if (!this.walletAddress) return [];
+    const openOrders = await this.infoClient.frontendOpenOrders({ user: this.walletAddress as `0x${string}` });
+    const cleanCoin = symbol ? this.normalizeCoin(symbol) : null;
+    return openOrders
+      .filter((o) => !cleanCoin || o.coin === cleanCoin)
+      .map((o) => {
+        const isSell = o.side === 'A';
+        const orderTypeLower = (o.orderType || '').toLowerCase();
+        const trigCondLower = (o.triggerCondition || '').toLowerCase();
+        const isStop = orderTypeLower.includes('stop') || trigCondLower.includes('stop');
+        const isTp = orderTypeLower.includes('take profit') || orderTypeLower.includes('tp');
+
+        const side = isSell ? 4 : 2; // 4 = Close Long (Sell), 2 = Close Short (Buy)
+        let triggerType = 0;
+        if (isSell) {
+          triggerType = isStop ? 2 : isTp ? 1 : 0;
+        } else {
+          triggerType = isStop ? 1 : isTp ? 2 : 0;
+        }
+
+        return {
+          id: String(o.oid),
+          symbol: o.coin.includes('_') ? o.coin : `${o.coin}_USDT`,
+          side,
+          triggerType,
+          triggerPrice: Number(o.triggerPx || o.limitPx),
+          vol: Number(o.sz),
+          createTime: o.timestamp,
+        };
+      });
+  }
+
+  /**
+   * Read the live best bid/ask touch for a symbol.
+   *
+   * Returns null when the book is missing or malformed so callers can tell a
+   * genuinely unavailable book from an error (which this method does not hide
+   * for the internal spread guard, but {@link getBestBidAsk} does).
+   */
+  async getBestBidAsk(symbol: string): Promise<BestBidAsk | null> {
     try {
-      const openOrders = await this.infoClient.frontendOpenOrders({ user: this.walletAddress as `0x${string}` });
-      const cleanCoin = symbol ? this.normalizeCoin(symbol) : null;
-      return openOrders
-        .filter((o) => !cleanCoin || o.coin === cleanCoin)
-        .map((o) => {
-          const isSell = o.side === 'A';
-          const orderTypeLower = (o.orderType || '').toLowerCase();
-          const trigCondLower = (o.triggerCondition || '').toLowerCase();
-          const isStop = orderTypeLower.includes('stop') || trigCondLower.includes('stop');
-          const isTp = orderTypeLower.includes('take profit') || orderTypeLower.includes('tp');
-
-          let side = isSell ? 4 : 2; // 4 = Close Long (Sell), 2 = Close Short (Buy)
-          let triggerType = 0;
-          if (isSell) {
-            triggerType = isStop ? 2 : isTp ? 1 : 0;
-          } else {
-            triggerType = isStop ? 1 : isTp ? 2 : 0;
-          }
-
-          return {
-            id: String(o.oid),
-            symbol: o.coin.includes('_') ? o.coin : `${o.coin}_USDT`,
-            side,
-            triggerType,
-            triggerPrice: Number(o.triggerPx || o.limitPx),
-            vol: Number(o.sz),
-            createTime: o.timestamp,
-          };
-        });
+      return await this.fetchBestBidAsk(this.normalizeCoin(symbol));
     } catch {
-      return [];
+      return null;
     }
+  }
+
+  private async fetchBestBidAsk(coin: string): Promise<BestBidAsk | null> {
+    const book = await this.infoClient.l2Book({ coin });
+    const bidRaw = book?.levels?.[0]?.[0]?.px;
+    const askRaw = book?.levels?.[1]?.[0]?.px;
+    const bid = bidRaw !== undefined ? Number(bidRaw) : Number.NaN;
+    const ask = askRaw !== undefined ? Number(askRaw) : Number.NaN;
+    if (!(bid > 0) || !(ask > 0)) return null;
+    return { bid, ask };
+  }
+
+  /**
+   * Submit a single order, attaching a cloid when one is available.
+   *
+   * Hyperliquid rejects a cloid it has already seen. If that (and only that)
+   * rejection is detected — from a thrown error or an `{ error }` status entry —
+   * the order is retried once without the `c` field so a retry after a lost
+   * acknowledgement does not lose the trade.
+   */
+  private async submitOrder(params: HlOrderParams, cloid?: `0x${string}`): Promise<unknown> {
+    if (!this.exchangeClient) {
+      throw new Error('Hyperliquid exchangeClient niet geïnitialiseerd — private key vereist');
+    }
+    const submit = (withCloid: boolean) => {
+      const next: HlOrderParams =
+        withCloid && cloid
+          ? { ...params, orders: params.orders.map((order) => ({ ...order, c: cloid })) }
+          : params;
+      return this.exchangeClient!.order(next);
+    };
+    try {
+      const res = await submit(Boolean(cloid));
+      const status = res.response.data.statuses[0];
+      if (cloid && isDuplicateCloidError(status)) {
+        const retry = await submit(false);
+        return retry.response.data.statuses[0];
+      }
+      return status;
+    } catch (err) {
+      if (cloid && isDuplicateCloidError(err)) {
+        const retry = await submit(false);
+        return retry.response.data.statuses[0];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Resolve a numeric venue order id for a submission.
+   *
+   * Uses the immediate `filled`/`resting` acknowledgement when present; otherwise
+   * (e.g. `waitingForFill` / `waitingForTrigger`) polls `orderStatus` by cloid a
+   * few times. Returns null rather than fabricating an id.
+   */
+  private async resolveOrderId(cloid: `0x${string}` | undefined, status: unknown): Promise<string | null> {
+    const direct = extractHlOrderId(status);
+    if (direct) return direct;
+    if (!cloid || !this.walletAddress) return null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await this.infoClient.orderStatus({ user: this.walletAddress as `0x${string}`, oid: cloid });
+        if (res.status === 'order') {
+          const oid = res.order.order.oid;
+          if (oid !== undefined && oid !== null) return String(oid);
+        }
+      } catch {
+        // Transient — retry a couple of times before giving up.
+      }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 250));
+    }
+    return null;
   }
 
   private async getCoinMeta(symbol: string): Promise<{ assetId: number; szDecimals: number; maxLeverage: number; coin: string }> {

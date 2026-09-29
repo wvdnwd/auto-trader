@@ -29,7 +29,13 @@ export type Ticker = {
   bid1?: number;
   /** Best ask price from orderbook. */
   ask1?: number;
-  /** Bid-ask spread as a fraction of price, e.g. 0.0012 = 0.12%. */
+  /**
+   * Bid-ask spread as a fraction of price, e.g. 0.0012 = 0.12%.
+   *
+   * NOTE: this is an impact-price proxy derived from the ticker, not a live L2
+   * touch. Live entries read the real best bid/ask from the exchange adapter;
+   * this value is only the paper-path / fallback estimate.
+   */
   spreadPct?: number;
   /** 24h quote volume, used to filter illiquid markets. */
   quoteVolume24h: number;
