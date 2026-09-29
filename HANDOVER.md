@@ -94,6 +94,36 @@ ssh spiceprice@192.168.1.91 "pm2 logs traderr --lines 50"
 ssh spiceprice@192.168.1.91 "pm2 restart traderr"
 ```
 
+### Venue-level testnet validation (Hyperliquid TESTNET smoke test)
+
+`auto-trader/trading-service/hyperliquid-testnet.spec.ts` exercises the real
+Hyperliquid order path end-to-end against **TESTNET only**: account assets,
+L2 bid/ask, a market open with a cloid, a protective stop, an atomic
+place-before-cancel stop replacement, a take-profit, a close, and a final
+flat-venue assertion. It is **skipped by default** (`bit validate trading-service`
+stays green) and refuses to run unless every guard passes:
+
+- `HYPERLIQUID_TESTNET=true` (never mainnet)
+- `HL_TESTNET_RUN=1` (explicit opt-in)
+- `HL_TESTNET_WALLET_ADDRESS` and `HL_TESTNET_PRIVATE_KEY` set to a **dedicated testnet wallet**
+- the testnet wallet/private key must **not** equal the live `.env` values
+
+Run it from the workspace root:
+
+```powershell
+$env:HL_TESTNET_RUN='1'
+$env:HYPERLIQUID_TESTNET='true'
+$env:HL_TESTNET_WALLET_ADDRESS='0x<dedicated-testnet-wallet>'
+$env:HL_TESTNET_PRIVATE_KEY='0x<dedicated-testnet-private-key>'
+# optional: $env:HL_TESTNET_SYMBOL='BTC' (default BTC)
+# optional: $env:HL_TESTNET_NOTIONAL_USD='25' (default 25, venue min ~$10)
+bit test trading-service
+```
+
+Requires a funded Hyperliquid testnet account (testnet USDC) and outbound
+network access. It performs small real orders and cleans up in `finally`
+(cancel all plan orders, close any open position). Do not run it from CI.
+
 ---
 
 ## 5. Active Strategy Profile: "High-Win-Rate AI Sniper"
