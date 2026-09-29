@@ -99,6 +99,20 @@ export function isDuplicateCloidError(value: unknown): boolean {
   return mentionsCloid && mentionsDuplicate;
 }
 
+/**
+ * Coerce a venue-reported amount (string | number | undefined) into a finite
+ * number, defaulting to 0.
+ *
+ * Hyperliquid returns every size, price and balance as a decimal string, and may
+ * omit fields on partially-populated or degraded responses. Accounting must
+ * never let `NaN`/`Infinity` leak into equity, used margin or available balance,
+ * so every numeric read funnels through here.
+ */
+function toFiniteAmount(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** Parameters accepted by the SDK's {@link ExchangeClient.order}. */
 type HlOrderParams = Parameters<ExchangeClient['order']>[0];
 
@@ -197,10 +211,16 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
   }
 
   /**
-   * Fetch USDC account balance from Hyperliquid.
-   * Supports both standard (cross-margin) and unified accounts.
-   * For unified accounts, spot USDC is already counted as margin — we use
-   * `marginSummary.accountValue` which includes spot collateral.
+   * Fetch the USDC account balance from Hyperliquid.
+   *
+   * Supports both a unified (spot-funded) account and a pure perp account:
+   *  - Unified: `equity` = spot USDC total + perp unrealised PnL. The spot total
+   *    already contains the USDC held as perp margin, so the perp
+   *    `accountValue`/margin must not be added on top of it.
+   *  - Pure perp: `equity` = `marginSummary.accountValue`, which already includes
+   *    the perp unrealised PnL.
+   * `frozen` is the perp `totalMarginUsed` the engine reads as used margin, and
+   * `available` is the free spot balance (unified) or perp `withdrawable`.
    * Results are cached for 15 s to prevent rate limiting from frequent polls.
    */
   async getAccountAssets(): Promise<ExchangeAccountAsset[]> {
@@ -221,30 +241,60 @@ export class HyperliquidExchangeAdapter implements IExchangeAdapter {
         this.infoClient.spotClearinghouseState({ user }),
       ]);
 
-      // Unified accounts: marginSummary.accountValue already includes spot collateral
-      // Standard accounts: crossMarginSummary.accountValue is perp-only
-      const marginValue = Number((perpState as { marginSummary?: { accountValue?: string } }).marginSummary?.accountValue || 0);
-      const crossValue = Number(perpState.crossMarginSummary?.accountValue || 0);
-      const perpEquity = Math.max(marginValue, crossValue);
-      const perpAvailable = Number(perpState.withdrawable || 0);
-
-      // Spot USDC (token index 0 = USDC on Hyperliquid)
-      const spotUsdc = (spotState.balances || []).find(
-        (b: { coin: string; total: string; hold: string }) => b.coin === 'USDC'
+      // ---- Hyperliquid account accounting (perp + spot / unified) ------------
+      // Hyperliquid reports perp and spot balances independently:
+      //   * perp clearinghouseState → marginSummary.accountValue (perp equity,
+      //     which already includes the perp unrealised PnL), totalMarginUsed and
+      //     withdrawable.
+      //   * spot spotClearinghouseState → USDC `total` / `hold`; on a unified
+      //     (spot-funded) account `hold` is the USDC parked as perp collateral.
+      //
+      // Invariant for a spot-funded account:
+      //   equity     = spotUsdcTotal + perpUnrealisedPnl
+      //   usedMargin = perpTotalMarginUsed
+      //   available  = spotUsdcTotal - spotUsdcHold
+      //   equity - available - usedMargin === perpUnrealisedPnl
+      // because the held spot USDC (spotHold) is the same collateral counted as
+      // perp margin (totalMarginUsed). Never add the perp `accountValue`/margin
+      // on top of the spot total: that double-counts the collateral backing the
+      // open perp position and fabricates equity plus a phantom loss.
+      const perpMargin = perpState?.marginSummary;
+      const perpAccountValue = toFiniteAmount(perpMargin?.accountValue);
+      const perpTotalMarginUsed = Math.max(0, toFiniteAmount(perpMargin?.totalMarginUsed));
+      const perpWithdrawable = Math.max(0, toFiniteAmount(perpState?.withdrawable));
+      const perpUnrealisedPnl = (perpState?.assetPositions || []).reduce(
+        (sum, p) => sum + toFiniteAmount(p?.position?.unrealizedPnl),
+        0
       );
-      const spotTotal = Number(spotUsdc?.total || 0);
-      const spotHold = Number(spotUsdc?.hold || 0);
+
+      // Spot USDC (token index 0 = USDC on Hyperliquid).
+      const spotBalances = (spotState?.balances || []) as Array<{
+        coin?: string;
+        total?: string;
+        hold?: string;
+      }>;
+      const spotUsdc = spotBalances.find((b) => b?.coin === 'USDC');
+      const spotTotal = Math.max(0, toFiniteAmount(spotUsdc?.total));
+      const spotHold = Math.max(0, toFiniteAmount(spotUsdc?.hold));
       const spotAvailable = Math.max(0, spotTotal - spotHold);
+      const hasSpot = spotTotal > 0;
 
-      // For unified accounts, marginValue already includes spot USDC — don't double count
-      const isUnified = marginValue > crossValue;
-      const totalEquity = isUnified ? perpEquity : perpEquity + spotTotal;
-      const totalAvailable = isUnified ? perpAvailable + spotAvailable : perpAvailable + spotAvailable;
-      const frozen = Math.max(0, totalEquity - totalAvailable);
+      // Unified (spot-funded) account vs. a pure perp account. On a pure perp
+      // account there is no spot USDC, so `marginSummary.accountValue` is the
+      // whole account value (it already includes the perp unrealised PnL).
+      const rawEquity = hasSpot ? spotTotal + perpUnrealisedPnl : perpAccountValue;
+      const rawAvailable = hasSpot ? spotAvailable : perpWithdrawable;
 
-      this.balanceCache = { equity: totalEquity, available: totalAvailable, frozen, at: now };
+      // `frozen` is what the engine reads as *used margin*: the perp margin the
+      // venue has actually locked up — not `equity - available`, which used to
+      // go negative and clamp to 0 while a position was open.
+      const equity = Math.max(0, toFiniteAmount(rawEquity));
+      const available = Math.max(0, Math.min(toFiniteAmount(rawAvailable), equity));
+      const frozen = perpTotalMarginUsed;
 
-      return [{ currency: 'USDC', equity: totalEquity, available: totalAvailable, frozen }];
+      this.balanceCache = { equity, available, frozen, at: now };
+
+      return [{ currency: 'USDC', equity, available, frozen }];
     } catch {
       return [];
     }
